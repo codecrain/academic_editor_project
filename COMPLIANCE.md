@@ -41,9 +41,10 @@ Required release practice:
 2. Record the git commit SHA used for the build.
 3. Record the upstream source ref used for the build.
 4. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
-5. Publish the runtime commit SHA and upstream source ref in the Tlooto open-source notice page.
-6. Preserve MPL-2.0 and third-party notices.
-7. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
+5. Run `npm run source-offer` and retain the generated source-offer note with the release evidence.
+6. Publish the runtime commit SHA and upstream source ref in the Tlooto open-source notice page.
+7. Preserve MPL-2.0 and third-party notices.
+8. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
 
 Branding policy:
 
@@ -62,6 +63,7 @@ npm run verify:public
 node --check scripts/start-editor.mjs
 node --check scripts/doctor-native-editor.mjs
 node --check scripts/audit-native-editor-runtime.mjs
+node --check scripts/export-source-offer.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
 node --check scripts/run-native-editor.mjs

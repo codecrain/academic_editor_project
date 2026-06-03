@@ -89,12 +89,16 @@ After the editor is started on a Linux server, run:
 ```bash
 npm run doctor:native -- --require-installed
 npm run audit:native
+npm run source-offer
 ```
 
 This checks that the native binaries, runtime directories, pm2 process, and
 editor port are actually available. `npm run audit:native` writes a JSON audit
 file under `.build/audits/` with the public repo commit, source ref, public
 safety result, native doctor result, pm2 status, and discovery endpoint result.
+`npm run source-offer` writes a release source-offer note under
+`.build/source-offers/` so the exact public patch commit and upstream source ref
+are retained with the deployment evidence.
 
 Runtime environment variables:
 
@@ -129,6 +133,7 @@ npm run verify:public
 node --check scripts/start-editor.mjs
 node --check scripts/doctor-native-editor.mjs
 node --check scripts/audit-native-editor-runtime.mjs
+node --check scripts/export-source-offer.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
 node --check scripts/run-native-editor.mjs
