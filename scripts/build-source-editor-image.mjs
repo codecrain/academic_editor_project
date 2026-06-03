@@ -52,7 +52,16 @@ function writeUtf8Lf(filePath, text) {
   writeFileSync(filePath, text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
 }
 
+function assertSafeBuildDir(contextDir) {
+  const resolved = path.resolve(contextDir);
+  const repoRoot = path.resolve('.');
+  if (resolved === repoRoot || resolved === path.parse(resolved).root || !resolved.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error(`Unsafe source image build directory: ${resolved}. Use a directory inside this repository, such as .build/document-editor-source-image.`);
+  }
+}
+
 function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
+  assertSafeBuildDir(contextDir);
   const checkoutDir = path.join(contextDir, 'official-online');
   const buildContextDir = path.join(contextDir, 'from-source-gh-action');
 

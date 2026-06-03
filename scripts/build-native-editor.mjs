@@ -32,7 +32,16 @@ function writeUtf8Lf(filePath, text) {
   writeFileSync(filePath, text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
 }
 
+function assertSafeBuildDir(contextRoot) {
+  const resolved = path.resolve(contextRoot);
+  const repoRoot = path.resolve('.');
+  if (resolved === repoRoot || resolved === path.parse(resolved).root || !resolved.startsWith(`${repoRoot}${path.sep}`)) {
+    throw new Error(`Unsafe native build directory: ${resolved}. Use a directory inside this repository, such as .build/native-editor.`);
+  }
+}
+
 function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
+  assertSafeBuildDir(contextRoot);
   const checkoutDir = path.join(contextRoot, 'official-online');
   const buildContextDir = path.join(contextRoot, 'from-source-gh-action');
 
