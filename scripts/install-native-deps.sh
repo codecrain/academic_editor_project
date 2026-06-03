@@ -12,6 +12,17 @@ if ! command -v sudo >/dev/null 2>&1; then
 fi
 
 sudo apt-get update
+
+CHROMIUM_PACKAGE="chromium-browser"
+if [ -r /etc/os-release ]; then
+  . /etc/os-release
+  case "${ID:-}" in
+    debian)
+      CHROMIUM_PACKAGE="chromium"
+      ;;
+  esac
+fi
+
 DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   libpng16-16 fontconfig adduser cpio tzdata \
   findutils nano libcap2-bin openssl openssh-client \
@@ -20,7 +31,7 @@ DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   ca-certificates libnss-wrapper \
   libpoco-dev python3-polib libcap-dev npm \
   libpam-dev libzstd-dev wget git build-essential libtool \
-  python3-lxml libpng-dev libcppunit-dev pkg-config snapd chromium-browser \
+  python3-lxml libpng-dev libcppunit-dev pkg-config snapd "${CHROMIUM_PACKAGE}" \
   rsync curl zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build \
   libpixman-1-dev
 
