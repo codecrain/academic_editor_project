@@ -104,6 +104,100 @@ function fetchDiscovery(port) {
   });
 }
 
+function fetchHttpText(url, maxBytes = 256 * 1024) {
+  return new Promise((resolve) => {
+    const request = http.get(url, { timeout: 5_000 }, (response) => {
+      let body = '';
+      let bytes = 0;
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        bytes += Buffer.byteLength(chunk);
+        if (bytes <= maxBytes) {
+          body += chunk;
+          return;
+        }
+        request.destroy();
+        resolve({
+          command: `GET ${url}`,
+          ok: false,
+          status: response.statusCode ?? 0,
+          bytes,
+          error: `response exceeded ${maxBytes} bytes`,
+        });
+      });
+      response.on('end', () => {
+        resolve({
+          command: `GET ${url}`,
+          ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 500),
+          status: response.statusCode ?? 0,
+          bytes,
+          body,
+        });
+      });
+    });
+
+    request.once('timeout', () => {
+      request.destroy();
+      resolve({ command: `GET ${url}`, ok: false, status: 0, bytes: 0, error: 'timeout' });
+    });
+    request.once('error', (error) => {
+      resolve({ command: `GET ${url}`, ok: false, status: 0, bytes: 0, error: error.message });
+    });
+  });
+}
+
+async function scanBrowserBranding(port) {
+  const discoveryUrl = `http://127.0.0.1:${port}/hosting/discovery`;
+  const discovery = await fetchHttpText(discoveryUrl);
+  if (!discovery.ok || !discovery.body) {
+    return {
+      command: `scan ${discoveryUrl}`,
+      ok: false,
+      status: discovery.status ?? 0,
+      bytes: discovery.bytes ?? 0,
+      error: discovery.error || 'discovery unavailable',
+    };
+  }
+
+  const browserMatch = discovery.body.match(/\/browser\/([^/?]+)\/cool\.html/i);
+  if (!browserMatch) {
+    return {
+      command: `scan ${discoveryUrl}`,
+      ok: false,
+      status: discovery.status ?? 0,
+      bytes: discovery.bytes ?? 0,
+      error: 'browser asset hash not found in discovery',
+    };
+  }
+
+  const browserHash = browserMatch[1];
+  const browserUrl = `http://127.0.0.1:${port}/browser/${browserHash}/cool.html`;
+  const browser = await fetchHttpText(browserUrl);
+  const body = browser.body ?? '';
+  const blockedPatterns = [
+    /Collabora Online/i,
+    /Collabora Office/i,
+    /Development Edition/i,
+    /CollaboraOnline/i,
+    /collaboraonline/i,
+    /collaboraoffice/i,
+    /collabora-office-white\.svg/i,
+  ];
+  const matches = blockedPatterns
+    .map((pattern) => pattern.source)
+    .filter((pattern) => new RegExp(pattern, 'i').test(body));
+
+  return {
+    command: `scan ${browserUrl}`,
+    ok: browser.ok === true && matches.length === 0,
+    status: browser.status ?? 0,
+    bytes: browser.bytes ?? 0,
+    browserHash,
+    matches,
+    error: browser.error ?? '',
+  };
+}
+
 function defaultOutputPath() {
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   return path.join(repoRoot, '.build', 'audits', `native-runtime-audit-${timestamp}.json`);
@@ -143,6 +237,9 @@ async function main() {
       }),
       discovery: Number.isFinite(hostPort)
         ? await fetchDiscovery(hostPort)
+        : { command: 'parse EDITOR_HOST_PORT', ok: false, status: 0, bytes: 0, error: 'invalid port' },
+      browserBranding: Number.isFinite(hostPort)
+        ? await scanBrowserBranding(hostPort)
         : { command: 'parse EDITOR_HOST_PORT', ok: false, status: 0, bytes: 0, error: 'invalid port' },
     },
   };
