@@ -44,7 +44,19 @@ function runQuiet(command, args, options = {}) {
 
 function commandExists(command) {
   const result = runQuiet('sh', ['-lc', `command -v ${command}`], { timeout: 3_000 });
-  return result.status === 0 && Boolean(String(result.stdout ?? '').trim());
+  if (result.status === 0 && Boolean(String(result.stdout ?? '').trim())) {
+    return true;
+  }
+
+  return ['/usr/sbin', '/sbin'].some((directory) => {
+    const candidate = path.join(directory, command);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 function canConnect(host, port) {
