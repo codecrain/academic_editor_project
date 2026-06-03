@@ -114,6 +114,34 @@ if images_dir.exists():
 print(f"[debrand] patched {changed} source files")
 PY
 
+# Build compatibility patch for upstream main as checked on 2026-06-03:
+# some compilers treat streaming std::chrono::hours as ambiguous because the
+# source has overloads for minutes/seconds/milliseconds/microseconds but not
+# hours. Keep this source patch public with the debranding history so the native
+# runtime remains reproducible and MPL source obligations are traceable.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+util = root / "common" / "Util.hpp"
+if util.exists():
+    text = util.read_text(encoding="utf-8", errors="ignore")
+    if "const std::chrono::hours&" not in text:
+        marker = "inline std::ostream& operator<<(std::ostream& os, const std::chrono::minutes& s)"
+        patch = """inline std::ostream& operator<<(std::ostream& os, const std::chrono::hours& h)
+{
+    os << h.count() << \"h\";
+    return os;
+}
+
+"""
+        if marker not in text:
+            raise SystemExit("[debrand] cannot find chrono stream overload insertion point")
+        util.write_text(text.replace(marker, patch + marker), encoding="utf-8", newline="\n")
+        print("[debrand] patched chrono hours stream overload")
+PY
+
 if grep -RIn --exclude-dir=.git --exclude='*.md' --exclude='COPYING*' --exclude='LICENSE*' \
   -E 'Collabora Online Development Edition|Collabora Online Welcome|Collabora Office|Oops, there is a problem connecting to Collabora Online|Your Collabora Online server needs updating|collabora-office-white\.svg|CollaboraOnline|collaboraonline|collaboraoffice' \
   "${ROOT_DIR}/browser" "${ROOT_DIR}/wsd" >/tmp/academic-editor-branding-scan.txt 2>/dev/null; then
