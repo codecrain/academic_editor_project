@@ -61,6 +61,9 @@ Default output image: `academic-editor/document-editor:source`.
 Useful Docker build environment variables:
 
 - `EDITOR_IMAGE`: output image tag. Default: `academic-editor/document-editor:source`.
+- `EDITOR_AUTO_BUILD_SOURCE_IMAGE`: set to `true` to let `npm run start` build
+  the source fallback image automatically when it is missing. Keep this for
+  local development only; production should use native mode.
 - `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://github.com/CollaboraOnline/online.git`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
 - `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.

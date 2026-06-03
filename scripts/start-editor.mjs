@@ -275,6 +275,10 @@ function runDocker(dockerCommand, args) {
   return run(dockerCommand[0], [...dockerCommand.slice(1), ...args]);
 }
 
+function shouldAutoBuildSourceImage() {
+  return readEnv('EDITOR_AUTO_BUILD_SOURCE_IMAGE', 'false') === 'true';
+}
+
 function dockerImageExists(dockerCommand, image) {
   return runDockerQuiet(dockerCommand, ['image', 'inspect', image]).status === 0;
 }
@@ -417,9 +421,19 @@ async function startDocker(context) {
   const dockerCommand = await waitForDocker();
 
   if (normalizeImageName(image) === normalizeImageName(DEFAULT_EDITOR_IMAGE) && !dockerImageExists(dockerCommand, image)) {
-    throw new Error(
-      `Document editor image ${image} is not built yet. Prefer native runtime on Linux or run "npm run build:source" for Docker fallback.`,
-    );
+    if (!shouldAutoBuildSourceImage()) {
+      throw new Error(
+        `Document editor image ${image} is not built yet. Prefer native runtime on Linux or run "npm run build:source" for Docker fallback.`,
+      );
+    }
+
+    console.log(`[editor] source-built fallback image ${image} is missing; building it now...`);
+    run(process.execPath, [path.join(__dirname, 'build-source-editor-image.mjs')], {
+      env: {
+        ...process.env,
+        EDITOR_IMAGE: image,
+      },
+    });
   }
 
   const expectedRuntime = {
