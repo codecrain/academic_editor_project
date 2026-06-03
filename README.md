@@ -24,17 +24,40 @@ database, project/report UI, and deployment secrets.
 
 ## Production Build
 
+Preferred production path:
+
+1. Build the native runtime in this public repository with GitHub Actions.
+2. Publish the `native-*` tag release artifact.
+3. Install that artifact on the private Linux service server.
+4. Run the editor with pm2.
+
+The server-side install command is:
+
+```bash
+npm run deps:native
+EDITOR_NATIVE_RELEASE_TAG=native-YYYYMMDD npm run install:native:artifact
+npm run start:native
+npm run doctor:native -- --require-installed
+```
+
+Direct server builds are still supported on larger Linux build hosts:
+
 ```bash
 npm run deps:native
 npm run build:native
+npm run package:native
 npm run install:native
-npm run doctor:native
 ```
 
 The native build fetches official upstream source-build files, injects this
 repository's public debranding patch, builds the online server/browser from
 source, uses the official engine asset archive by default, and installs the
 resulting runtime into the Linux server filesystem. It does not need Docker.
+
+Small app servers should not compile the runtime directly. The source checkout
+and native build can need several GB of temporary disk. Use the GitHub Actions
+artifact route for development, staging, and production servers unless the host
+has enough free disk and memory for a source build.
 
 The full engine source build is still available for a larger build host by
 setting `EDITOR_ENGINE_ASSETS=source`, but it needs substantially more disk and
@@ -50,6 +73,9 @@ Useful native build environment variables:
   memory for a full engine source build.
 - `EDITOR_NATIVE_BUILD_DIR`: local temporary build directory. Default: `.build/native-editor`.
 - `EDITOR_NATIVE_PREPARE_ONLY`: set to `true` to prepare the generated native build context without compiling.
+- `EDITOR_NATIVE_ARTIFACT_URL`: direct artifact URL for `npm run install:native:artifact`.
+- `EDITOR_NATIVE_RELEASE_TAG`: GitHub release tag such as `native-YYYYMMDD`.
+- `EDITOR_NATIVE_ARTIFACT`: local tarball path for `npm run install:native:artifact`.
 - `EDITOR_NATIVE_RUNTIME_DIR`: runtime state directory. Default: `/var/lib/academic-editor`.
 - `EDITOR_NATIVE_CACHE_DIR`: runtime cache directory. Default: `/var/cache/academic-editor`.
 
@@ -145,6 +171,8 @@ node --check scripts/audit-native-editor-runtime.mjs
 node --check scripts/export-source-offer.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
+node --check scripts/install-native-artifact.mjs
+node --check scripts/package-native-artifact.mjs
 node --check scripts/run-native-editor.mjs
 node --check scripts/build-source-editor-image.mjs
 ```

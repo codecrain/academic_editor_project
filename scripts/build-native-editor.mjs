@@ -84,6 +84,7 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     path.join(buildContextDir, 'debrand-online.sh'),
   );
   writeUtf8Lf(path.join(buildContextDir, 'debrand-online.sh'), readUtf8Lf(path.join(buildContextDir, 'debrand-online.sh')));
+  rmSync(checkoutDir, { recursive: true, force: true });
 
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
   let buildScript = readUtf8Lf(buildScriptPath);
@@ -95,6 +96,10 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
     `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
       `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
+  );
+  buildScript = buildScript.replace(
+    /git clone --depth=1 --branch \$COLLABORA_ONLINE_BRANCH "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
+    'git clone --depth=1 --filter=blob:none --branch $COLLABORA_ONLINE_BRANCH "$COLLABORA_ONLINE_REPO" online || exit 1',
   );
   if (!buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) {
     throw new Error('Failed to switch POCO source build to the static_release target.');

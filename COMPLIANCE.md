@@ -3,7 +3,8 @@
 Commercial use status:
 
 The intended production path is the native runtime from this public repository,
-installed on the Linux server and managed by pm2. The online server/browser is
+built in a public CI/build environment, installed on the Linux service server
+from the release artifact, and managed by pm2. The online server/browser is
 built from public source with public source patches. The engine uses the official
 public engine asset archive by default so small application servers do not need
 to compile the full office engine locally. The repository is licensed under
@@ -49,17 +50,22 @@ Do not use:
 
 Required release practice:
 
-1. Build the native editor runtime from this repository.
-2. Record the git commit SHA used for the build.
-3. Record the upstream source ref used for the build.
-4. Record the engine asset URL, or record `source` when a full engine source
+1. Build the native editor runtime from this public repository, preferably with
+   the `Native Editor Runtime` GitHub Actions workflow.
+2. Publish a `native-*` release artifact or retain the generated artifact with
+   the deployment evidence.
+3. Install the artifact on the private service server with
+   `npm run install:native:artifact`.
+4. Record the git commit SHA used for the build.
+5. Record the upstream source ref used for the build.
+6. Record the engine asset URL, or record `source` when a full engine source
    build is used.
-5. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
-6. Run `npm run source-offer` and retain the generated source-offer note with the release evidence.
-7. Publish the runtime commit SHA, upstream source ref, and engine asset/source
+7. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
+8. Run `npm run source-offer` and retain the generated source-offer note with the release evidence.
+9. Publish the runtime commit SHA, upstream source ref, and engine asset/source
    choice in the Tlooto open-source notice page.
-8. Preserve MPL-2.0 and third-party notices.
-9. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
+10. Preserve MPL-2.0 and third-party notices.
+11. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
 
 Branding policy:
 
@@ -81,6 +87,8 @@ node --check scripts/audit-native-editor-runtime.mjs
 node --check scripts/export-source-offer.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
+node --check scripts/install-native-artifact.mjs
+node --check scripts/package-native-artifact.mjs
 node --check scripts/run-native-editor.mjs
 node --check scripts/build-source-editor-image.mjs
 ```

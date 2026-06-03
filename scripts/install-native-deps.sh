@@ -23,6 +23,11 @@ if [ -r /etc/os-release ]; then
   esac
 fi
 
+CHROMIUM_PACKAGES=("${CHROMIUM_PACKAGE}")
+if [ "${EDITOR_NATIVE_SKIP_CHROMIUM:-false}" = "true" ]; then
+  CHROMIUM_PACKAGES=()
+fi
+
 DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   libpng16-16 fontconfig adduser cpio tzdata \
   findutils nano libcap2-bin openssl openssh-client \
@@ -31,7 +36,7 @@ DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   ca-certificates libnss-wrapper \
   libpoco-dev python3-polib libcap-dev npm \
   libpam-dev libzstd-dev wget git build-essential libtool \
-  python3-lxml libpng-dev libcppunit-dev pkg-config snapd "${CHROMIUM_PACKAGE}" \
+  python3-lxml libpng-dev libcppunit-dev pkg-config snapd "${CHROMIUM_PACKAGES[@]}" \
   rsync curl zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build \
   libpixman-1-dev
 
@@ -41,7 +46,7 @@ if ! command -v node >/dev/null 2>&1 || ! node --version | grep -Eq '^v20\.'; th
   sudo apt-get -y install nodejs
 fi
 
-if ! command -v pm2 >/dev/null 2>&1; then
+if [ "${EDITOR_NATIVE_SKIP_PM2:-false}" != "true" ] && ! command -v pm2 >/dev/null 2>&1; then
   sudo npm install -g pm2
 fi
 
