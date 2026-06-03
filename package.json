@@ -1,12 +1,16 @@
 {
   "name": "academic-editor-project",
   "version": "0.0.0",
-  "private": true,
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
+    "deps:native": "bash scripts/install-native-deps.sh",
+    "build:native": "node scripts/build-native-editor.mjs",
+    "install:native": "node scripts/install-native-editor.mjs",
     "build:source": "node scripts/build-source-editor-image.mjs",
     "start": "node scripts/start-editor.mjs",
+    "start:native": "node scripts/start-editor.mjs --runtime native",
+    "start:docker": "node scripts/start-editor.mjs --runtime docker",
     "start:dev": "node scripts/start-editor.mjs",
     "verify:public": "node scripts/verify-public-safety.mjs",
     "stop": "node scripts/stop-editor.mjs",
