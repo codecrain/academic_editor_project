@@ -1,0 +1,76 @@
+name: Native Editor Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Upstream online branch or ref to build
+        required: false
+        default: main
+      engine_assets:
+        description: Public engine asset tarball URL. Use source to build engine too.
+        required: false
+        default: https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz
+  push:
+    tags:
+      - native-*
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout public editor source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify public repository safety
+        run: npm run verify:public
+
+      - name: Install native build dependencies
+        run: npm run deps:native
+        env:
+          EDITOR_NATIVE_SKIP_CHROMIUM: 'true'
+          EDITOR_NATIVE_SKIP_PM2: 'true'
+
+      - name: Build native editor runtime from public source
+        run: npm run build:native
+        env:
+          EDITOR_SOURCE_REF: ${{ github.event.inputs.source_ref || 'main' }}
+          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz' }}
+
+      - name: Package native runtime artifact
+        run: npm run package:native
+        env:
+          EDITOR_SOURCE_REF: ${{ github.event.inputs.source_ref || 'main' }}
+          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz' }}
+
+      - name: Upload native runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: academic-editor-native-linux-x64
+          path: |
+            dist/academic-editor-native-linux-x64.tar.gz
+            dist/academic-editor-native-linux-x64.tar.gz.sha256
+            dist/academic-editor-native-linux-x64.metadata.json
+          if-no-files-found: error
+
+      - name: Publish release assets for native tags
+        if: startsWith(github.ref, 'refs/tags/native-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/academic-editor-native-linux-x64.tar.gz \
+            dist/academic-editor-native-linux-x64.tar.gz.sha256 \
+            dist/academic-editor-native-linux-x64.metadata.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Source-built academic editor native runtime artifact. See COMPLIANCE.md and metadata for source/ref history."
