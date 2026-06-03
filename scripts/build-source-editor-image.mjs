@@ -44,6 +44,14 @@ function assertNotCodeImage(image) {
   }
 }
 
+function readUtf8Lf(filePath) {
+  return readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function writeUtf8Lf(filePath, text) {
+  writeFileSync(filePath, text.replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+}
+
 function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   const checkoutDir = path.join(contextDir, 'official-online');
   const buildContextDir = path.join(contextDir, 'from-source-gh-action');
@@ -79,9 +87,10 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
     path.resolve('branding', 'debrand-online.sh'),
     path.join(buildContextDir, 'debrand-online.sh'),
   );
+  writeUtf8Lf(path.join(buildContextDir, 'debrand-online.sh'), readUtf8Lf(path.join(buildContextDir, 'debrand-online.sh')));
 
   const dockerfilePath = path.join(buildContextDir, 'Dockerfile');
-  let dockerfile = readFileSync(dockerfilePath, 'utf8');
+  let dockerfile = readUtf8Lf(dockerfilePath);
   dockerfile = dockerfile
     .replace(
       /^ENV ENGINE_ASSETS=.*$/m,
@@ -99,10 +108,10 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
       /^ENV ONLINE_EXTRA_BUILD_OPTIONS=.*$/m,
       'ARG ONLINE_EXTRA_BUILD_OPTIONS=--enable-experimental\nENV ONLINE_EXTRA_BUILD_OPTIONS=${ONLINE_EXTRA_BUILD_OPTIONS}',
     );
-  writeFileSync(dockerfilePath, dockerfile);
+  writeUtf8Lf(dockerfilePath, dockerfile);
 
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
-  let buildScript = readFileSync(buildScriptPath, 'utf8');
+  let buildScript = readUtf8Lf(buildScriptPath);
   buildScript = buildScript.replace(
     /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
     `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
@@ -111,7 +120,7 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the generated source build script.');
   }
-  writeFileSync(buildScriptPath, buildScript);
+  writeUtf8Lf(buildScriptPath, buildScript);
 
   return buildContextDir;
 }
