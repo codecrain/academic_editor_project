@@ -26,12 +26,12 @@ function runGit(args) {
 }
 
 function getTrackedAndUntrackedFiles() {
-  const output = runGit(['status', '--short', '--untracked-files=all']);
+  const output = runGit(['ls-files', '--cached', '--others', '--exclude-standard']);
   return output
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean)
-    .map((line) => line.replace(/^..\s+/, '').replace(/^"?(.+?)"?$/, '$1'))
+    .map((line) => line.replace(/^"?(.+?)"?$/, '$1'))
     .filter((file) => !file.includes(' -> '));
 }
 
