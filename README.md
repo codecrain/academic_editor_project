@@ -39,7 +39,7 @@ default `EDITOR_ENGINE_ASSETS` is empty so the engine is built from source.
 Useful build environment variables:
 
 - `EDITOR_IMAGE`: output image tag. Default: `academic-editor/document-editor:source`.
-- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://gerrit.collaboraoffice.com/online`.
+- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://github.com/CollaboraOnline/online.git`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
 - `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.
 - `EDITOR_SOURCE_BUILD_DIR`: local temporary build directory. Default: `.build/document-editor-source-image`.

@@ -10,7 +10,7 @@ import path from 'node:path';
 
 const DEFAULT_IMAGE = 'academic-editor/document-editor:source';
 const DEFAULT_DOCKER_REPO = 'https://github.com/CollaboraOnline/online.git';
-const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
+const DEFAULT_SOURCE_REPO = 'https://github.com/CollaboraOnline/online.git';
 const DEFAULT_SOURCE_REF = 'main';
 const BLOCKED_CODE_IMAGES = new Set([
   'collabora/code',
@@ -98,7 +98,7 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
     )
     .replace(
       /^ENV COLLABORA_ONLINE_REPO=.*$/m,
-      'ARG COLLABORA_ONLINE_REPO=https://gerrit.collaboraoffice.com/online\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
+      'ARG COLLABORA_ONLINE_REPO=https://github.com/CollaboraOnline/online.git\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
     )
     .replace(
       /^ENV COLLABORA_ONLINE_BRANCH=.*$/m,
