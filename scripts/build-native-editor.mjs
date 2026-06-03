@@ -88,10 +88,17 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
   let buildScript = readUtf8Lf(buildScriptPath);
   buildScript = buildScript.replace(
+    /make -j \$\(nproc\)(\r?\n\s+make install)/,
+    'make -j $(nproc) static_release$1',
+  );
+  buildScript = buildScript.replace(
     /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
     `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
       `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
   );
+  if (!buildScript.includes('make -j $(nproc) static_release')) {
+    throw new Error('Failed to switch POCO source build to the static_release target.');
+  }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
   }
