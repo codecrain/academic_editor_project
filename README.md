@@ -78,6 +78,9 @@ Useful native build environment variables:
 - `EDITOR_NATIVE_ARTIFACT`: local tarball path for `npm run install:native:artifact`.
 - `EDITOR_NATIVE_RUNTIME_DIR`: runtime state directory. Default: `/var/lib/academic-editor`.
 - `EDITOR_NATIVE_CACHE_DIR`: runtime cache directory. Default: `/var/cache/academic-editor`.
+- `EDITOR_DISABLE_COOL_USER_CHECKING`: set to `false` only when the pm2
+  process runs as the dedicated `cool` OS user. Default: `true` for Bitnami/app
+  server pm2 deployments.
 
 ## Optional Docker Fallback
 
@@ -146,6 +149,9 @@ Runtime environment variables:
 - `EDITOR_ALLOWED_DOMAIN`: WOPI host allow-list pattern. Default: `.*`.
 - `EDITOR_ADMIN_USERNAME`: admin username for the editor runtime. Default: `admin`.
 - `EDITOR_ADMIN_PASSWORD`: admin password for local runtime only. Override in private deployment secrets.
+- `EDITOR_DISABLE_COOL_USER_CHECKING`: default `true` so pm2 can run under the
+  application server user. Set `false` only after moving the editor PM2 process
+  to the dedicated `cool` OS user.
 - `EDITOR_EXTRA_PARAMS`: runtime flags. Defaults disable SSL inside the container, derive proxy termination from `EDITOR_PUBLIC_URL`, and disable welcome/update popups.
 - `EDITOR_IMAGE`: Docker fallback image. Default: `academic-editor/document-editor:source`.
 - `EDITOR_CONTAINER_NAME`: Docker fallback container name. Default: `academic-editor-local`.

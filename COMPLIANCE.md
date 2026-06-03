@@ -66,6 +66,10 @@ Required release practice:
    choice in the Tlooto open-source notice page.
 10. Preserve MPL-2.0 and third-party notices.
 11. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
+12. Prefer running the native editor PM2 process as a dedicated `cool` OS user in
+   hardened production. Bitnami/app-server PM2 deployments may set
+   `EDITOR_DISABLE_COOL_USER_CHECKING=true` to run under the application user,
+   but this is an operational security tradeoff and not a license workaround.
 
 Branding policy:
 

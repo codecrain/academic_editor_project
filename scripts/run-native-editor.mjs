@@ -57,6 +57,7 @@ function main() {
   const hostPort = readEnv('EDITOR_HOST_PORT', '9980');
   const extraParams = readEnv('EDITOR_EXTRA_PARAMS', '--o:ssl.enable=false --o:ssl.termination=true --o:welcome.enable=false --o:allow_update_popup=false');
   const coolwsd = readEnv('EDITOR_NATIVE_COOLWSD_BIN', '/usr/bin/coolwsd');
+  const disableCoolUserChecking = readEnv('EDITOR_DISABLE_COOL_USER_CHECKING', 'true') === 'true';
 
   mkdirSync(path.join(runtimeDir, 'child-roots'), { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
@@ -72,6 +73,7 @@ function main() {
 
   const args = [
     '--use-env-vars',
+    ...(disableCoolUserChecking ? ['--disable-cool-user-checking'] : []),
     `--port=${hostPort}`,
     `--o:sys_template_path=${path.join(runtimeDir, 'systemplate')}`,
     `--o:child_root_path=${path.join(runtimeDir, 'child-roots')}`,
