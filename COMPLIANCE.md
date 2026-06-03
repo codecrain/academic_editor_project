@@ -40,7 +40,7 @@ Required release practice:
 1. Build the native editor runtime from this repository.
 2. Record the git commit SHA used for the build.
 3. Record the upstream source ref used for the build.
-4. Run `npm run doctor:native -- --require-installed` on the server after starting the runtime.
+4. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
 5. Publish the runtime commit SHA and upstream source ref in the Tlooto open-source notice page.
 6. Preserve MPL-2.0 and third-party notices.
 7. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
@@ -61,6 +61,7 @@ Run before commit:
 npm run verify:public
 node --check scripts/start-editor.mjs
 node --check scripts/doctor-native-editor.mjs
+node --check scripts/audit-native-editor-runtime.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
 node --check scripts/run-native-editor.mjs

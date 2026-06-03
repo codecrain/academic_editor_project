@@ -8,6 +8,7 @@
     "deps:native": "bash scripts/install-native-deps.sh",
     "build:native": "node scripts/build-native-editor.mjs",
     "install:native": "node scripts/install-native-editor.mjs",
+    "audit:native": "node scripts/audit-native-editor-runtime.mjs",
     "build:source": "node scripts/build-source-editor-image.mjs",
     "start": "node scripts/start-editor.mjs",
     "start:native": "node scripts/start-editor.mjs --runtime native",
