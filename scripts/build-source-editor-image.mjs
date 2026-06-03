@@ -13,6 +13,7 @@ const DEFAULT_IMAGE = 'academic-editor/document-editor:source';
 const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
+const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 const BLOCKED_CODE_IMAGES = new Set([
@@ -159,7 +160,8 @@ function main() {
   const sourceRepo = readEnv('EDITOR_SOURCE_REPO', DEFAULT_SOURCE_REPO);
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
-  const engineAssets = readEnv('EDITOR_ENGINE_ASSETS', '');
+  const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
+  const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const noCache = readEnv('EDITOR_DOCKER_NO_CACHE', 'false') === 'true';
   const prepareOnly = readEnv('EDITOR_PREPARE_ONLY', 'false') === 'true';
   const contextRoot = readEnv(
@@ -171,9 +173,9 @@ function main() {
   assertNotCodeImage(image);
 
   if (engineAssets) {
-    console.warn(
-      '[editor] EDITOR_ENGINE_ASSETS is set. This uses a prebuilt engine archive; keep it empty unless legal review explicitly accepts that binary source.',
-    );
+    console.log(`[editor] using engine assets: ${engineAssets}`);
+  } else {
+    console.log('[editor] EDITOR_ENGINE_ASSETS disables engine assets; building the engine from source.');
   }
 
   const buildContextDir = prepareOfficialDockerContext(resolvedContextRoot, dockerRepo, dockerRef);

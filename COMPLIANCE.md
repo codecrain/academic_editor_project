@@ -2,10 +2,13 @@
 
 Commercial use status:
 
-The intended production path is the native source-built runtime from this public
-repository, installed on the Linux server and managed by pm2. The repository is
-licensed under MPL-2.0 and keeps the runtime source patches public. This is the
-path to use for commercial SaaS deployment.
+The intended production path is the native runtime from this public repository,
+installed on the Linux server and managed by pm2. The online server/browser is
+built from public source with public source patches. The engine uses the official
+public engine asset archive by default so small application servers do not need
+to compile the full office engine locally. The repository is licensed under
+MPL-2.0 and keeps the runtime source patches public. This is the path to use for
+commercial SaaS deployment.
 
 Official basis checked on 2026-06-03:
 
@@ -30,13 +33,18 @@ Official basis checked on 2026-06-03:
   edition and not recommended for production. This repository must not use that
   image as a Tlooto SaaS runtime.
   https://www.collaboraonline.com/code/
+- Collabora's public build guide documents the
+  `engine-main-assets.tar.gz` path for building the online side without
+  compiling the full engine, and says that path is enough when working only on
+  the online side or when quickly getting going.
+  https://collaboraonline.github.io/post/build-code/
 
 Do not use:
 
 - `collabora/code`
 - Docker Hub CODE images
 - Docker as the default production runtime when native Linux execution is available
-- prebuilt engine archives unless separately reviewed
+- private or undocumented binary editor packages
 - private Tlooto secrets or service configuration in this public repository
 
 Required release practice:
@@ -44,11 +52,14 @@ Required release practice:
 1. Build the native editor runtime from this repository.
 2. Record the git commit SHA used for the build.
 3. Record the upstream source ref used for the build.
-4. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
-5. Run `npm run source-offer` and retain the generated source-offer note with the release evidence.
-6. Publish the runtime commit SHA and upstream source ref in the Tlooto open-source notice page.
-7. Preserve MPL-2.0 and third-party notices.
-8. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
+4. Record the engine asset URL, or record `source` when a full engine source
+   build is used.
+5. Run `npm run doctor:native -- --require-installed` and `npm run audit:native` on the server after starting the runtime.
+6. Run `npm run source-offer` and retain the generated source-offer note with the release evidence.
+7. Publish the runtime commit SHA, upstream source ref, and engine asset/source
+   choice in the Tlooto open-source notice page.
+8. Preserve MPL-2.0 and third-party notices.
+9. Keep WOPI host secrets and service configuration only in the private service repository or deployment secret store.
 
 Branding policy:
 

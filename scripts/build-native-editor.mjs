@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
+const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -110,7 +111,8 @@ function main() {
   const sourceRepo = readEnv('EDITOR_SOURCE_REPO', DEFAULT_SOURCE_REPO);
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
-  const engineAssets = readEnv('EDITOR_ENGINE_ASSETS', '');
+  const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
+  const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const prepareOnly = readEnv('EDITOR_NATIVE_PREPARE_ONLY', 'false') === 'true';
   const buildContextDir = prepareBuildContext(resolvedContextRoot, dockerRepo, dockerRef);
 

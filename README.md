@@ -32,15 +32,22 @@ npm run doctor:native
 ```
 
 The native build fetches official upstream source-build files, injects this
-repository's public debranding patch, builds the engine and editor from source,
-and installs the resulting runtime into the Linux server filesystem. It does not
-need Docker.
+repository's public debranding patch, builds the online server/browser from
+source, uses the official engine asset archive by default, and installs the
+resulting runtime into the Linux server filesystem. It does not need Docker.
+
+The full engine source build is still available for a larger build host by
+setting `EDITOR_ENGINE_ASSETS=source`, but it needs substantially more disk and
+memory than a small application server usually has.
 
 Useful native build environment variables:
 
 - `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://gerrit.collaboraoffice.com/online`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
-- `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.
+- `EDITOR_ENGINE_ASSETS`: engine archive URL. Default:
+  `https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz`.
+  Set to `source`, `none`, or `false` only when the server has enough disk and
+  memory for a full engine source build.
 - `EDITOR_NATIVE_BUILD_DIR`: local temporary build directory. Default: `.build/native-editor`.
 - `EDITOR_NATIVE_PREPARE_ONLY`: set to `true` to prepare the generated native build context without compiling.
 - `EDITOR_NATIVE_RUNTIME_DIR`: runtime state directory. Default: `/var/lib/academic-editor`.
@@ -66,7 +73,8 @@ Useful Docker build environment variables:
   local development only; production should use native mode.
 - `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://gerrit.collaboraoffice.com/online`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
-- `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.
+- `EDITOR_ENGINE_ASSETS`: engine archive URL. Default:
+  `https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz`.
 - `EDITOR_SOURCE_BUILD_DIR`: local temporary build directory. Default: `.build/document-editor-source-image`.
 - `EDITOR_PREPARE_ONLY`: set to `true` to prepare and verify the generated Docker build context without compiling the full image.
 - `EDITOR_DOCKER_NO_CACHE`: set to `true` when a clean Docker fallback rebuild is required. Default: `false`.

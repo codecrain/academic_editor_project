@@ -4,6 +4,7 @@ import path from 'node:path';
 
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
+const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 
 function readEnv(name, fallback = '') {
   const value = process.env[name];
@@ -55,6 +56,7 @@ function buildSourceOffer() {
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const sourceDockerRepo = readEnv('EDITOR_SOURCE_DOCKER_REPO', DEFAULT_SOURCE_REPO);
   const sourceDockerRef = readEnv('EDITOR_SOURCE_DOCKER_REF', DEFAULT_SOURCE_REF);
+  const engineAssets = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
 
   return [
     'Document Editor Source Offer',
@@ -69,6 +71,7 @@ function buildSourceOffer() {
     'Upstream source used for the native runtime',
     `- EDITOR_SOURCE_REPO=${sourceRepo}`,
     `- EDITOR_SOURCE_REF=${sourceRef}`,
+    `- EDITOR_ENGINE_ASSETS=${engineAssets}`,
     '',
     'Upstream source-build context used by the build orchestration',
     `- EDITOR_SOURCE_DOCKER_REPO=${sourceDockerRepo}`,
