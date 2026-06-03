@@ -1,0 +1,16 @@
+services:
+  document-editor:
+    image: ${EDITOR_IMAGE:-academic-editor/document-editor:source}
+    container_name: ${EDITOR_CONTAINER_NAME:-academic-editor-local}
+    restart: unless-stopped
+    cap_add:
+      - MKNOD
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${EDITOR_HOST_PORT:-9980}:9980"
+    environment:
+      domain: ${EDITOR_ALLOWED_DOMAIN:-.*}
+      username: ${EDITOR_ADMIN_USERNAME:-admin}
+      password: ${EDITOR_ADMIN_PASSWORD:-document-editor-password}
+      extra_params: ${EDITOR_EXTRA_PARAMS:---o:ssl.enable=false --o:ssl.termination=true --o:welcome.enable=false --o:allow_update_popup=false}

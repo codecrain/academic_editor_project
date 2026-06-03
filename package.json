@@ -1,0 +1,15 @@
+{
+  "name": "academic-editor-project",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MPL-2.0",
+  "type": "module",
+  "scripts": {
+    "build:source": "node scripts/build-source-editor-image.mjs",
+    "start": "node scripts/start-editor.mjs",
+    "start:dev": "node scripts/start-editor.mjs",
+    "verify:public": "node scripts/verify-public-safety.mjs",
+    "stop": "node scripts/stop-editor.mjs",
+    "status": "node scripts/status-editor.mjs"
+  }
+}

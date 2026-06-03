@@ -1,0 +1,13 @@
+Academic Editor Project
+
+This repository contains source-build scripts and public patch files for a
+document editor runtime used by Tlooto-compatible WOPI hosts.
+
+The runtime is built from upstream open-source office-editor source code under
+the Mozilla Public License 2.0. This repository does not include Tlooto service
+secrets, private WOPI host code, database code, user data, or proprietary API
+logic.
+
+User-facing product branding is intentionally changed to "Document Editor" /
+"Document Engine". Required legal and copyright notices are preserved in this
+repository and in the service's open-source notice page.
