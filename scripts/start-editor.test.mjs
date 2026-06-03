@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
@@ -69,4 +70,9 @@ test('start-editor reuses an already reachable editor before Docker fallback che
   } finally {
     await close(server);
   }
+});
+
+test('native runner does not pass --version to the long-running editor process', () => {
+  const runner = readFileSync(path.join(repoRoot, 'scripts', 'run-native-editor.mjs'), 'utf8');
+  assert.doesNotMatch(runner, /['"]--version['"]/);
 });

@@ -71,7 +71,6 @@ function main() {
   }
 
   const args = [
-    '--version',
     '--use-env-vars',
     `--port=${hostPort}`,
     `--o:sys_template_path=${path.join(runtimeDir, 'systemplate')}`,
