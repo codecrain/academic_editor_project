@@ -387,6 +387,7 @@ async function startNative(context) {
   const pm2Name = readEnv('EDITOR_NATIVE_PM2_NAME', DEFAULT_NATIVE_PM2_NAME);
   const runnerPath = path.join(__dirname, 'run-native-editor.mjs');
   const describe = runQuiet('pm2', ['describe', pm2Name]);
+  const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
   const env = {
     ...process.env,
     EDITOR_ALLOWED_DOMAIN: context.allowedDomain,
@@ -395,6 +396,11 @@ async function startNative(context) {
     EDITOR_HOST_PORT: context.hostPort,
     EDITOR_EXTRA_PARAMS: context.extraParams,
   };
+
+  if (!recreate && describe.status === 0 && (await waitForEditor(context.discoveryUrl, 2_000, 500))) {
+    console.log(`[editor] native pm2 process ${pm2Name} is already ready at ${context.discoveryUrl}.`);
+    return;
+  }
 
   if (describe.status === 0) {
     console.log(`[editor] restarting native pm2 process ${pm2Name}...`);
@@ -418,6 +424,11 @@ async function startDocker(context) {
   const containerName = readEnv('EDITOR_CONTAINER_NAME', 'academic-editor-local');
   const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
   const discoveryAlreadyReachable = !recreate && (await waitForEditor(context.discoveryUrl, 2_000, 500));
+  if (discoveryAlreadyReachable) {
+    console.log(`[editor] document editor is already reachable at ${context.discoveryUrl}.`);
+    return;
+  }
+
   const dockerCommand = await waitForDocker();
 
   if (normalizeImageName(image) === normalizeImageName(DEFAULT_EDITOR_IMAGE) && !dockerImageExists(dockerCommand, image)) {
@@ -446,11 +457,6 @@ async function startDocker(context) {
       extra_params: context.extraParams,
     },
   };
-
-  if (discoveryAlreadyReachable && !dockerNames(dockerCommand, true).has(containerName)) {
-    console.log(`[editor] document editor is already reachable at ${context.discoveryUrl}.`);
-    return;
-  }
 
   if (recreate && dockerNames(dockerCommand, true).has(containerName)) {
     console.log(`[editor] recreating ${containerName}...`);

@@ -14,6 +14,7 @@
     "start:native": "node scripts/start-editor.mjs --runtime native",
     "start:docker": "node scripts/start-editor.mjs --runtime docker",
     "start:dev": "node scripts/start-editor.mjs",
+    "test:runtime": "node --test scripts/start-editor.test.mjs",
     "verify:public": "node scripts/verify-public-safety.mjs",
     "stop": "node scripts/stop-editor.mjs",
     "status": "node scripts/status-editor.mjs"
