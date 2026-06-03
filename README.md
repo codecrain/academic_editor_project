@@ -28,6 +28,7 @@ database, project/report UI, and deployment secrets.
 npm run deps:native
 npm run build:native
 npm run install:native
+npm run doctor:native
 ```
 
 The native build fetches official upstream source-build files, injects this
@@ -80,6 +81,15 @@ native install exists, otherwise Docker fallback. Production scripts should set
 `EDITOR_RUNTIME_MODE=native` so they fail fast if the native runtime was not
 installed.
 
+After the editor is started on a Linux server, run:
+
+```bash
+npm run doctor:native -- --require-installed
+```
+
+This checks that the native binaries, runtime directories, pm2 process, and
+editor port are actually available.
+
 Runtime environment variables:
 
 - `EDITOR_RUNTIME_MODE`: `auto`, `native`, or `docker`. Default: `auto`.
@@ -111,6 +121,7 @@ Run before pushing:
 ```bash
 npm run verify:public
 node --check scripts/start-editor.mjs
+node --check scripts/doctor-native-editor.mjs
 node --check scripts/build-native-editor.mjs
 node --check scripts/install-native-editor.mjs
 node --check scripts/run-native-editor.mjs

@@ -4,6 +4,7 @@
   "license": "MPL-2.0",
   "type": "module",
   "scripts": {
+    "doctor:native": "node scripts/doctor-native-editor.mjs",
     "deps:native": "bash scripts/install-native-deps.sh",
     "build:native": "node scripts/build-native-editor.mjs",
     "install:native": "node scripts/install-native-editor.mjs",
