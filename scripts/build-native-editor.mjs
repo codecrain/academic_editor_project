@@ -7,10 +7,13 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const DEFAULT_DOCKER_REPO = 'https://github.com/CollaboraOnline/online.git';
-const DEFAULT_SOURCE_REPO = 'https://github.com/CollaboraOnline/online.git';
+const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
+const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', encoding: 'utf8', ...options });
@@ -34,10 +37,13 @@ function writeUtf8Lf(filePath, text) {
 
 function assertSafeBuildDir(contextRoot) {
   const resolved = path.resolve(contextRoot);
-  const repoRoot = path.resolve('.');
   if (resolved === repoRoot || resolved === path.parse(resolved).root || !resolved.startsWith(`${repoRoot}${path.sep}`)) {
     throw new Error(`Unsafe native build directory: ${resolved}. Use a directory inside this repository, such as .build/native-editor.`);
   }
+}
+
+function resolveRepoPath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(repoRoot, value);
 }
 
 function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
@@ -73,23 +79,18 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   );
 
   cpSync(
-    path.resolve('branding', 'debrand-online.sh'),
+    path.join(repoRoot, 'branding', 'debrand-online.sh'),
     path.join(buildContextDir, 'debrand-online.sh'),
   );
   writeUtf8Lf(path.join(buildContextDir, 'debrand-online.sh'), readUtf8Lf(path.join(buildContextDir, 'debrand-online.sh')));
 
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
   let buildScript = readUtf8Lf(buildScriptPath);
-  buildScript = buildScript
-    .replace(
-      'COLLABORA_ONLINE_REPO="https://gerrit.collaboraoffice.com/online"',
-      'COLLABORA_ONLINE_REPO="https://github.com/CollaboraOnline/online.git"',
-    )
-    .replace(
-      /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
-      `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
-        `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
-    );
+  buildScript = buildScript.replace(
+    /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
+    `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
+      `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
+  );
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
   }
@@ -101,8 +102,9 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
 function main() {
   const contextRoot = readEnv(
     'EDITOR_NATIVE_BUILD_DIR',
-    path.resolve('.build', 'native-editor'),
+    path.join(repoRoot, '.build', 'native-editor'),
   );
+  const resolvedContextRoot = resolveRepoPath(contextRoot);
   const dockerRepo = readEnv('EDITOR_SOURCE_DOCKER_REPO', DEFAULT_DOCKER_REPO);
   const dockerRef = readEnv('EDITOR_SOURCE_DOCKER_REF', DEFAULT_SOURCE_REF);
   const sourceRepo = readEnv('EDITOR_SOURCE_REPO', DEFAULT_SOURCE_REPO);
@@ -110,7 +112,7 @@ function main() {
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
   const engineAssets = readEnv('EDITOR_ENGINE_ASSETS', '');
   const prepareOnly = readEnv('EDITOR_NATIVE_PREPARE_ONLY', 'false') === 'true';
-  const buildContextDir = prepareBuildContext(contextRoot, dockerRepo, dockerRef);
+  const buildContextDir = prepareBuildContext(resolvedContextRoot, dockerRepo, dockerRef);
 
   if (prepareOnly) {
     console.log(`[editor] prepared native source build context at ${buildContextDir}`);

@@ -18,6 +18,7 @@ const BLOCKED_CODE_IMAGE_NAMES = new Set([
 ]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 function readEnv(name, fallback) {
   const value = process.env[name];
@@ -440,6 +441,7 @@ async function startDocker(context) {
 
     console.log(`[editor] source-built fallback image ${image} is missing; building it now...`);
     run(process.execPath, [path.join(__dirname, 'build-source-editor-image.mjs')], {
+      cwd: repoRoot,
       env: {
         ...process.env,
         EDITOR_IMAGE: image,

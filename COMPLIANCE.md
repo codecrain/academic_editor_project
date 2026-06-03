@@ -22,6 +22,10 @@ Official basis checked on 2026-06-03:
   must remove trademark uses of the marks. This is why this repository applies
   source-level debranding before compilation.
   https://www.collaboraonline.com/trademark-policy/
+- The source build scripts use Collabora's official Gerrit source repository
+  (`https://gerrit.collaboraoffice.com/online`) rather than the GitHub mirror,
+  because the mirror does not include the `engine/` tree required for an
+  `ENGINE_ASSETS`-free source build.
 - The public CODE Docker image is documented by Collabora as a development
   edition and not recommended for production. This repository must not use that
   image as a Tlooto SaaS runtime.

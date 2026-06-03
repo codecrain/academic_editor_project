@@ -21,7 +21,8 @@ DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   libpoco-dev python3-polib libcap-dev npm \
   libpam-dev libzstd-dev wget git build-essential libtool \
   python3-lxml libpng-dev libcppunit-dev pkg-config snapd chromium-browser \
-  rsync curl zip ccache autoconf gperf nasm xsltproc flex bison
+  rsync curl zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build \
+  libpixman-1-dev
 
 if ! command -v node >/dev/null 2>&1 || ! node --version | grep -Eq '^v20\.'; then
   curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/academic-editor-nodesource-setup.sh

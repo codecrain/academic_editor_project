@@ -38,7 +38,7 @@ need Docker.
 
 Useful native build environment variables:
 
-- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://github.com/CollaboraOnline/online.git`.
+- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://gerrit.collaboraoffice.com/online`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
 - `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.
 - `EDITOR_NATIVE_BUILD_DIR`: local temporary build directory. Default: `.build/native-editor`.
@@ -64,11 +64,12 @@ Useful Docker build environment variables:
 - `EDITOR_AUTO_BUILD_SOURCE_IMAGE`: set to `true` to let `npm run start` build
   the source fallback image automatically when it is missing. Keep this for
   local development only; production should use native mode.
-- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://github.com/CollaboraOnline/online.git`.
+- `EDITOR_SOURCE_REPO`: upstream source repo. Default: `https://gerrit.collaboraoffice.com/online`.
 - `EDITOR_SOURCE_REF`: upstream branch or tag. Default: `main`.
 - `EDITOR_ENGINE_ASSETS`: optional prebuilt engine archive. Keep empty unless legal review accepts that binary source.
 - `EDITOR_SOURCE_BUILD_DIR`: local temporary build directory. Default: `.build/document-editor-source-image`.
 - `EDITOR_PREPARE_ONLY`: set to `true` to prepare and verify the generated Docker build context without compiling the full image.
+- `EDITOR_DOCKER_NO_CACHE`: set to `true` when a clean Docker fallback rebuild is required. Default: `false`.
 
 ## Run
 

@@ -7,11 +7,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_IMAGE = 'academic-editor/document-editor:source';
-const DEFAULT_DOCKER_REPO = 'https://github.com/CollaboraOnline/online.git';
-const DEFAULT_SOURCE_REPO = 'https://github.com/CollaboraOnline/online.git';
+const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
+const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 const BLOCKED_CODE_IMAGES = new Set([
   'collabora/code',
   'docker.io/collabora/code',
@@ -54,10 +57,13 @@ function writeUtf8Lf(filePath, text) {
 
 function assertSafeBuildDir(contextDir) {
   const resolved = path.resolve(contextDir);
-  const repoRoot = path.resolve('.');
   if (resolved === repoRoot || resolved === path.parse(resolved).root || !resolved.startsWith(`${repoRoot}${path.sep}`)) {
     throw new Error(`Unsafe source image build directory: ${resolved}. Use a directory inside this repository, such as .build/document-editor-source-image.`);
   }
+}
+
+function resolveRepoPath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(repoRoot, value);
 }
 
 function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
@@ -93,7 +99,7 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   );
 
   cpSync(
-    path.resolve('branding', 'debrand-online.sh'),
+    path.join(repoRoot, 'branding', 'debrand-online.sh'),
     path.join(buildContextDir, 'debrand-online.sh'),
   );
   writeUtf8Lf(path.join(buildContextDir, 'debrand-online.sh'), readUtf8Lf(path.join(buildContextDir, 'debrand-online.sh')));
@@ -102,12 +108,24 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   let dockerfile = readUtf8Lf(dockerfilePath);
   dockerfile = dockerfile
     .replace(
+      'RUN chmod +x /start-collabora-online.sh',
+      "RUN sed -i 's/\\r$//' /start-collabora-online.sh && chmod +x /start-collabora-online.sh",
+    )
+    .replace(
+      'apt-get install -y --no-install-recommends adduser fontconfig libcap2-bin libnss-wrapper',
+      'apt-get install -y --no-install-recommends adduser fontconfig libcap2-bin libnss-wrapper libpixman-1-0',
+    )
+    .replace(
+      'git build-essential zip ccache autoconf gperf nasm xsltproc flex bison',
+      'git build-essential zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build',
+    )
+    .replace(
       /^ENV ENGINE_ASSETS=.*$/m,
       'ARG ENGINE_ASSETS=\nENV ENGINE_ASSETS=${ENGINE_ASSETS}',
     )
     .replace(
       /^ENV COLLABORA_ONLINE_REPO=.*$/m,
-      'ARG COLLABORA_ONLINE_REPO=https://github.com/CollaboraOnline/online.git\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
+      'ARG COLLABORA_ONLINE_REPO=https://gerrit.collaboraoffice.com/online\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
     )
     .replace(
       /^ENV COLLABORA_ONLINE_BRANCH=.*$/m,
@@ -142,11 +160,13 @@ function main() {
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
   const engineAssets = readEnv('EDITOR_ENGINE_ASSETS', '');
+  const noCache = readEnv('EDITOR_DOCKER_NO_CACHE', 'false') === 'true';
   const prepareOnly = readEnv('EDITOR_PREPARE_ONLY', 'false') === 'true';
   const contextRoot = readEnv(
     'EDITOR_SOURCE_BUILD_DIR',
-    path.resolve('.build', 'document-editor-source-image'),
+    path.join(repoRoot, '.build', 'document-editor-source-image'),
   );
+  const resolvedContextRoot = resolveRepoPath(contextRoot);
 
   assertNotCodeImage(image);
 
@@ -156,7 +176,7 @@ function main() {
     );
   }
 
-  const buildContextDir = prepareOfficialDockerContext(contextRoot, dockerRepo, dockerRef);
+  const buildContextDir = prepareOfficialDockerContext(resolvedContextRoot, dockerRepo, dockerRef);
   if (prepareOnly) {
     console.log(`[editor] prepared source build context at ${buildContextDir}`);
     return;
@@ -165,7 +185,7 @@ function main() {
   console.log(`[editor] building source-based document editor image ${image}`);
   run('docker', [
     'build',
-    '--no-cache',
+    ...(noCache ? ['--no-cache'] : []),
     '-t',
     image,
     '--build-arg',

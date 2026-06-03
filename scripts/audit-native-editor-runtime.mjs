@@ -65,7 +65,7 @@ function safeRuntimeEnv() {
     EDITOR_ALLOWED_DOMAIN: readEnv('EDITOR_ALLOWED_DOMAIN'),
     EDITOR_NATIVE_RUNTIME_DIR: readEnv('EDITOR_NATIVE_RUNTIME_DIR', '/var/lib/academic-editor'),
     EDITOR_NATIVE_CACHE_DIR: readEnv('EDITOR_NATIVE_CACHE_DIR', '/var/cache/academic-editor'),
-    EDITOR_SOURCE_REPO: readEnv('EDITOR_SOURCE_REPO', 'https://github.com/CollaboraOnline/online.git'),
+    EDITOR_SOURCE_REPO: readEnv('EDITOR_SOURCE_REPO', 'https://gerrit.collaboraoffice.com/online'),
     EDITOR_SOURCE_REF: readEnv('EDITOR_SOURCE_REF', 'main'),
     EDITOR_ADMIN_USERNAME: readEnv('EDITOR_ADMIN_USERNAME') ? '[set]' : '',
     EDITOR_ADMIN_PASSWORD: redact(readEnv('EDITOR_ADMIN_PASSWORD')),

@@ -1,6 +1,10 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: 'inherit', encoding: 'utf8', ...options });
@@ -14,6 +18,10 @@ function readEnv(name, fallback) {
   return value == null || String(value).trim() === '' ? fallback : String(value).trim();
 }
 
+function resolveRepoPath(value) {
+  return path.isAbsolute(value) ? value : path.resolve(repoRoot, value);
+}
+
 function sudo(args) {
   run('sudo', args);
 }
@@ -23,7 +31,7 @@ function main() {
     throw new Error('Native editor install is supported on Linux servers only.');
   }
 
-  const buildDir = readEnv('EDITOR_NATIVE_BUILD_DIR', path.resolve('.build', 'native-editor'));
+  const buildDir = resolveRepoPath(readEnv('EDITOR_NATIVE_BUILD_DIR', path.join(repoRoot, '.build', 'native-editor')));
   const installDir = readEnv(
     'EDITOR_NATIVE_INSTALL_DIR',
     path.join(buildDir, 'from-source-gh-action', 'instdir'),

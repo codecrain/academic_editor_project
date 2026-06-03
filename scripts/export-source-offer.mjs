@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-const DEFAULT_SOURCE_REPO = 'https://github.com/CollaboraOnline/online.git';
+const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 
 function readEnv(name, fallback = '') {
