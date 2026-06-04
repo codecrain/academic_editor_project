@@ -27,6 +27,7 @@ import sys
 root = Path(sys.argv[1])
 target_dirs = [root / "browser", root / "wsd"]
 target_suffixes = {
+    ".ac",
     ".css",
     ".cxx",
     ".cc",

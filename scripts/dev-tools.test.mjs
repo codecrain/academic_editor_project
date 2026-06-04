@@ -25,6 +25,13 @@ test('debranding patch keeps the desktop sidebar hidden by default', () => {
   assert.match(patch, /patched sidebar default to hidden/);
 });
 
+test('debranding patch covers build-time configure defaults', () => {
+  const patch = readProjectFile('branding/debrand-online.sh');
+  assert.match(patch, /"\.ac"/);
+  assert.match(patch, /https:\/\/www\.collaboraonline\.com/);
+  assert.match(patch, /https:\/\/tlooto\.com/);
+});
+
 test('source and native builds apply the public debranding patch before compilation', () => {
   const sourceBuild = readProjectFile('scripts/build-source-editor-image.mjs');
   const nativeBuild = readProjectFile('scripts/build-native-editor.mjs');
