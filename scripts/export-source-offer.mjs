@@ -1,10 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(__dirname, '..');
 
 function readEnv(name, fallback = '') {
   const value = process.env[name];
@@ -28,6 +31,7 @@ function parseArg(name) {
 
 function runGit(args) {
   const result = spawnSync('git', args, {
+    cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
