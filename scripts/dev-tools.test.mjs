@@ -28,6 +28,7 @@ test('debranding patch keeps the desktop sidebar hidden by default', () => {
 test('debranding patch covers build-time configure defaults', () => {
   const patch = readProjectFile('branding/debrand-online.sh');
   assert.match(patch, /"\.ac"/);
+  assert.match(patch, /root \/ "configure\.ac"/);
   assert.match(patch, /https:\/\/www\.collaboraonline\.com/);
   assert.match(patch, /https:\/\/tlooto\.com/);
 });

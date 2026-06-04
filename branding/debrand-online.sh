@@ -102,6 +102,14 @@ for target_dir in target_dirs:
             path.write_text(patched, encoding="utf-8", newline="\n")
             changed += 1
 
+for path in [root / "configure.ac"]:
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        patched = patch_text(text)
+        if patched != text:
+            path.write_text(patched, encoding="utf-8", newline="\n")
+            changed += 1
+
 images_dir = root / "browser" / "images"
 if images_dir.exists():
     (images_dir / "document-editor-white.svg").write_text(
