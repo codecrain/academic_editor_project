@@ -22,6 +22,68 @@ the open-source tree.
 The private service repository owns the WOPI host, authentication, storage,
 database, project/report UI, and deployment secrets.
 
+## License Boundary
+
+This public runtime repository is MPL-2.0. Any source files and patches here
+that modify MPL-covered editor code must stay available under MPL-2.0 with the
+required notices.
+
+The private SaaS service is a separate larger work. It does not need to become
+MPL-2.0 merely because it talks to this editor runtime through WOPI, as long as
+private service code, secrets, storage, and product logic stay outside this
+public runtime repository. Publish release source evidence through
+`OPEN_SOURCE_NOTICE.md`, `COMPLIANCE.md`, and the `npm run source-offer` output.
+
+## Development Loop
+
+Fast checks for ordinary script, wrapper, and compliance changes:
+
+```bash
+npm run dev:check
+```
+
+This runs the public-safety scan, runtime unit tests, and syntax checks without
+starting a server. To start the editor, verify `/hosting/discovery` plus
+`cool.html`, and then stop only the runtime that the check created:
+
+```bash
+npm run dev:check:runtime
+```
+
+If a runtime is already running before the check, it is treated as pre-existing
+and left alone. Set `EDITOR_DEV_KEEP_RUNNING=true` only for a manual debugging
+session where you intentionally want the runtime to stay up.
+
+For browser/server source hacking on a Linux dev host, use the source loop:
+
+```bash
+npm run dev:source:doctor
+npm run dev:source:prepare
+npm run dev:source:build
+npm run dev:source:run
+```
+
+`dev:source:run` runs `make run` in the foreground with
+`COOL_SERVE_FROM_FS=1`. After the first Linux build, browser-side source changes
+can be checked with browser Shift+Reload instead of rebuilding a Docker image.
+C++ or server behavior changes still require `make` and a runtime restart. Stop
+the foreground process with Ctrl+C, or try `npm run dev:source:stop` if the
+source tree started a background runtime.
+
+For Windows local integration, use the Docker fallback after building the source
+image once:
+
+```powershell
+npm.cmd run build:source
+npm.cmd run start:docker
+npm.cmd run smoke
+npm.cmd run stop
+```
+
+Docker fallback is useful for integration smoke tests, but source or branding
+patches that are compiled into the image still require rebuilding that fallback
+image. Script-only changes do not.
+
 ## Production Build
 
 Preferred production path:
@@ -170,15 +232,5 @@ Read `COMPLIANCE.md` before changing the build or runtime path.
 Run before pushing:
 
 ```bash
-npm run verify:public
-node --check scripts/start-editor.mjs
-node --check scripts/doctor-native-editor.mjs
-node --check scripts/audit-native-editor-runtime.mjs
-node --check scripts/export-source-offer.mjs
-node --check scripts/build-native-editor.mjs
-node --check scripts/install-native-editor.mjs
-node --check scripts/install-native-artifact.mjs
-node --check scripts/package-native-artifact.mjs
-node --check scripts/run-native-editor.mjs
-node --check scripts/build-source-editor-image.mjs
+npm run dev:check
 ```

@@ -55,6 +55,50 @@ function parsePositiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function splitArgs(input) {
+  const args = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+
+  for (const char of String(input ?? '')) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) {
+        quote = '';
+      } else {
+        current += char;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) {
+        args.push(current);
+        current = '';
+      }
+      continue;
+    }
+    current += char;
+  }
+
+  if (current) {
+    args.push(current);
+  }
+  return args;
+}
+
 function normalizeOrigin(value) {
   const raw = String(value ?? '').trim();
   if (!raw) {
@@ -102,11 +146,29 @@ function runQuiet(command, args, options = {}) {
   return spawnSync(command, args, { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', ...options });
 }
 
-function resolvePublicHost() {
+function resolvePublicUrl() {
   const publicUrl = readFirstEnv([
     'EDITOR_PUBLIC_URL',
     'EDITOR_DOCUMENT_SERVER_URL',
   ]);
+  return publicUrl;
+}
+
+function resolvePublicOrigin() {
+  const publicUrl = resolvePublicUrl();
+  if (!publicUrl) {
+    return '';
+  }
+
+  try {
+    return new URL(publicUrl).origin;
+  } catch {
+    return '';
+  }
+}
+
+function resolvePublicHost() {
+  const publicUrl = resolvePublicUrl();
   if (!publicUrl) {
     return '';
   }
@@ -119,10 +181,7 @@ function resolvePublicHost() {
 }
 
 function resolvePublicProtocol() {
-  const publicUrl = readFirstEnv([
-    'EDITOR_PUBLIC_URL',
-    'EDITOR_DOCUMENT_SERVER_URL',
-  ]);
+  const publicUrl = resolvePublicUrl();
   if (!publicUrl) {
     return '';
   }
@@ -139,13 +198,37 @@ function buildDefaultExtraParams() {
   return `--o:ssl.enable=false --o:ssl.termination=${sslTermination} --o:welcome.enable=false --o:allow_update_popup=false`;
 }
 
-function withPublicServerName(extraParams) {
-  if (/(^|\s)--o:server_name=/.test(extraParams)) {
+function withConfigParam(extraParams, key, value) {
+  const paramPrefix = `--o:${key}=`;
+  if (extraParams.split(/\s+/).some((part) => part.startsWith(paramPrefix))) {
     return extraParams;
   }
 
+  return `${extraParams} ${paramPrefix}${value}`;
+}
+
+function withPublicEditorParams(extraParams) {
+  let params = extraParams;
   const publicHost = resolvePublicHost();
-  return publicHost ? `${extraParams} --o:server_name=${publicHost}` : extraParams;
+
+  if (publicHost) {
+    params = withConfigParam(params, 'server_name', publicHost);
+  }
+
+  return params;
+}
+
+function resolveWopiHealthBaseUrl() {
+  const configured = readFirstEnv([
+    'EDITOR_WOPI_BASE_URL',
+    'EDITOR_DEFAULT_WOPI_HOST',
+  ]);
+
+  if (configured) {
+    return normalizeOrigin(configured);
+  }
+
+  return resolvePublicOrigin() || 'http://127.0.0.1';
 }
 
 function resolveEditorDiscoveryUrl(hostPort) {
@@ -182,6 +265,102 @@ function canFetch(url) {
   });
 }
 
+function fetchUrl(url) {
+  return new Promise((resolve) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (error) {
+      resolve({ ok: false, statusCode: 0, body: '', error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+
+    const client = parsed.protocol === 'https:' ? https : http;
+    const request = client.get(parsed, { timeout: 5_000 }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => {
+        body += chunk;
+      });
+      response.on('end', () => {
+        const statusCode = response.statusCode ?? 0;
+        resolve({
+          ok: statusCode >= 200 && statusCode < 400,
+          statusCode,
+          body,
+          error: '',
+        });
+      });
+    });
+
+    request.once('timeout', () => {
+      request.destroy();
+      resolve({ ok: false, statusCode: 0, body: '', error: 'timeout' });
+    });
+    request.once('error', (error) => {
+      resolve({ ok: false, statusCode: 0, body: '', error: error.message });
+    });
+  });
+}
+
+function decodeXmlAttribute(value) {
+  return String(value ?? '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function extractCoolHtmlUrl(discoveryXml, discoveryUrl) {
+  const match = String(discoveryXml ?? '').match(/urlsrc="([^"]*\/browser\/[^"]*\/cool\.html\?[^"]*)"/);
+  if (!match) {
+    return '';
+  }
+
+  const base = new URL(discoveryUrl);
+  const discovered = new URL(decodeXmlAttribute(match[1]), base);
+  return `${base.origin}${discovered.pathname}${discovered.search}`;
+}
+
+function buildCoolHtmlHealthUrl(coolHtmlUrl) {
+  const url = new URL(coolHtmlUrl);
+  url.searchParams.set('WOPISrc', `${resolveWopiHealthBaseUrl()}/editor-health-check`);
+  url.searchParams.set('access_token', 'editor-health-check');
+  url.searchParams.set('access_token_ttl', '0');
+  return url.toString();
+}
+
+async function checkRenderableEditor(discoveryUrl) {
+  const discovery = await fetchUrl(discoveryUrl);
+  if (!discovery.ok) {
+    return {
+      ok: false,
+      message: `discovery returned ${discovery.statusCode || discovery.error || 'unknown error'}`,
+    };
+  }
+
+  const coolHtmlUrl = extractCoolHtmlUrl(discovery.body, discoveryUrl);
+  if (!coolHtmlUrl) {
+    return {
+      ok: false,
+      message: 'discovery did not include a cool.html action URL',
+    };
+  }
+
+  const healthUrl = buildCoolHtmlHealthUrl(coolHtmlUrl);
+  const editor = await fetchUrl(healthUrl);
+  if (!editor.ok) {
+    const detail = (editor.body || editor.error || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    return {
+      ok: false,
+      message: `cool.html returned ${editor.statusCode || editor.error || 'unknown error'}${detail ? `: ${detail}` : ''}`,
+    };
+  }
+
+  return { ok: true, message: healthUrl };
+}
+
 async function waitForEditor(discoveryUrl, timeoutMs, intervalMs) {
   const deadline = Date.now() + timeoutMs;
 
@@ -194,6 +373,37 @@ async function waitForEditor(discoveryUrl, timeoutMs, intervalMs) {
   }
 
   return false;
+}
+
+async function waitForRenderableEditor(discoveryUrl, timeoutMs, intervalMs) {
+  if (readEnv('EDITOR_SKIP_COOL_HTML_HEALTHCHECK', 'false') === 'true') {
+    return { ok: true, message: 'cool.html health check skipped' };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastResult = { ok: false, message: 'not checked' };
+
+  while (Date.now() < deadline) {
+    lastResult = await checkRenderableEditor(discoveryUrl);
+    if (lastResult.ok) {
+      return lastResult;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return lastResult;
+}
+
+async function assertEditorReady(discoveryUrl, timeoutMs, intervalMs, runtimeLabel) {
+  if (!(await waitForEditor(discoveryUrl, timeoutMs, intervalMs))) {
+    throw new Error(`${runtimeLabel} started but ${discoveryUrl} did not become ready in ${timeoutMs}ms.`);
+  }
+
+  const renderable = await waitForRenderableEditor(discoveryUrl, timeoutMs, intervalMs);
+  if (!renderable.ok) {
+    throw new Error(`${runtimeLabel} discovery is reachable, but the editor page is not renderable. ${renderable.message}`);
+  }
 }
 
 function dockerInfo(command = ['docker']) {
@@ -298,13 +508,19 @@ function inspectContainer(dockerCommand, containerName) {
     'inspect',
     containerName,
     '--format',
-    '{{json .Config.Env}}\n{{json .HostConfig.PortBindings}}\n{{.Config.Image}}',
+    '{{json .Config.Env}}\n{{json .HostConfig.PortBindings}}\n{{.Config.Image}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}',
   ]);
   if (result.status !== 0) {
     return null;
   }
 
-  const [envJson = '[]', portBindingsJson = '{}', image = ''] = result.stdout.trim().split(/\r?\n/);
+  const [
+    envJson = '[]',
+    portBindingsJson = '{}',
+    image = '',
+    entrypointJson = 'null',
+    cmdJson = 'null',
+  ] = result.stdout.trim().split(/\r?\n/);
   const envEntries = JSON.parse(envJson);
   const env = Object.fromEntries(
     envEntries
@@ -318,6 +534,8 @@ function inspectContainer(dockerCommand, containerName) {
   return {
     env,
     image,
+    entrypoint: JSON.parse(entrypointJson),
+    cmd: JSON.parse(cmdJson),
     portBindings: JSON.parse(portBindingsJson),
   };
 }
@@ -328,6 +546,10 @@ function getHostPorts(portBindings) {
     return [];
   }
   return bindings.map((binding) => String(binding?.HostPort ?? '')).filter(Boolean);
+}
+
+function sameJsonValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 function getDockerMismatchReasons(current, expected) {
@@ -348,6 +570,14 @@ function getDockerMismatchReasons(current, expected) {
 
   if (current.image !== expected.image) {
     reasons.push('image');
+  }
+
+  if (!sameJsonValue(current.entrypoint, expected.entrypoint)) {
+    reasons.push('entrypoint');
+  }
+
+  if (!sameJsonValue(current.cmd, expected.cmd)) {
+    reasons.push('cmd');
   }
 
   return reasons;
@@ -398,7 +628,7 @@ async function startNative(context) {
     EDITOR_EXTRA_PARAMS: context.extraParams,
   };
 
-  if (!recreate && describe.status === 0 && (await waitForEditor(context.discoveryUrl, 2_000, 500))) {
+  if (!recreate && describe.status === 0 && (await waitForRenderableEditor(context.discoveryUrl, 2_000, 500)).ok) {
     console.log(`[editor] native pm2 process ${pm2Name} is already ready at ${context.discoveryUrl}.`);
     return;
   }
@@ -412,9 +642,12 @@ async function startNative(context) {
   }
 
   console.log(`[editor] waiting for ${context.discoveryUrl}...`);
-  if (!(await waitForEditor(context.discoveryUrl, context.readyTimeoutMs, context.readyIntervalMs))) {
-    throw new Error(`Native document editor started but ${context.discoveryUrl} did not become ready in ${context.readyTimeoutMs}ms.`);
-  }
+  await assertEditorReady(
+    context.discoveryUrl,
+    context.readyTimeoutMs,
+    context.readyIntervalMs,
+    'Native document editor',
+  );
 
   console.log(`[editor] native document editor is ready at ${context.discoveryUrl}.`);
 }
@@ -426,8 +659,12 @@ async function startDocker(context) {
   const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
   const discoveryAlreadyReachable = !recreate && (await waitForEditor(context.discoveryUrl, 2_000, 500));
   if (discoveryAlreadyReachable) {
-    console.log(`[editor] document editor is already reachable at ${context.discoveryUrl}.`);
-    return;
+    const dockerCommand = resolveDockerCommand();
+    if (!dockerCommand || !dockerNames(dockerCommand, true).has(containerName)) {
+      await assertEditorReady(context.discoveryUrl, 2_000, 500, 'External document editor');
+      console.log(`[editor] external document editor is already ready at ${context.discoveryUrl}.`);
+      return;
+    }
   }
 
   const dockerCommand = await waitForDocker();
@@ -449,9 +686,22 @@ async function startDocker(context) {
     });
   }
 
+  const dockerCoolwsdArgs = [
+    '--use-env-vars',
+    '--o:sys_template_path=/opt/cool/systemplate',
+    '--o:child_root_path=/opt/cool/child-roots',
+    '--o:file_server_root_path=/usr/share/coolwsd',
+    '--o:cache_files.path=/opt/cool/cache',
+    '--o:logging.color=false',
+    '--o:stop_on_config_change=false',
+    ...splitArgs(context.extraParams),
+  ];
+
   const expectedRuntime = {
     image,
     hostPort: context.hostPort,
+    entrypoint: ['/usr/bin/coolwsd'],
+    cmd: dockerCoolwsdArgs,
     env: {
       domain: context.allowedDomain,
       username: context.adminUsername,
@@ -473,7 +723,7 @@ async function startDocker(context) {
     if (mismatchReasons.length) {
       console.log(`[editor] recreating ${containerName} because runtime config changed: ${mismatchReasons.join(', ')}`);
       runDocker(dockerCommand, ['rm', '-f', containerName]);
-    } else if (await waitForEditor(context.discoveryUrl, context.readyTimeoutMs, context.readyIntervalMs)) {
+    } else if ((await waitForRenderableEditor(context.discoveryUrl, context.readyTimeoutMs, context.readyIntervalMs)).ok) {
       console.log(`[editor] docker fallback editor is ready at ${context.discoveryUrl}.`);
       return;
     } else {
@@ -497,6 +747,8 @@ async function startDocker(context) {
     '--cap-add',
     'MKNOD',
     '--add-host=host.docker.internal:host-gateway',
+    '--entrypoint',
+    '/usr/bin/coolwsd',
     '-p',
     `${context.hostPort}:9980`,
     '-e',
@@ -508,12 +760,16 @@ async function startDocker(context) {
     '-e',
     `extra_params=${context.extraParams}`,
     image,
+    ...dockerCoolwsdArgs,
   ]);
 
   console.log(`[editor] waiting for ${context.discoveryUrl}...`);
-  if (!(await waitForEditor(context.discoveryUrl, context.readyTimeoutMs, context.readyIntervalMs))) {
-    throw new Error(`Docker fallback editor started but ${context.discoveryUrl} did not become ready in ${context.readyTimeoutMs}ms.`);
-  }
+  await assertEditorReady(
+    context.discoveryUrl,
+    context.readyTimeoutMs,
+    context.readyIntervalMs,
+    'Docker fallback editor',
+  );
 
   console.log(`[editor] docker fallback editor is ready at ${context.discoveryUrl}.`);
 }
@@ -533,7 +789,7 @@ async function main() {
     allowedDomain: readEnv('EDITOR_ALLOWED_DOMAIN', '.*'),
     adminUsername: readEnv('EDITOR_ADMIN_USERNAME', 'admin'),
     adminPassword: readEnv('EDITOR_ADMIN_PASSWORD', 'document-editor-password'),
-    extraParams: withPublicServerName(readEnv('EDITOR_EXTRA_PARAMS', buildDefaultExtraParams())),
+    extraParams: withPublicEditorParams(readEnv('EDITOR_EXTRA_PARAMS', buildDefaultExtraParams())),
     discoveryUrl: resolveEditorDiscoveryUrl(hostPort),
     readyTimeoutMs: parsePositiveInteger(process.env.EDITOR_READY_TIMEOUT_MS, DEFAULT_EDITOR_READY_TIMEOUT_MS),
     readyIntervalMs: parsePositiveInteger(process.env.EDITOR_READY_INTERVAL_MS, DEFAULT_EDITOR_READY_INTERVAL_MS),

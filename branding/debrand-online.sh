@@ -153,4 +153,77 @@ if grep -RIn --exclude-dir=.git --exclude='*.md' --exclude='COPYING*' --exclude=
   exit 1
 fi
 
+# Runtime compatibility patch for source builds without welcome/feedback URLs
+# and with authority-only CSP host sources.
+# Upstream cool.html CSP generation calls appendDirectiveUrl() for compile-time
+# WELCOME_URL and FEEDBACK_URL. When those are intentionally empty, Poco::URI
+# throws and cool.html returns HTTP 500. Commercial SaaS builds here deliberately
+# keep those URLs empty to avoid unnecessary external/branding surfaces, so skip
+# empty values before trimming them as URIs.
+#
+# The same cool.html CSP generation also passes indirectionURI.getAuthority(),
+# such as 127.0.0.1:11002. That is a valid CSP host-source but not a full URI,
+# so Poco::URI can throw "bad or invalid port number: blank". Preserve those
+# authority-only host sources directly instead of URI-trimming them.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+csp = root / "wsd" / "ContentSecurityPolicy.hpp"
+if not csp.exists():
+    raise SystemExit("[debrand] cannot find wsd/ContentSecurityPolicy.hpp")
+
+text = csp.read_text(encoding="utf-8", errors="ignore")
+old = """    void appendDirectiveUrl(std::string directive, const std::string& url)
+    {
+        appendDirective(std::move(directive), Util::trimURI(url));
+    }
+"""
+new = """    void appendDirectiveUrl(std::string directive, const std::string& url)
+    {
+        if (url.empty())
+            return;
+        if (url.find("://") == std::string::npos && url.rfind("//", 0) != 0)
+        {
+            appendDirective(std::move(directive), url);
+            return;
+        }
+        appendDirective(std::move(directive), Util::trimURI(url));
+    }
+"""
+if new in text:
+    print("[debrand] CSP URL handling patch already present")
+elif old in text:
+    csp.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+    print("[debrand] patched CSP URL handling for empty and authority-only sources")
+else:
+    raise SystemExit("[debrand] cannot find appendDirectiveUrl patch target")
+PY
+
+# Product default patch: start desktop editor sessions with the sidebar hidden.
+# Users can still open it explicitly through the UI. If an existing saved
+# document-type preference says to show it, upstream preference handling remains
+# in charge; this changes only the default for fresh sessions.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+ui_manager = root / "browser" / "src" / "control" / "Control.UIManager.ts"
+if not ui_manager.exists():
+    raise SystemExit("[debrand] cannot find browser/src/control/Control.UIManager.ts")
+
+text = ui_manager.read_text(encoding="utf-8", errors="ignore")
+old = "var showSidebar = this.getBooleanDocTypePref('ShowSidebar', true);"
+new = "var showSidebar = this.getBooleanDocTypePref('ShowSidebar', false);"
+if new in text:
+    print("[debrand] sidebar default-hidden patch already present")
+elif old in text:
+    ui_manager.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+    print("[debrand] patched sidebar default to hidden")
+else:
+    raise SystemExit("[debrand] cannot find ShowSidebar default patch target")
+PY
+
 echo "[debrand] user-facing editor branding patch applied."

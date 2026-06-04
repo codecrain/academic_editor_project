@@ -11,6 +11,19 @@ to compile the full office engine locally. The repository is licensed under
 MPL-2.0 and keeps the runtime source patches public. This is the path to use for
 commercial SaaS deployment.
 
+License boundary:
+
+- Keep this public runtime repository, including source patches and build
+  scripts that modify MPL-covered editor code, under MPL-2.0.
+- Keep the private SaaS service repository separate. The WOPI host,
+  authentication, storage, billing, product UI, deployment secrets, and
+  proprietary service code do not become MPL-2.0 merely because they integrate
+  with this runtime over WOPI.
+- Do not copy private service code or secrets into this public repository.
+- Publish a service-level open-source notice that links to this repository,
+  `OPEN_SOURCE_NOTICE.md`, and the exact runtime source-offer evidence for the
+  deployed release.
+
 Official basis checked on 2026-06-03:
 
 - Mozilla MPL FAQ says MPL-covered software may be used by anyone, including
@@ -84,15 +97,9 @@ Verification:
 Run before commit:
 
 ```bash
-npm run verify:public
-node --check scripts/start-editor.mjs
-node --check scripts/doctor-native-editor.mjs
-node --check scripts/audit-native-editor-runtime.mjs
-node --check scripts/export-source-offer.mjs
-node --check scripts/build-native-editor.mjs
-node --check scripts/install-native-editor.mjs
-node --check scripts/install-native-artifact.mjs
-node --check scripts/package-native-artifact.mjs
-node --check scripts/run-native-editor.mjs
-node --check scripts/build-source-editor-image.mjs
+npm run dev:check
 ```
+
+Use `npm run dev:check:runtime` for a local runtime smoke test. It starts the
+runtime, checks discovery and `cool.html`, and stops only the runtime that the
+check created. If the runtime was already running, it is left running.
