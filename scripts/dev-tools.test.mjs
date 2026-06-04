@@ -64,5 +64,28 @@ test('package exposes fast dev and source hot-loop commands', () => {
   assert.equal(pkg.scripts['dev:check'], 'node scripts/dev-check.mjs');
   assert.equal(pkg.scripts['dev:check:runtime'], 'node scripts/dev-check.mjs --runtime');
   assert.equal(pkg.scripts['dev:source:run'], 'node scripts/dev-source-editor.mjs run');
+  assert.equal(pkg.scripts['deploy:dev'], 'bash sh.start_dev');
+  assert.equal(pkg.scripts['deploy:prod'], 'bash sh.start');
   assert.equal(pkg.scripts.smoke, 'node scripts/smoke-editor.mjs');
+});
+
+test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
+  const prod = readProjectFile('sh.start');
+  const dev = readProjectFile('sh.start_dev');
+  const helper = readProjectFile('scripts/deploy-native-editor.sh');
+
+  assert.match(prod, /EDITOR_REQUIRE_PUBLIC_URL/);
+  assert.match(prod, /academic-editor-native/);
+  assert.match(prod, /deploy-native-editor\.sh/);
+  assert.match(dev, /https:\/\/code-dev-v2\.tlooto\.com/);
+  assert.match(dev, /academic-editor-native-dev/);
+  assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
+  assert.match(dev, /deploy-native-editor\.sh/);
+  assert.match(helper, /git pull --ff-only/);
+  assert.match(helper, /npm run install:native:artifact/);
+  assert.match(helper, /npm run start:native/);
+  assert.match(helper, /npm run audit:native -- --output/);
+  assert.match(helper, /npm run source-offer -- --output/);
+  assert.match(helper, /npm run smoke/);
+  assert.match(helper, /pm2 save/);
 });

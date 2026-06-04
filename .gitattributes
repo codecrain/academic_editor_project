@@ -1,4 +1,8 @@
+/.gitattributes text eol=lf
 *.sh text eol=lf
+sh.start text eol=lf
+sh.start_dev text eol=lf
+*.json text eol=lf
 *.mjs text eol=lf
 *.md text eol=lf
 Dockerfile text eol=lf

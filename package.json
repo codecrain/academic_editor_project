@@ -17,6 +17,8 @@
     "start:native": "node scripts/start-editor.mjs --runtime native",
     "start:docker": "node scripts/start-editor.mjs --runtime docker",
     "start:dev": "node scripts/start-editor.mjs",
+    "deploy:dev": "bash sh.start_dev",
+    "deploy:prod": "bash sh.start",
     "smoke": "node scripts/smoke-editor.mjs",
     "dev:check": "node scripts/dev-check.mjs",
     "dev:check:runtime": "node scripts/dev-check.mjs --runtime",

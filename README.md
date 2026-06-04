@@ -102,6 +102,47 @@ npm run start:native
 npm run doctor:native -- --require-installed
 ```
 
+## Ubuntu Server Deploy Entrypoints
+
+For the DEV server clone, deploy or restart the editor directly from this
+repository:
+
+```bash
+cd /home/bitnami/academic_editor_project
+./sh.start_dev
+```
+
+`sh.start_dev` syncs the current branch, uses native runtime mode, runs the
+`academic-editor-native-dev` pm2 process on port `9980`, and verifies the
+deployment with native doctor, runtime audit, source-offer output, and smoke
+checks. On a fresh DEV server, it can resolve the latest `native-*` GitHub
+release automatically when the native runtime is not installed yet.
+
+For production, pass the real service origin explicitly so DEV URLs cannot leak
+into a commercial deployment:
+
+```bash
+cd /home/bitnami/academic_editor_project
+EDITOR_PUBLIC_URL=https://your-service-domain.example ./sh.start
+```
+
+Production uses the `academic-editor-native` pm2 process by default. If the
+runtime is already installed, `sh.start` restarts and verifies it. To install or
+upgrade a release artifact, pass one of these:
+
+```bash
+EDITOR_PUBLIC_URL=https://your-service-domain.example \
+EDITOR_NATIVE_RELEASE_TAG=native-YYYYMMDD \
+./sh.start
+```
+
+Both entrypoints accept the same runtime variables documented below. Useful
+overrides are `EDITOR_HOST_PORT`, `EDITOR_NATIVE_PM2_NAME`,
+`EDITOR_REPO_SYNC=false`, `EDITOR_RECREATE=false`, and
+`EDITOR_NATIVE_AUTO_DEPS=true` for first-time Ubuntu dependency installation.
+They intentionally use the native pm2 runtime and do not run a slow Docker
+build.
+
 Direct server builds are still supported on larger Linux build hosts:
 
 ```bash
