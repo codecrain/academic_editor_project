@@ -22,6 +22,7 @@ fi
 # through the OSS notice page.
 "${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 root = Path(sys.argv[1])
@@ -124,6 +125,262 @@ if images_dir.exists():
     )
 
 print(f"[debrand] patched {changed} source files")
+PY
+
+# Product/legal UI patch:
+# - Do not expose upstream issue/forum links in normal product UI.
+# - Do not create broken or misleading source links from upstream build hashes.
+# - Show a service-owned copyright statement while preserving upstream source
+#   and third-party legal notices in the repository/service OSS notice.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+
+def replace_or_fail(path: Path, old: str, new: str, label: str) -> bool:
+    if not path.exists():
+        raise SystemExit(f"[debrand] cannot find {path.relative_to(root)} for {label}")
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if new in text:
+        return False
+    if old not in text:
+        raise SystemExit(f"[debrand] cannot find {label} patch target in {path.relative_to(root)}")
+    path.write_text(text.replace(old, new), encoding="utf-8", newline="\n")
+    return True
+
+def regex_replace_or_fail(path: Path, pattern: str, new: str, label: str) -> bool:
+    if not path.exists():
+        raise SystemExit(f"[debrand] cannot find {path.relative_to(root)} for {label}")
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if new in text:
+        return False
+    patched, count = re.subn(pattern, lambda _match: new, text, count=1, flags=re.MULTILINE)
+    if count == 0:
+        raise SystemExit(f"[debrand] cannot find {label} patch target in {path.relative_to(root)}")
+    path.write_text(patched, encoding="utf-8", newline="\n")
+    return True
+
+changed = 0
+
+about = root / "browser" / "src" / "control" / "Control.AboutDialog.ts"
+changed += regex_replace_or_fail(
+    about,
+    r"""\t\t// Version\s*
+\t\telements\.coolwsdVersion\.textContent = info\.coolwsdVersion;\s*
+\t\tthis\.appendSpanAndLink\(\s*
+\t\t\telements\.coolwsdVersion,\s*
+\t\t\t' git hash:\\xA0',\s*
+\t\t\t`https://[^`]+/\$\{info\.coolwsdHash\}`,\s*
+\t\t\tinfo\.coolwsdHash,\s*
+\t\t\tinfo\.wsdOptions,\s*
+\t\t\);\s*
+""",
+    """\t\t// Version: keep runtime details plain-text. The upstream hash is useful
+\t\t// for support, but it is not a public Tlooto source URL by itself.
+\t\telements.coolwsdVersion.textContent = info.coolwsdVersion;
+\t\tif (info.coolwsdHash) {
+\t\t\telements.coolwsdVersion.appendChild(
+\t\t\t\tdocument.createTextNode(` (runtime build: ${info.coolwsdHash})`),
+\t\t\t);
+\t\t}
+""",
+    "About dialog plain runtime version",
+)
+changed += regex_replace_or_fail(
+    about,
+    r"""\t\tconst span = document\.createElement\('span'\);\s*
+\t\tspan\.setAttribute\('dir', 'ltr'\);\s*
+\t\tspan\.textContent(?:\s*=\s*_\(\s*\t\t\t`Copyright .+?\$\{window\.copyrightYear\}, \$\{window\.vendor\}\.`,\s*\t\t\)|\s*=\s*[\s\S]*?'source terms remain available in the service legal notice\.');\s*
+\t\telements\.copyright\.appendChild\(span\);\s*
+""",
+    """\t\tconst span = document.createElement('span');
+\t\tspan.setAttribute('dir', 'ltr');
+\t\tspan.textContent =
+\t\t\t`Copyright \\u00A9 ${window.copyrightYear} CodeCrain Co., Ltd. ` +
+\t\t\t'Document Editor integration. Open-source notices and MPL-2.0 ' +
+\t\t\t'source terms remain available in the service legal notice.';
+\t\telements.copyright.appendChild(span);
+""",
+    "About dialog service copyright",
+)
+changed += regex_replace_or_fail(
+    about,
+    r"""\t\tlet coolwsdLine = info\.coolwsdVersion;\s*
+(?:\t\tcoolwsdLine \+= ` \(git hash: \$\{info\.coolwsdHash\} \$\{info\.wsdOptions\}\)`;\s*|\t\tif \(info\.coolwsdHash\) \{\s*
+\t\t\tcoolwsdLine \+= ` \(runtime build: \$\{info\.coolwsdHash\} \$\{info\.wsdOptions\}\)`;\s*
+\t\t\}\s*)
+\t\taddLine\('Version', coolwsdLine\);\s*
+(?:\t\taddLine\('Copyright', `Copyright .+? \$\{window\.copyrightYear\} CodeCrain Co\., Ltd\.`\);\s*)?
+""",
+    """\t\tlet coolwsdLine = info.coolwsdVersion;
+\t\tif (info.coolwsdHash) {
+\t\t\tcoolwsdLine += ` (runtime build: ${info.coolwsdHash} ${info.wsdOptions})`;
+\t\t}
+\t\taddLine('Version', coolwsdLine);
+\t\taddLine('Copyright', `Copyright \\u00A9 ${window.copyrightYear} CodeCrain Co., Ltd.`);
+""",
+    "About dialog copied version text",
+)
+
+menubar = root / "browser" / "src" / "control" / "Control.Menubar.ts"
+for old_block in [
+    """\t\t\t\t{type: 'separator'},
+\t\t\t\t{name: _('Forum'), id: 'forum', type: 'action'},
+\t\t\t\t{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
+\t\t\t\t{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
+\t\t\t\t{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
+\t\t\t\t{type: 'separator'},
+\t\t\t\t{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
+""",
+    """\t\t\t\t{type: 'separator'},
+\t\t\t\t{name: _('Forum'), id: 'forum', type: 'action'},
+\t\t\t\t{name: _('Report an issue'), id: 'report-an-issue', type: 'action', iosapp: false},
+\t\t\t\t{name: _('Latest Updates'), id: 'latestupdates', type: 'action', iosapp: false},
+\t\t\t\t{name: _('Send Feedback'), id: 'feedback', type: 'action', mobileapp: false},
+\t\t\t\t{type: 'separator'},
+\t\t\t\t{name: _('Server audit'), id: 'serveraudit', type: 'action', mobileapp: false},
+""",
+]:
+    if menubar.exists():
+        text = menubar.read_text(encoding="utf-8", errors="ignore")
+        if old_block in text:
+            menubar.write_text(text.replace(old_block, ""), encoding="utf-8", newline="\n")
+            changed += 1
+changed += regex_replace_or_fail(
+    menubar,
+    r"""\t\t\} else if \(id === 'report-an-issue'\) \{\s*
+\t\t\twindow\.open\('[^']+', '_blank', 'noopener'\);\s*
+\t\t\} else if \(id === 'forum'\) \{\s*
+\t\t\twindow\.open\('[^']+', '_blank', 'noopener'\);\s*
+\t\t\} else if \(id === 'inserthyperlink'\) \{\s*
+""",
+    """\t\t} else if (id === 'report-an-issue' || id === 'forum') {
+\t\t\tthis._map.uiManager.showSnackbar(_('Support is available from Tlooto.'), null, null, 3000);
+\t\t} else if (id === 'inserthyperlink') {
+""",
+    "Help menu external support actions",
+)
+
+notebook = root / "browser" / "src" / "control" / "Control.NotebookbarWriter.js"
+changed += replace_or_fail(
+    notebook,
+    """\t\tlet hasLatestUpdates = window.enableWelcomeMessage || window.mode.isCODesktop();
+\t\tvar hasFeedback = this.map.feedback;
+\t\tvar hasAccessibilitySupport = window.enableAccessibility;
+\t\tvar hasAccessibilityCheck = this.map.getDocType() === 'text';
+\t\tconst isDebugOn = this.map._debug.debugOn;
+\t\tvar hasAbout = window.L.DomUtil.get('about-dialog') !== null;
+\t\tvar hasServerAudit = this.getHiddenItems() ? !this.getHiddenItems().includes('server-audit') : true;
+""",
+    """\t\tlet hasLatestUpdates = false;
+\t\tvar hasFeedback = false;
+\t\tvar hasAccessibilitySupport = window.enableAccessibility;
+\t\tvar hasAccessibilityCheck = this.map.getDocType() === 'text';
+\t\tconst isDebugOn = this.map._debug.debugOn;
+\t\tvar hasAbout = window.L.DomUtil.get('about-dialog') !== null;
+\t\tvar hasServerAudit = false;
+""",
+    "Help tab hidden support/update/server-audit groups",
+)
+for old_block in [
+    """\t\t\t\t{
+\t\t\t\t\t'type': 'toolbox',
+\t\t\t\t\t'children': [
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\t'id': 'forum',
+\t\t\t\t\t\t\t'type': 'bigtoolitem',
+\t\t\t\t\t\t\t'text': _('Forum'),
+\t\t\t\t\t\t\t'command': '.uno:ForumHelp',
+\t\t\t\t\t\t\t'accessibility': { focusBack: true, combination: 'C', de: null }
+\t\t\t\t\t\t}
+\t\t\t\t\t]
+\t\t\t\t},
+\t\t\t\t{
+\t\t\t\t\t'type': 'toolbox',
+\t\t\t\t\t'children': [
+\t\t\t\t\t\t{
+\t\t\t\t\t\t\t'id': 'report-an-issue',
+\t\t\t\t\t\t\t'type': 'bigtoolitem',
+\t\t\t\t\t\t\t'text': _('Report an issue'),
+\t\t\t\t\t\t\t'command': '.uno:ReportIssue',
+\t\t\t\t\t\t\t'accessibility': { focusBack: true, combination: 'K', de: null }
+\t\t\t\t\t\t},
+\t\t\t\t\t]
+\t\t\t\t},
+""",
+]:
+    text = notebook.read_text(encoding="utf-8", errors="ignore")
+    if old_block in text:
+        notebook.write_text(text.replace(old_block, ""), encoding="utf-8", newline="\n")
+        changed += 1
+
+server_audit = root / "browser" / "src" / "control" / "Control.ServerAuditDialog.ts"
+if server_audit.exists():
+    text = server_audit.read_text(encoding="utf-8", errors="ignore")
+    patched = text.replace("https://sdk.collaboraonline.com/docs/", "")
+    patched = patched.replace("SDK:", "Runtime:")
+    if patched != text:
+        server_audit.write_text(patched, encoding="utf-8", newline="\n")
+        changed += 1
+
+print(f"[debrand] patched {changed} product/legal UI source files")
+PY
+
+# Toolbar polish: keep the document name visible without letting it dominate
+# the notebookbar. Long names remain available through the existing tooltip.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+toolbar_css = root / "browser" / "css" / "toolbar.css"
+if not toolbar_css.exists():
+    raise SystemExit("[debrand] cannot find browser/css/toolbar.css for document title sizing")
+
+text = toolbar_css.read_text(encoding="utf-8", errors="ignore")
+marker = "/* Tlooto document title sizing */"
+patch = """
+
+/* Tlooto document title sizing */
+.main-nav.hasnotebookbar #document-titlebar {
+\tflex: 0 1 280px;
+\tmin-width: 120px;
+\tmax-width: 280px;
+}
+
+.main-nav.hasnotebookbar .document-title {
+\tmax-width: 100%;
+}
+
+.main-nav.hasnotebookbar #document-name-input {
+\twidth: 100% !important;
+\tmax-width: 260px;
+\theight: 22px;
+\tline-height: 20px;
+\tfont-size: var(--default-font-size) !important;
+\tfont-weight: 600;
+\tpadding: 0 6px;
+\ttext-align: center;
+\toverflow: hidden;
+\ttext-overflow: ellipsis;
+\twhite-space: nowrap;
+}
+
+@media (max-width: 900px) {
+\t.main-nav.hasnotebookbar #document-titlebar {
+\t\tflex-basis: 180px;
+\t\tmax-width: 180px;
+\t}
+}
+"""
+
+if marker not in text:
+    toolbar_css.write_text(text.rstrip() + patch + "\n", encoding="utf-8", newline="\n")
+    print("[debrand] patched notebookbar document title sizing")
+else:
+    print("[debrand] notebookbar document title sizing patch already present")
 PY
 
 # Build compatibility patch for upstream main as checked on 2026-06-03:

@@ -33,6 +33,30 @@ test('debranding patch covers build-time configure defaults', () => {
   assert.match(patch, /https:\/\/tlooto\.com/);
 });
 
+test('debranding patch removes unsafe upstream support surfaces from Help and About', () => {
+  const patch = readProjectFile('branding/debrand-online.sh');
+  assert.match(patch, /runtime build: \$\{info\.coolwsdHash\}/);
+  assert.match(patch, /CodeCrain Co\., Ltd\./);
+  assert.match(patch, /source terms remain available in the service legal notice/);
+  assert.match(patch, /id === 'report-an-issue' \|\| id === 'forum'/);
+  assert.match(patch, /Support is available from Tlooto/);
+  assert.match(patch, /let hasLatestUpdates = false/);
+  assert.match(patch, /var hasFeedback = false/);
+  assert.match(patch, /var hasServerAudit = false/);
+  assert.doesNotMatch(patch, /window\.open\('https:\/\/github\.com\/CollaboraOnline\/online\/issues'/);
+  assert.doesNotMatch(patch, /window\.open\('https:\/\/forum\.collaboraonline\.com'/);
+});
+
+test('debranding patch keeps notebookbar document title visually restrained', () => {
+  const patch = readProjectFile('branding/debrand-online.sh');
+  assert.match(patch, /Tlooto document title sizing/);
+  assert.match(patch, /#document-titlebar/);
+  assert.match(patch, /max-width: 280px/);
+  assert.match(patch, /#document-name-input/);
+  assert.match(patch, /font-size: var\(--default-font-size\) !important/);
+  assert.match(patch, /text-overflow: ellipsis/);
+});
+
 test('source and native builds apply the public debranding patch before compilation', () => {
   const sourceBuild = readProjectFile('scripts/build-source-editor-image.mjs');
   const nativeBuild = readProjectFile('scripts/build-native-editor.mjs');
