@@ -4,6 +4,9 @@ This repository publishes the document editor runtime layer and the public
 source patches used to build it. The repository is licensed under the Mozilla
 Public License 2.0.
 
+The DOCX editor source is vendored under `editor_docx/`. The HWP/HWPX editor
+source is vendored separately under `editor_hwpx/`.
+
 The private SaaS application that connects to this runtime over WOPI is a
 separate larger work. Its authentication, storage, database, billing, product UI,
 deployment secrets, and proprietary service code are not part of this public

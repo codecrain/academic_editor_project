@@ -5,16 +5,20 @@ Commercial use status:
 The intended production path is the native runtime from this public repository,
 built in a public CI/build environment, installed on the Linux service server
 from the release artifact, and managed by pm2. The online server/browser is
-built from public source with public source patches. The engine uses the official
-public engine asset archive by default so small application servers do not need
-to compile the full office engine locally. The repository is licensed under
-MPL-2.0 and keeps the runtime source patches public. This is the path to use for
-commercial SaaS deployment.
+built from public source with public source patches. The vendored DOCX source is
+kept under `editor_docx/`, and the HWP/HWPX runtime source is kept separately
+under `editor_hwpx/`. The engine uses the official public engine asset archive
+by default so small application servers do not need to compile the full office
+engine locally. The repository is licensed under MPL-2.0 and keeps the runtime
+source patches public. This is the path to use for commercial SaaS deployment.
 
 License boundary:
 
 - Keep this public runtime repository, including source patches and build
   scripts that modify MPL-covered editor code, under MPL-2.0.
+- Keep DOCX and HWP/HWPX editor work separated in `editor_docx/` and
+  `editor_hwpx/` so their source, notices, and build paths can be audited
+  independently.
 - Keep the private SaaS service repository separate. The WOPI host,
   authentication, storage, billing, product UI, deployment secrets, and
   proprietary service code do not become MPL-2.0 merely because they integrate
@@ -24,7 +28,7 @@ License boundary:
   `OPEN_SOURCE_NOTICE.md`, and the exact runtime source-offer evidence for the
   deployed release.
 
-Official basis checked on 2026-06-03:
+Official basis checked on 2026-06-12:
 
 - Mozilla MPL FAQ says MPL-covered software may be used by anyone, including
   companies, for any purpose; obligations are triggered mainly by distribution.
@@ -52,6 +56,11 @@ Official basis checked on 2026-06-03:
   compiling the full engine, and says that path is enough when working only on
   the online side or when quickly getting going.
   https://collaboraonline.github.io/post/build-code/
+- The upstream RHWP project declares an MIT license and separately notes that
+  Hancom/HWP/HWPX marks are registered marks of Hancom and that RHWP is
+  independent from Hancom. Preserve that notice and avoid implying Hancom
+  affiliation.
+  https://github.com/edwardkim/rhwp
 
 Do not use:
 

@@ -16,6 +16,11 @@ Thumbs.db
 build/
 dist/
 coverage/
+output/
+**/.tmp-render/
+**/target/
+**/node_shrinkpack/*.tar
+editor_hwpx/pdf-large/
 
 *.pem
 *.key

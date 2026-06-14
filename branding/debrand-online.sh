@@ -79,6 +79,12 @@ replacements = {
 def patch_text(text: str) -> str:
     patched_lines = []
     for line in text.splitlines(keepends=True):
+        line = re.sub(
+            r'(<input\b[^>]*\bid=["\']init-product-branding-url["\'][^>]*\bvalue=)["\'][^"\']*["\']',
+            r'\1""',
+            line,
+            flags=re.IGNORECASE,
+        )
         if "Copyright the Collabora Online contributors" in line:
             patched_lines.append(line)
             continue
@@ -412,7 +418,7 @@ if util.exists():
 PY
 
 if grep -RIn --exclude-dir=.git --exclude='*.md' --exclude='COPYING*' --exclude='LICENSE*' \
-  -E 'Collabora Online Development Edition|Collabora Online Welcome|Collabora Office|Oops, there is a problem connecting to Collabora Online|Your Collabora Online server needs updating|collabora-office-white\.svg|CollaboraOnline|collaboraonline|collaboraoffice' \
+  -E 'Collabora Online Development Edition|Collabora Online Welcome|Collabora Office|Oops, there is a problem connecting to Collabora Online|Your Collabora Online server needs updating|collabora-office-white\.svg|CollaboraOnline|collaboraonline|collaboraoffice|init-product-branding-url" value="https?://[^"]*collabora' \
   "${ROOT_DIR}/browser" "${ROOT_DIR}/wsd" >/tmp/academic-editor-branding-scan.txt 2>/dev/null; then
   echo "[debrand] user-facing trademark strings remain in browser/wsd sources:" >&2
   cat /tmp/academic-editor-branding-scan.txt >&2

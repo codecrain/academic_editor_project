@@ -1,0 +1,17 @@
+{
+  "name": "academic-rhwp-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "ensure": "node scripts/ensure-studio.mjs",
+    "build": "node scripts/ensure-studio.mjs --build",
+    "dev": "node scripts/start-studio.mjs dev",
+    "preview": "node scripts/start-studio.mjs preview",
+    "start": "node scripts/start-studio.mjs preview",
+    "smoke": "node scripts/smoke-studio.mjs"
+  },
+  "dependencies": {
+    "@rhwp/core": "0.7.15"
+  }
+}

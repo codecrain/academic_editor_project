@@ -13,6 +13,8 @@ the open-source tree.
 
 ## What This Repository Owns
 
+- Vendored DOCX editor source under `editor_docx/`.
+- Vendored HWP/HWPX editor source under `editor_hwpx/`.
 - Source-build orchestration for the native document editor runtime.
 - Optional source-built Docker fallback for local/isolated testing.
 - Public debranding patch files applied before compilation.
@@ -42,9 +44,24 @@ Fast checks for ordinary script, wrapper, and compliance changes:
 npm run dev:check
 ```
 
-This runs the public-safety scan, runtime unit tests, and syntax checks without
-starting a server. To start the editor, verify `/hosting/discovery` plus
-`cool.html`, and then stop only the runtime that the check created:
+To start the local editor runtimes together for service integration:
+
+```bash
+npm run dev
+npm run stop
+```
+
+`npm run dev` starts the existing DOCX document editor runtime and the
+self-hosted HWP/HWPX Studio runtime from `editor_hwpx/`. `npm run stop` stops
+only those editor runtimes. Local dev defaults to these stable subpaths:
+
+- DOCX discovery: `http://127.0.0.1:9980/docx/hosting/discovery`
+- HWP/HWPX Studio: `http://127.0.0.1:11004/hwpx/`
+
+`npm run dev:check` runs the public-safety scan, runtime unit tests, and syntax
+checks without starting a server. To start the editor, verify
+`/hosting/discovery` plus `cool.html`, and then stop only the runtime that the
+check created:
 
 ```bash
 npm run dev:check:runtime
@@ -62,6 +79,12 @@ npm run dev:source:prepare
 npm run dev:source:build
 npm run dev:source:run
 ```
+
+`editor_docx/` is the default DOCX editor source tree. `dev:source:prepare`
+reuses that tree and reapplies the public patch through
+`editor_docx/scripts/apply-docx-editor-patches.mjs`, which reads the Python patch blocks
+from `branding/debrand-online.sh`. The prepare step works on Windows; the
+actual Collabora build and `make run` steps remain Linux-only.
 
 `dev:source:run` runs `make run` in the foreground with
 `COOL_SERVE_FROM_FS=1`. After the first Linux build, browser-side source changes
@@ -246,6 +269,7 @@ Runtime environment variables:
 - `EDITOR_RUNTIME_MODE`: `auto`, `native`, or `docker`. Default: `auto`.
 - `EDITOR_NATIVE_PM2_NAME`: native pm2 process name. Default: `academic-editor-native`.
 - `EDITOR_HOST_PORT`: editor port. Default: `9980`.
+- `EDITOR_SERVICE_ROOT`: document editor URL prefix. `npm run dev` defaults to `/docx`.
 - `EDITOR_PUBLIC_URL`: public service origin used by browser iframes.
 - `EDITOR_INTERNAL_SERVER_URL`: internal editor origin. Default: `http://127.0.0.1:${EDITOR_HOST_PORT}`.
 - `EDITOR_DISCOVERY_SERVER_URL`: discovery origin. Default: `EDITOR_INTERNAL_SERVER_URL`.
@@ -263,8 +287,11 @@ Runtime environment variables:
 
 Normal end users should not see upstream product marks in the editor workflow.
 The build process applies `branding/debrand-online.sh` before compiling browser
-and server assets. Required legal notices are preserved in this public repository
-and should be linked from a small service-level open-source notice page.
+and server assets. The in-tree `editor_docx/` source can be patched on Windows
+with `editor_docx/scripts/apply-docx-editor-patches.mjs`; Linux source/native builds still
+inject the bash patch into the generated build context. Required legal notices
+are preserved in this public repository and should be linked from a small
+service-level open-source notice page.
 
 ## Compliance
 
