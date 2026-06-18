@@ -145,3 +145,24 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /npm run smoke/);
   assert.match(helper, /pm2 save/);
 });
+
+test('legacy root script paths delegate to editor_docx scripts', () => {
+  for (const scriptName of [
+    'doctor-native-editor.mjs',
+    'start-editor.mjs',
+    'audit-native-editor-runtime.mjs',
+    'export-source-offer.mjs',
+    'smoke-editor.mjs',
+    'install-native-artifact.mjs',
+  ]) {
+    assert.equal(
+      readProjectFile(`scripts/${scriptName}`).trim(),
+      `import '../editor_docx/scripts/${scriptName}';`,
+    );
+  }
+
+  assert.match(
+    readProjectFile('scripts/install-native-deps.sh'),
+    /exec bash "\$SCRIPT_DIR\/\.\.\/editor_docx\/scripts\/install-native-deps\.sh" "\$@"/,
+  );
+});
