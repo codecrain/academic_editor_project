@@ -86,6 +86,27 @@ function parsePositiveInteger(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function parseDockerByteSize(value, fallback = 0) {
+  const raw = String(value ?? '').trim().toLowerCase();
+  const match = raw.match(/^(\d+(?:\.\d+)?)([bkmg])?$/);
+  if (!match) {
+    return fallback;
+  }
+
+  const amount = Number(match[1]);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return fallback;
+  }
+
+  const multipliers = {
+    b: 1,
+    k: 1024,
+    m: 1024 * 1024,
+    g: 1024 * 1024 * 1024,
+  };
+  return Math.round(amount * (multipliers[match[2] || 'b'] ?? 1));
+}
+
 function splitArgs(input) {
   const args = [];
   let current = '';
@@ -236,7 +257,7 @@ function resolvePublicProtocol() {
 
 function buildDefaultExtraParams() {
   const sslTermination = resolvePublicProtocol() === 'https:' ? 'true' : 'false';
-  return `--o:ssl.enable=false --o:ssl.termination=${sslTermination} --o:welcome.enable=false --o:allow_update_popup=false`;
+  return `--o:ssl.enable=false --o:ssl.termination=${sslTermination} --o:welcome.enable=false --o:allow_update_popup=false --o:experimental_features=false`;
 }
 
 function normalizeAliasOrigin(value) {
@@ -599,7 +620,7 @@ function inspectContainer(dockerCommand, containerName) {
     'inspect',
     containerName,
     '--format',
-    '{{json .Config.Env}}\n{{json .HostConfig.PortBindings}}\n{{json .HostConfig.Binds}}\n{{.Config.Image}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}',
+    '{{json .Config.Env}}\n{{json .HostConfig.PortBindings}}\n{{json .HostConfig.Binds}}\n{{.Config.Image}}\n{{json .Config.Entrypoint}}\n{{json .Config.Cmd}}\n{{json .HostConfig.CapAdd}}\n{{json .HostConfig.SecurityOpt}}\n{{.HostConfig.ShmSize}}',
   ]);
   if (result.status !== 0) {
     return null;
@@ -612,6 +633,9 @@ function inspectContainer(dockerCommand, containerName) {
     image = '',
     entrypointJson = 'null',
     cmdJson = 'null',
+    capAddJson = '[]',
+    securityOptJson = '[]',
+    shmSize = '0',
   ] = result.stdout.trim().split(/\r?\n/);
   const envEntries = JSON.parse(envJson);
   const env = Object.fromEntries(
@@ -630,6 +654,9 @@ function inspectContainer(dockerCommand, containerName) {
     cmd: JSON.parse(cmdJson),
     binds: JSON.parse(bindsJson) ?? [],
     portBindings: JSON.parse(portBindingsJson),
+    capAdd: JSON.parse(capAddJson) ?? [],
+    securityOpt: JSON.parse(securityOptJson) ?? [],
+    shmSize: Number(shmSize) || 0,
   };
 }
 
@@ -643,6 +670,10 @@ function getHostPorts(portBindings) {
 
 function sameJsonValue(left, right) {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function normalizeOptionalDockerList(value) {
+  return Array.isArray(value) ? value : [];
 }
 
 function getDockerMismatchReasons(current, expected) {
@@ -675,6 +706,18 @@ function getDockerMismatchReasons(current, expected) {
 
   if (!sameJsonValue(current.binds ?? [], expected.binds ?? [])) {
     reasons.push('binds');
+  }
+
+  if (!sameJsonValue(normalizeOptionalDockerList(current.capAdd), expected.capAdd)) {
+    reasons.push('cap-add');
+  }
+
+  if (!sameJsonValue(normalizeOptionalDockerList(current.securityOpt), expected.securityOpt)) {
+    reasons.push('security-opt');
+  }
+
+  if (Number(current.shmSize ?? 0) !== Number(expected.shmSize ?? 0)) {
+    reasons.push('shm-size');
   }
 
   return reasons;
@@ -810,6 +853,9 @@ async function startDocker(context) {
     ...(extraFontsDir ? { SAL_PRIVATE_FONTPATH: DOCX_EXTRA_FONTS_TARGET } : {}),
     ...(context.wopiAliasGroup ? { aliasgroup1: context.wopiAliasGroup } : {}),
   };
+  const dockerCapAdd = ['MKNOD'];
+  const dockerSecurityOpt = splitArgs(readEnv('EDITOR_DOCKER_SECURITY_OPT', 'seccomp=unconfined'));
+  const dockerShmSize = readEnv('EDITOR_DOCKER_SHM_SIZE', '1g');
 
   const expectedRuntime = {
     image,
@@ -818,6 +864,9 @@ async function startDocker(context) {
     cmd: dockerCoolwsdArgs,
     env: dockerEnv,
     binds: fontBinds,
+    capAdd: dockerCapAdd,
+    securityOpt: dockerSecurityOpt,
+    shmSize: parseDockerByteSize(dockerShmSize),
   };
 
   if (recreate && dockerNames(dockerCommand, true).has(containerName)) {
@@ -857,8 +906,9 @@ async function startDocker(context) {
     containerName,
     '--restart',
     'unless-stopped',
-    '--cap-add',
-    'MKNOD',
+    ...dockerCapAdd.flatMap((capability) => ['--cap-add', capability]),
+    ...(dockerShmSize ? ['--shm-size', dockerShmSize] : []),
+    ...dockerSecurityOpt.flatMap((option) => ['--security-opt', option]),
     '--add-host=host.docker.internal:host-gateway',
     '--entrypoint',
     '/usr/bin/coolwsd',

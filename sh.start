@@ -27,4 +27,4 @@ export EDITOR_RECREATE="${EDITOR_RECREATE:-true}"
 export EDITOR_REQUIRE_PUBLIC_URL="${EDITOR_REQUIRE_PUBLIC_URL:-true}"
 export EDITOR_NATIVE_AUTO_LATEST="${EDITOR_NATIVE_AUTO_LATEST:-false}"
 
-exec "$ROOT_DIR/editor_docx/scripts/deploy-native-editor.sh" "$@"
+exec bash "$ROOT_DIR/editor_docx/scripts/deploy-native-editor.sh" "$@"

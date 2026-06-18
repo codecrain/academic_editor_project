@@ -28,4 +28,4 @@ export EDITOR_REPO_SYNC="${EDITOR_REPO_SYNC:-true}"
 export EDITOR_RECREATE="${EDITOR_RECREATE:-true}"
 export EDITOR_NATIVE_AUTO_LATEST="${EDITOR_NATIVE_AUTO_LATEST:-true}"
 
-exec "$ROOT_DIR/editor_docx/scripts/deploy-native-editor.sh" "$@"
+exec bash "$ROOT_DIR/editor_docx/scripts/deploy-native-editor.sh" "$@"

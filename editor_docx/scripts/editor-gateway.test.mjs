@@ -31,7 +31,7 @@ function close(server) {
   });
 }
 
-function requestWebSocketUpgrade(port, pathname) {
+function requestWebSocketUpgrade(port, pathname, extraHeaders = []) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');
     let response = '';
@@ -68,6 +68,7 @@ function requestWebSocketUpgrade(port, pathname) {
           'Sec-WebSocket-Version: 13',
           'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
           `Origin: http://127.0.0.1:${port}`,
+          ...extraHeaders,
           '',
           '',
         ].join('\r\n'),
@@ -159,12 +160,108 @@ test('gateway forwards DOCX websocket upgrades with public proxy headers', async
   assert.equal(typeof gatewayAddress, 'object');
 
   try {
-    const response = await requestWebSocketUpgrade(gatewayAddress.port, '/cool/ws?WOPISrc=x');
+    const response = await requestWebSocketUpgrade(gatewayAddress.port, '/cool/ws?WOPISrc=x', [
+      'Sec-WebSocket-Extensions: permessage-deflate',
+    ]);
     assert.match(response, /101 Switching Protocols/);
-    assert.equal(capturedRequest?.url, '/cool/ws?WOPISrc=x');
-    assert.equal(capturedRequest?.headers.host, '127.0.0.1:11004');
-    assert.equal(capturedRequest?.headers.origin, 'http://127.0.0.1:11004');
-    assert.equal(capturedRequest?.headers['x-forwarded-host'], '127.0.0.1:11004');
+    assert.equal(capturedRequest?.url, '/docx/cool/ws?WOPISrc=x');
+    assert.equal(capturedRequest?.headers.host, `127.0.0.1:${gatewayAddress.port}`);
+    assert.equal(capturedRequest?.headers.origin, `http://127.0.0.1:${gatewayAddress.port}`);
+    assert.equal(capturedRequest?.headers['x-forwarded-host'], `127.0.0.1:${gatewayAddress.port}`);
+    assert.equal(capturedRequest?.headers['x-forwarded-proto'], 'http');
+    assert.equal(capturedRequest?.headers['sec-websocket-extensions'], undefined);
+  } finally {
+    await close(gateway);
+    await close(upstream);
+  }
+});
+
+test('gateway prefixes root DOCX runtime HTTP requests with the service root', async () => {
+  let capturedRequest = null;
+  const upstream = http.createServer((request, response) => {
+    capturedRequest = {
+      url: request.url,
+      headers: request.headers,
+    };
+    response.writeHead(204);
+    response.end();
+  });
+
+  const upstreamAddress = await listen(upstream);
+  assert.equal(typeof upstreamAddress, 'object');
+
+  const gateway = createGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1:11004',
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    docxRuntimeOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+    hwpxRuntimeOrigin: '',
+    hwpxStaticRoot: '',
+    wopiBaseUrl: 'http://127.0.0.1:11004',
+    sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
+  });
+  const gatewayAddress = await listen(gateway);
+  assert.equal(typeof gatewayAddress, 'object');
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${gatewayAddress.port}/browser/hash/branding.css`, {
+      headers: {
+        'X-Forwarded-Host': 'localhost:11002',
+        'X-Forwarded-Proto': 'http',
+      },
+    });
+    assert.equal(response.status, 204);
+    assert.equal(capturedRequest?.url, '/docx/browser/hash/branding.css');
+    assert.equal(capturedRequest?.headers.host, 'localhost:11002');
+    assert.equal(capturedRequest?.headers['x-forwarded-host'], 'localhost:11002');
+  } finally {
+    await close(gateway);
+    await close(upstream);
+  }
+});
+
+test('gateway preserves forwarded public host for proxied DOCX websocket upgrades', async () => {
+  let capturedRequest = null;
+  const upstream = http.createServer();
+  upstream.on('upgrade', (request, socket) => {
+    capturedRequest = {
+      url: request.url,
+      headers: request.headers,
+    };
+    socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+    socket.end();
+  });
+
+  const upstreamAddress = await listen(upstream);
+  assert.equal(typeof upstreamAddress, 'object');
+
+  const gateway = createGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1:11004',
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    docxRuntimeOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+    hwpxRuntimeOrigin: '',
+    hwpxStaticRoot: '',
+    wopiBaseUrl: 'http://127.0.0.1:11004',
+    sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
+  });
+  const gatewayAddress = await listen(gateway);
+  assert.equal(typeof gatewayAddress, 'object');
+
+  try {
+    const response = await requestWebSocketUpgrade(gatewayAddress.port, '/docx/cool/ws?WOPISrc=x', [
+      'X-Forwarded-Host: localhost:11002',
+      'X-Forwarded-Proto: http',
+    ]);
+    assert.match(response, /101 Switching Protocols/);
+    assert.equal(capturedRequest?.url, '/docx/cool/ws?WOPISrc=x');
+    assert.equal(capturedRequest?.headers.host, 'localhost:11002');
+    assert.equal(capturedRequest?.headers.origin, 'http://localhost:11002');
+    assert.equal(capturedRequest?.headers['x-forwarded-host'], 'localhost:11002');
     assert.equal(capturedRequest?.headers['x-forwarded-proto'], 'http');
   } finally {
     await close(gateway);

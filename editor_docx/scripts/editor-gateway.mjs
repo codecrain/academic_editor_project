@@ -110,6 +110,20 @@ function isDocxRuntimePath(pathname, docxServiceRoot) {
     pathname.startsWith('/loleaflet/');
 }
 
+function isRootDocxRuntimePath(pathname) {
+  return pathname.startsWith('/browser/') ||
+    pathname.startsWith('/hosting/') ||
+    pathname.startsWith('/cool/') ||
+    pathname.startsWith('/lool/') ||
+    pathname.startsWith('/loleaflet/');
+}
+
+function shouldPrefixDocxServiceRoot(pathname, docxServiceRoot) {
+  return Boolean(docxServiceRoot) &&
+    isRootDocxRuntimePath(pathname) &&
+    !pathname.startsWith(`${docxServiceRoot}/`);
+}
+
 function isHwpxPath(pathname, hwpxBasePath) {
   const base = hwpxBasePath.replace(/\/$/, '');
   return pathname === base || pathname.startsWith(`${base}/`);
@@ -755,18 +769,40 @@ function copyProxyHeaders(headers, target, options = {}) {
   return copied;
 }
 
-function buildDocxProxyHeaderOptions(config) {
-  const publicUrl = new URL(config.publicOrigin);
+function getFirstHeaderValue(req, name) {
+  const value = req.headers[String(name).toLowerCase()];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function buildDocxProxyHeaderOptions(req, config) {
+  const fallbackPublicUrl = new URL(config.publicOrigin);
+  const forwardedHost = getFirstHeaderValue(req, 'x-forwarded-host') || getFirstHeaderValue(req, 'host');
+  const forwardedProto =
+    getFirstHeaderValue(req, 'x-forwarded-proto') ||
+    fallbackPublicUrl.protocol.replace(/:$/, '');
+  const publicHost = String(forwardedHost || fallbackPublicUrl.host).split(',')[0].trim();
+  const publicProto = String(forwardedProto || 'http').split(',')[0].trim().replace(/:$/, '') || 'http';
+  const publicOrigin = `${publicProto}://${publicHost}`;
+
   return {
-    host: publicUrl.host,
-    origin: publicUrl.origin,
-    forwardedHost: publicUrl.host,
-    forwardedProto: publicUrl.protocol.replace(/:$/, ''),
+    host: publicHost,
+    origin: publicOrigin,
+    forwardedHost: publicHost,
+    forwardedProto: publicProto,
+    docxServiceRoot: config.docxServiceRoot,
   };
 }
 
+function buildProxyTargetUrl(requestUrl, targetOrigin, headerOptions = {}) {
+  const target = new URL(requestUrl || '/', targetOrigin);
+  if (shouldPrefixDocxServiceRoot(target.pathname, headerOptions.docxServiceRoot || '')) {
+    target.pathname = `${headerOptions.docxServiceRoot}${target.pathname}`;
+  }
+  return target;
+}
+
 function proxyHttpRequest(req, res, targetOrigin, headerOptions = {}) {
-  const target = new URL(req.url || '/', targetOrigin);
+  const target = buildProxyTargetUrl(req.url, targetOrigin, headerOptions);
   const client = target.protocol === 'https:' ? https : http;
   const shouldTransformHtml = isEditorHtmlPath(getRequestPath(req.url));
   const requestHeaders = copyProxyHeaders(req.headers, target, headerOptions);
@@ -807,11 +843,12 @@ function proxyHttpRequest(req, res, targetOrigin, headerOptions = {}) {
 }
 
 function proxyWebSocket(req, socket, head, targetOrigin, headerOptions = {}) {
-  const target = new URL(req.url || '/', targetOrigin);
+  const target = buildProxyTargetUrl(req.url, targetOrigin, headerOptions);
   const port = Number(target.port || (target.protocol === 'https:' ? 443 : 80));
   const connect = target.protocol === 'https:' ? tls.connect : net.connect;
   const targetSocket = connect({ host: target.hostname, port, servername: target.hostname }, () => {
     const headers = copyProxyHeaders(req.headers, target, headerOptions);
+    delete headers['sec-websocket-extensions'];
     const headerLines = Object.entries(headers)
       .flatMap(([key, value]) => {
         if (Array.isArray(value)) {
@@ -843,8 +880,8 @@ function resolveTargetOrigin(req, config) {
   return '';
 }
 
-function resolveProxyHeaderOptions(targetOrigin, config) {
-  return targetOrigin === config.docxRuntimeOrigin ? buildDocxProxyHeaderOptions(config) : {};
+function resolveProxyHeaderOptions(req, targetOrigin, config) {
+  return targetOrigin === config.docxRuntimeOrigin ? buildDocxProxyHeaderOptions(req, config) : {};
 }
 
 function createGatewayServer(config) {
@@ -883,7 +920,7 @@ function createGatewayServer(config) {
 
       const targetOrigin = resolveTargetOrigin(req, config);
       if (targetOrigin) {
-        proxyHttpRequest(req, res, targetOrigin, resolveProxyHeaderOptions(targetOrigin, config));
+        proxyHttpRequest(req, res, targetOrigin, resolveProxyHeaderOptions(req, targetOrigin, config));
         return;
       }
 
@@ -899,7 +936,7 @@ function createGatewayServer(config) {
       socket.destroy();
       return;
     }
-    proxyWebSocket(req, socket, head, targetOrigin, resolveProxyHeaderOptions(targetOrigin, config));
+    proxyWebSocket(req, socket, head, targetOrigin, resolveProxyHeaderOptions(req, targetOrigin, config));
   });
 
   return server;

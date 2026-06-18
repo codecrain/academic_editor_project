@@ -172,8 +172,20 @@ test('docker runtime passes host:port as server_name without forcing websocket i
   assert.match(starter, /return new URL\(publicUrl\)\.host;/);
   assert.match(starter, /'server_name', publicHost/);
   assert.match(starter, /resolveWopiHealthBaseUrl/);
+  assert.match(starter, /experimental_features=false/);
   assert.doesNotMatch(starter, /'indirection_endpoint\.url'/);
   assert.doesNotMatch(starter, /WOPISrc', 'http:\/\/127\.0\.0\.1\/editor-health-check'/);
+});
+
+test('docker runtime uses document-kit compatible isolation settings', () => {
+  const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
+  assert.match(starter, /EDITOR_DOCKER_SHM_SIZE/);
+  assert.match(starter, /EDITOR_DOCKER_SECURITY_OPT/);
+  assert.match(starter, /'--shm-size'/);
+  assert.match(starter, /'--security-opt'/);
+  assert.match(starter, /seccomp=unconfined/);
+  assert.match(starter, /HostConfig\.SecurityOpt/);
+  assert.match(starter, /HostConfig\.ShmSize/);
 });
 
 test('docker runtime forwards configured WOPI alias group', () => {
