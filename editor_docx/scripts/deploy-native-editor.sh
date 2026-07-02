@@ -76,6 +76,8 @@ apply_runtime_defaults() {
   export EDITOR_GATEWAY_DOCX_ORIGIN="${EDITOR_GATEWAY_DOCX_ORIGIN:-http://127.0.0.1:${EDITOR_HOST_PORT}}"
   export EDITOR_RUNTIME_INTERNAL_SERVER_URL="${EDITOR_RUNTIME_INTERNAL_SERVER_URL:-http://127.0.0.1:${EDITOR_HOST_PORT}${EDITOR_SERVICE_ROOT}}"
   export EDITOR_RUNTIME_DISCOVERY_SERVER_URL="${EDITOR_RUNTIME_DISCOVERY_SERVER_URL:-${EDITOR_RUNTIME_INTERNAL_SERVER_URL}}"
+  export EDITOR_RUNTIME_INTERNAL_SERVER_URL="$(ensure_runtime_url_uses_service_root "${EDITOR_RUNTIME_INTERNAL_SERVER_URL}")"
+  export EDITOR_RUNTIME_DISCOVERY_SERVER_URL="$(ensure_runtime_url_uses_service_root "${EDITOR_RUNTIME_DISCOVERY_SERVER_URL}")"
   export EDITOR_INTERNAL_SERVER_URL="${EDITOR_INTERNAL_SERVER_URL:-http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_SERVICE_ROOT}}"
   export EDITOR_DISCOVERY_SERVER_URL="${EDITOR_DISCOVERY_SERVER_URL:-${EDITOR_INTERNAL_SERVER_URL}}"
   export EDITOR_RECREATE="${EDITOR_RECREATE:-true}"
@@ -101,6 +103,32 @@ apply_runtime_defaults() {
   if truthy "${EDITOR_REQUIRE_PUBLIC_URL:-false}" && [ -z "${EDITOR_PUBLIC_URL:-}" ]; then
     die "set EDITOR_PUBLIC_URL=https://your-service-domain before running production sh.start."
   fi
+}
+
+ensure_runtime_url_uses_service_root() {
+  local value="${1%/}"
+  if [ -z "${EDITOR_SERVICE_ROOT}" ] || [ -z "${value}" ]; then
+    printf '%s\n' "${value}"
+    return 0
+  fi
+
+  case "${value}" in
+    *"${EDITOR_SERVICE_ROOT}"|*"${EDITOR_SERVICE_ROOT}/"*)
+      printf '%s\n' "${value}"
+      return 0
+      ;;
+    */hosting/discovery)
+      printf '%s%s/hosting/discovery\n' "${value%/hosting/discovery}" "${EDITOR_SERVICE_ROOT}"
+      return 0
+      ;;
+  esac
+
+  if [[ "${value}" =~ ^https?://[^/]+$ ]]; then
+    printf '%s%s\n' "${value}" "${EDITOR_SERVICE_ROOT}"
+    return 0
+  fi
+
+  printf '%s\n' "${value}"
 }
 
 native_installed() {

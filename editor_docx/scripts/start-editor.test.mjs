@@ -80,6 +80,53 @@ test('start-editor reuses an already renderable editor before Docker fallback ch
   }
 });
 
+test('start-editor adds service root to origin-only discovery base URLs', async () => {
+  let port = 0;
+  const server = http.createServer((request, response) => {
+    if (request.url === '/hosting/discovery') {
+      response.writeHead(500, { 'Content-Type': 'text/plain' });
+      response.end('missing service root');
+      return;
+    }
+
+    if (request.url === '/docx/hosting/discovery') {
+      response.writeHead(200, { 'Content-Type': 'text/xml' });
+      response.end(`<wopi-discovery><net-zone><app name="writer"><action ext="docx" name="edit" urlsrc="http://127.0.0.1:${port}/docx/browser/test/cool.html?"/></app></net-zone></wopi-discovery>`);
+      return;
+    }
+
+    if (request.url?.startsWith('/docx/browser/test/cool.html?')) {
+      response.writeHead(200, { 'Content-Type': 'text/html' });
+      response.end('<html><body>editor</body></html>');
+      return;
+    }
+
+    response.writeHead(404);
+    response.end();
+  });
+
+  const address = await listen(server);
+  port = address.port;
+
+  try {
+    const result = await runStartEditor({
+      ...process.env,
+      EDITOR_RUNTIME_MODE: 'docker',
+      EDITOR_SERVICE_ROOT: '/docx',
+      EDITOR_DISCOVERY_SERVER_URL: `http://127.0.0.1:${address.port}`,
+      EDITOR_DOCKER_WAIT_TIMEOUT_MS: '1',
+      EDITOR_DOCKER_WAIT_INTERVAL_MS: '1',
+      PATH: '',
+      Path: '',
+    });
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /already ready/);
+  } finally {
+    await close(server);
+  }
+});
+
 test('start-editor rejects discovery-only editor when cool.html is broken', async () => {
   let port = 0;
   const server = http.createServer((request, response) => {

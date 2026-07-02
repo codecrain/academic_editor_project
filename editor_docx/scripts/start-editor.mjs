@@ -343,14 +343,37 @@ function resolveWopiHealthBaseUrl() {
   return resolvePublicOrigin() || 'http://127.0.0.1';
 }
 
+function ensureUrlUsesServiceRoot(url, serviceRoot) {
+  const normalized = normalizeOrigin(url);
+  const root = normalizeServiceRoot(serviceRoot);
+  if (!root) {
+    return normalized;
+  }
+
+  const parsed = new URL(normalized);
+  const pathname = parsed.pathname.replace(/\/$/, '');
+  if (!pathname || pathname === '/') {
+    parsed.pathname = root;
+    return parsed.toString().replace(/\/$/, '');
+  }
+  if (pathname === root || pathname.startsWith(`${root}/`)) {
+    return parsed.toString().replace(/\/$/, '');
+  }
+  if (pathname === '/hosting/discovery') {
+    parsed.pathname = `${root}/hosting/discovery`;
+    return parsed.toString().replace(/\/$/, '');
+  }
+  return normalized;
+}
+
 function resolveEditorDiscoveryUrl(hostPort, serviceRoot = '') {
   const configured = readFirstEnv([
     'EDITOR_HEALTH_URL',
     'EDITOR_DISCOVERY_SERVER_URL',
     'EDITOR_INTERNAL_SERVER_URL',
   ]);
-  const origin = normalizeOrigin(configured || `http://127.0.0.1:${hostPort}${serviceRoot}`);
-  return `${origin}/hosting/discovery`;
+  const origin = ensureUrlUsesServiceRoot(configured || `http://127.0.0.1:${hostPort}${serviceRoot}`, serviceRoot);
+  return /\/hosting\/discovery\/?$/i.test(origin) ? origin : `${origin}/hosting/discovery`;
 }
 
 function canFetch(url) {
