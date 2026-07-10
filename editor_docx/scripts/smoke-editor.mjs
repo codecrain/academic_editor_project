@@ -1,7 +1,9 @@
 import http from 'node:http';
 import https from 'node:https';
+import { createHash, randomBytes } from 'node:crypto';
 
 const DEFAULT_HOST_PORT = '9980';
+const WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 
 function readEnv(name, fallback) {
   const value = process.env[name];
@@ -104,6 +106,72 @@ function buildCoolHtmlHealthUrl(coolHtmlUrl) {
   return url.toString();
 }
 
+function buildWebSocketHealthUrl(coolHtmlUrl) {
+  const url = new URL(coolHtmlUrl);
+  const browserMarkerIndex = url.pathname.indexOf('/browser/');
+  const serviceRoot = browserMarkerIndex >= 0 ? url.pathname.slice(0, browserMarkerIndex) : '';
+  const wopiSrc = url.searchParams.get('WOPISrc') || 'http://127.0.0.1/editor-health-check';
+
+  url.pathname = `${serviceRoot}/cool/ws`.replace(/\/{2,}/g, '/');
+  url.search = '';
+  url.searchParams.set('WOPISrc', wopiSrc);
+  url.searchParams.set('access_token', 'editor-health-check');
+  url.searchParams.set('access_token_ttl', '0');
+  url.searchParams.set('compat', '');
+  return url.toString();
+}
+
+function upgradeWebSocket(url, timeoutMs) {
+  return new Promise((resolve) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+    const websocketKey = randomBytes(16).toString('base64');
+    const expectedAccept = createHash('sha1').update(`${websocketKey}${WEBSOCKET_GUID}`).digest('base64');
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(result);
+    };
+
+    const request = client.request(parsed, {
+      headers: {
+        Connection: 'Upgrade',
+        Origin: `${parsed.protocol}//${parsed.host}`,
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': websocketKey,
+        'Sec-WebSocket-Version': '13',
+      },
+    });
+
+    request.once('upgrade', (response, socket) => {
+      const accept = String(response.headers['sec-websocket-accept'] || '');
+      socket.destroy();
+      finish({
+        ok: response.statusCode === 101 && accept === expectedAccept,
+        statusCode: response.statusCode || 0,
+        error: accept === expectedAccept ? '' : 'invalid Sec-WebSocket-Accept header',
+      });
+    });
+    request.once('response', (response) => {
+      response.resume();
+      finish({ ok: false, statusCode: response.statusCode || 0, error: 'upgrade rejected' });
+    });
+    request.once('timeout', () => {
+      request.destroy();
+      finish({ ok: false, statusCode: 0, error: 'timeout' });
+    });
+    request.once('error', (error) => {
+      finish({ ok: false, statusCode: 0, error: error.message });
+    });
+    request.setTimeout(timeoutMs);
+    request.end();
+  });
+}
+
 async function main() {
   const timeoutMs = parsePositiveInteger(process.env.EDITOR_SMOKE_TIMEOUT_MS, 5_000);
   const discoveryUrl = resolveDiscoveryUrl();
@@ -125,8 +193,17 @@ async function main() {
     throw new Error(`Editor page failed at ${healthUrl}: ${editor.statusCode || editor.error || 'unknown error'}${detail ? `: ${detail}` : ''}`);
   }
 
+  const websocketUrl = buildWebSocketHealthUrl(healthUrl);
+  const websocket = await upgradeWebSocket(websocketUrl, timeoutMs);
+  if (!websocket.ok) {
+    throw new Error(
+      `Editor websocket failed at ${websocketUrl}: ${websocket.statusCode || websocket.error || 'unknown error'}`,
+    );
+  }
+
   console.log(`[editor:smoke] ok discovery=${discoveryUrl}`);
   console.log(`[editor:smoke] ok cool.html=${healthUrl}`);
+  console.log(`[editor:smoke] ok websocket=${websocketUrl}`);
 }
 
 try {

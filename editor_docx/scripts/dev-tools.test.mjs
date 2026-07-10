@@ -82,12 +82,15 @@ test('dev check cleans up only runtimes created by the check', () => {
   assert.match(devCheck, /EDITOR_DEV_KEEP_RUNNING/);
 });
 
-test('smoke check validates discovery and browser cool.html renderability', () => {
+test('smoke check validates discovery, browser rendering, and websocket upgrades', () => {
   const smoke = readProjectFile('editor_docx/scripts/smoke-editor.mjs');
   assert.match(smoke, /\/hosting\/discovery/);
   assert.match(smoke, /extractCoolHtmlUrl/);
   assert.match(smoke, /WOPISrc/);
   assert.match(smoke, /Editor page failed/);
+  assert.match(smoke, /Sec-WebSocket-Accept/);
+  assert.match(smoke, /Editor websocket failed/);
+  assert.match(smoke, /ok websocket=/);
 });
 
 test('package exposes fast dev and source hot-loop commands', () => {
