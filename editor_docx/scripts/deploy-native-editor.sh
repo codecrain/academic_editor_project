@@ -41,13 +41,23 @@ sync_repo() {
   truthy "${EDITOR_REPO_SYNC:-false}" || return 0
   ensure_command git
 
-  local branch
+  local branch before_head after_head reexec_count
   branch="$(git rev-parse --abbrev-ref HEAD)"
   [ "$branch" != "HEAD" ] || die "repository is detached. Set EDITOR_REPO_SYNC=false or check out a branch."
+  before_head="$(git rev-parse HEAD)"
 
   log "syncing repository branch ${branch}"
   git fetch --tags --prune
   git pull --ff-only
+  after_head="$(git rev-parse HEAD)"
+
+  if [ "$before_head" != "$after_head" ]; then
+    reexec_count="${EDITOR_DEPLOY_REEXEC_COUNT:-0}"
+    [ "$reexec_count" -lt 2 ] || die "repository kept changing during deployment; run the deploy command again."
+    export EDITOR_DEPLOY_REEXEC_COUNT="$((reexec_count + 1))"
+    log "repository updated; restarting deployment with the latest script"
+    exec bash "$0" "$@"
+  fi
 }
 
 apply_runtime_defaults() {
@@ -323,7 +333,7 @@ main() {
   ensure_command npm
   ensure_command curl
   apply_runtime_defaults
-  sync_repo
+  sync_repo "$@"
   install_deps_if_requested
   ensure_command pm2
   install_artifact_if_needed
