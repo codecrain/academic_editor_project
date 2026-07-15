@@ -146,6 +146,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(dev, /academic-editor-native-dev/);
   assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
   assert.match(dev, /deploy-native-editor\.sh/);
+  assert.match(helper, /EDITOR_NODE_VERSION="\$\{EDITOR_NODE_VERSION:-20\}"/);
+  assert.match(helper, /nvm use "\$EDITOR_NODE_VERSION"/);
   assert.match(helper, /git pull --ff-only/);
   assert.match(helper, /npm run install:native:artifact/);
   assert.match(helper, /run_docx_runtime_npm start:native/);
