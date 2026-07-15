@@ -242,6 +242,15 @@ test('docker runtime forwards configured WOPI alias group', () => {
   assert.match(starter, /aliasgroup1: context\.wopiAliasGroup/);
 });
 
+test('native runtime writes the configured WOPI aliases into coolwsd config overrides', () => {
+  const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
+  assert.match(starter, /function withNativeWopiAliasGroupParams/);
+  assert.match(starter, /storage\.wopi\.alias_groups\[@mode\]/);
+  assert.match(starter, /storage\.wopi\.alias_groups\.group\[0\]\.host\[@allow\]/);
+  assert.match(starter, /storage\.wopi\.alias_groups\.group\[0\]\.alias\[\$\{index\}\]/);
+  assert.match(starter, /EDITOR_EXTRA_PARAMS: nativeExtraParams/);
+});
+
 test('docx runtime supports project extra font directory', () => {
   const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
   assert.match(starter, /EDITOR_DOCX_EXTRA_FONTS_DIR/);
