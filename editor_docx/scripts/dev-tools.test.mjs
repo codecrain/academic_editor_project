@@ -135,6 +135,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP2=.*https:\/\/tlooto\.com/);
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP3=.*127\.0\.0\.1.*EDITOR_PUBLIC_URL/);
   assert.match(prod, /EDITOR_GATEWAY_PUBLIC_ORIGIN=.*EDITOR_PUBLIC_URL/);
+  assert.match(prod, /EDITOR_GATEWAY_HOST=.*0\.0\.0\.0/);
   assert.match(prod, /academic-editor-native/);
   assert.match(prod, /deploy-native-editor\.sh/);
   assert.match(dev, /http:\/\/175\.193\.85\.86:11004/);
@@ -143,6 +144,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(dev, /EDITOR_WOPI_ALIASGROUP2=.*https:\/\/tlooto\.com/);
   assert.match(dev, /EDITOR_WOPI_ALIASGROUP3=.*127\.0\.0\.1.*EDITOR_PUBLIC_URL/);
   assert.match(dev, /EDITOR_GATEWAY_PUBLIC_ORIGIN=.*EDITOR_PUBLIC_URL/);
+  assert.match(dev, /EDITOR_GATEWAY_HOST=.*0\.0\.0\.0/);
   assert.match(dev, /academic-editor-native-dev/);
   assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
   assert.match(dev, /deploy-native-editor\.sh/);
@@ -153,6 +155,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
   assert.match(helper, /start_editor_gateway/);
+  assert.match(helper, /127\.0\.0\.1:\$\{EDITOR_GATEWAY_PORT\}.*RHWP_STUDIO_BASE_PATH/);
   assert.match(helper, /academic-editor-gateway-dev/);
   assert.match(helper, /academic-editor-gateway-prod/);
   assert.match(helper, /EDITOR_GATEWAY_PORT/);

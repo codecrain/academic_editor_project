@@ -270,7 +270,7 @@ start_editor_gateway() {
 
   wait_for_url "${EDITOR_INTERNAL_SERVER_URL}/" "DOCX gateway"
   if truthy "$RHWP_ENABLED"; then
-    wait_for_url "${EDITOR_GATEWAY_PUBLIC_ORIGIN%/}${RHWP_STUDIO_BASE_PATH}" "HWPX gateway"
+    wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${RHWP_STUDIO_BASE_PATH}" "HWPX gateway"
   fi
 }
 
