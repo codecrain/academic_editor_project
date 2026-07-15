@@ -248,7 +248,15 @@ start_editor_gateway() {
   local gateway_script="$ROOT_DIR/editor_docx/scripts/editor-gateway.mjs"
   [ -f "$gateway_script" ] || die "editor gateway script was not found: $gateway_script"
 
-  pm2 delete "$EDITOR_GATEWAY_PM2_NAME" >/dev/null 2>&1 || true
+  local gateway_name
+  for gateway_name in \
+    "$EDITOR_GATEWAY_PM2_NAME" \
+    academic-editor-gateway \
+    academic-editor-gateway-dev \
+    academic-editor-gateway-prod
+  do
+    pm2 delete "$gateway_name" >/dev/null 2>&1 || true
+  done
   log "starting editor gateway pm2 process ${EDITOR_GATEWAY_PM2_NAME}"
   EDITOR_GATEWAY_HOST="$EDITOR_GATEWAY_HOST" \
   EDITOR_GATEWAY_PORT="$EDITOR_GATEWAY_PORT" \

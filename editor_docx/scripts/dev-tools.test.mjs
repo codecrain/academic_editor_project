@@ -153,6 +153,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
   assert.match(helper, /start_editor_gateway/);
+  assert.match(helper, /academic-editor-gateway-dev/);
+  assert.match(helper, /academic-editor-gateway-prod/);
   assert.match(helper, /EDITOR_GATEWAY_PORT/);
   assert.match(helper, /EDITOR_GATEWAY_HWPX_STATIC_ROOT/);
   assert.doesNotMatch(helper, /RHWP_STUDIO_INTERNAL_PORT/);
