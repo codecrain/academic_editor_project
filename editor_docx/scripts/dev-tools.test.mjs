@@ -129,11 +129,16 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   const helper = readProjectFile('editor_docx/scripts/deploy-native-editor.sh');
 
   assert.match(prod, /EDITOR_REQUIRE_PUBLIC_URL/);
+  assert.match(prod, /http:\/\/175\.193\.85\.86:11004/);
+  assert.match(prod, /EDITOR_WOPI_BASE_URL=.*EDITOR_PUBLIC_URL/);
+  assert.match(prod, /EDITOR_WOPI_ALIASES=.*127\.0\.0\.1/);
+  assert.match(prod, /EDITOR_GATEWAY_PUBLIC_ORIGIN=.*EDITOR_PUBLIC_URL/);
   assert.match(prod, /academic-editor-native/);
   assert.match(prod, /deploy-native-editor\.sh/);
-  assert.match(dev, /https:\/\/code-dev-v2\.tlooto\.com/);
+  assert.match(dev, /http:\/\/175\.193\.85\.86:11004/);
   assert.match(dev, /EDITOR_WOPI_BASE_URL=.*EDITOR_PUBLIC_URL/);
   assert.match(dev, /EDITOR_WOPI_ALIASES=.*127\.0\.0\.1/);
+  assert.match(dev, /EDITOR_GATEWAY_PUBLIC_ORIGIN=.*EDITOR_PUBLIC_URL/);
   assert.match(dev, /academic-editor-native-dev/);
   assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
   assert.match(dev, /deploy-native-editor\.sh/);
