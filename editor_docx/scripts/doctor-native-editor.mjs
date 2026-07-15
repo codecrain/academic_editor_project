@@ -116,14 +116,6 @@ async function main() {
     addResult(results, commandExists(command), `command ${command}`);
   }
 
-  const nodeVersion = runQuiet('node', ['--version']);
-  addResult(
-    results,
-    /^v20\./.test(String(nodeVersion.stdout ?? '').trim()),
-    'node version',
-    String(nodeVersion.stdout ?? nodeVersion.stderr ?? '').trim() || 'not available',
-  );
-
   const coolwsdBin = readEnv('EDITOR_NATIVE_COOLWSD_BIN', '/usr/bin/coolwsd');
   addResult(results, existsSync(coolwsdBin), 'coolwsd binary', coolwsdBin);
 

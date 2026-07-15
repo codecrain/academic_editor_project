@@ -29,11 +29,9 @@ ensure_command() {
 }
 
 load_node_runtime() {
-  export EDITOR_NODE_VERSION="${EDITOR_NODE_VERSION:-20}"
   if [ -s "${HOME:-}/.nvm/nvm.sh" ]; then
     # shellcheck source=/dev/null
     . "${HOME}/.nvm/nvm.sh"
-    nvm use "$EDITOR_NODE_VERSION" >/dev/null 2>&1 || nvm install "$EDITOR_NODE_VERSION"
   fi
 }
 
