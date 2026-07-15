@@ -235,20 +235,15 @@ test('docker runtime uses document-kit compatible isolation settings', () => {
   assert.match(starter, /HostConfig\.ShmSize/);
 });
 
-test('docker runtime forwards configured WOPI alias group', () => {
+test('docker and native runtimes forward independent WOPI host groups through upstream aliasgroup env vars', () => {
   const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
   assert.match(starter, /function resolveWopiAliasGroup\(\)/);
+  assert.match(starter, /function resolveWopiAliasGroups\(\)/);
+  assert.match(starter, /function buildWopiAliasGroupEnv\(aliasGroups\)/);
   assert.match(starter, /EDITOR_WOPI_ALIASGROUP1/);
-  assert.match(starter, /aliasgroup1: context\.wopiAliasGroup/);
-});
-
-test('native runtime writes the configured WOPI aliases into coolwsd config overrides', () => {
-  const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
-  assert.match(starter, /function withNativeWopiAliasGroupParams/);
-  assert.match(starter, /storage\.wopi\.alias_groups\[@mode\]/);
-  assert.match(starter, /storage\.wopi\.alias_groups\.group\[0\]\.host\[@allow\]/);
-  assert.match(starter, /storage\.wopi\.alias_groups\.group\[0\]\.alias\[\$\{index\}\]/);
-  assert.match(starter, /EDITOR_EXTRA_PARAMS: nativeExtraParams/);
+  assert.match(starter, /EDITOR_WOPI_ALIASGROUP\$\{index\}/);
+  assert.match(starter, /\.\.\.buildWopiAliasGroupEnv\(context\.wopiAliasGroups\)/);
+  assert.doesNotMatch(starter, /withNativeWopiAliasGroupParams/);
 });
 
 test('docx runtime supports project extra font directory', () => {

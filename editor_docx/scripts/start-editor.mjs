@@ -302,6 +302,20 @@ function resolveWopiAliasGroup() {
     .join(',');
 }
 
+function resolveWopiAliasGroups() {
+  const groups = [resolveWopiAliasGroup()];
+  for (let index = 2; index <= 16; index += 1) {
+    groups.push(readEnv(`EDITOR_WOPI_ALIASGROUP${index}`, '').trim());
+  }
+  return groups.filter((group, index, items) => group && items.indexOf(group) === index);
+}
+
+function buildWopiAliasGroupEnv(aliasGroups) {
+  return Object.fromEntries(
+    aliasGroups.map((group, index) => [`aliasgroup${index + 1}`, group]),
+  );
+}
+
 function withConfigParam(extraParams, key, value) {
   const paramPrefix = `--o:${key}=`;
   if (extraParams.split(/\s+/).some((part) => part.startsWith(paramPrefix))) {
@@ -309,24 +323,6 @@ function withConfigParam(extraParams, key, value) {
   }
 
   return `${extraParams} ${paramPrefix}${value}`;
-}
-
-function withNativeWopiAliasGroupParams(extraParams, aliasGroup) {
-  const origins = String(aliasGroup || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (origins.length === 0) {
-    return extraParams;
-  }
-
-  let params = withConfigParam(extraParams, 'storage.wopi.alias_groups[@mode]', 'groups');
-  params = withConfigParam(params, 'storage.wopi.alias_groups.group[0].host[@allow]', 'true');
-  params = withConfigParam(params, 'storage.wopi.alias_groups.group[0].host', origins[0]);
-  for (const [index, origin] of origins.slice(1).entries()) {
-    params = withConfigParam(params, `storage.wopi.alias_groups.group[0].alias[${index}]`, origin);
-  }
-  return params;
 }
 
 function withPublicEditorParams(extraParams) {
@@ -801,14 +797,14 @@ async function startNative(context) {
   const describe = runQuiet('pm2', ['describe', pm2Name]);
   const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
   const extraFontsDir = resolveDocxExtraFontsDir();
-  const nativeExtraParams = withNativeWopiAliasGroupParams(context.extraParams, context.wopiAliasGroup);
   const env = {
     ...process.env,
     EDITOR_ALLOWED_DOMAIN: context.allowedDomain,
     EDITOR_ADMIN_USERNAME: context.adminUsername,
     EDITOR_ADMIN_PASSWORD: context.adminPassword,
     EDITOR_HOST_PORT: context.hostPort,
-    EDITOR_EXTRA_PARAMS: nativeExtraParams,
+    EDITOR_EXTRA_PARAMS: context.extraParams,
+    ...buildWopiAliasGroupEnv(context.wopiAliasGroups),
     ...(extraFontsDir ? { SAL_PRIVATE_FONTPATH: extraFontsDir } : {}),
   };
 
@@ -893,7 +889,7 @@ async function startDocker(context) {
     password: context.adminPassword,
     extra_params: context.extraParams,
     ...(extraFontsDir ? { SAL_PRIVATE_FONTPATH: DOCX_EXTRA_FONTS_TARGET } : {}),
-    ...(context.wopiAliasGroup ? { aliasgroup1: context.wopiAliasGroup } : {}),
+    ...buildWopiAliasGroupEnv(context.wopiAliasGroups),
   };
   const dockerCapAdd = ['MKNOD'];
   const dockerSecurityOpt = splitArgs(readEnv('EDITOR_DOCKER_SECURITY_OPT', 'seccomp=unconfined'));
@@ -993,7 +989,7 @@ async function main() {
       withPublicEditorParams(readEnv('EDITOR_EXTRA_PARAMS', buildDefaultExtraParams())),
       serviceRoot,
     ),
-    wopiAliasGroup: resolveWopiAliasGroup(),
+    wopiAliasGroups: resolveWopiAliasGroups(),
     discoveryUrl: resolveEditorDiscoveryUrl(hostPort, serviceRoot),
     readyTimeoutMs: parsePositiveInteger(process.env.EDITOR_READY_TIMEOUT_MS, DEFAULT_EDITOR_READY_TIMEOUT_MS),
     readyIntervalMs: parsePositiveInteger(process.env.EDITOR_READY_INTERVAL_MS, DEFAULT_EDITOR_READY_INTERVAL_MS),
