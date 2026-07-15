@@ -132,6 +132,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(prod, /academic-editor-native/);
   assert.match(prod, /deploy-native-editor\.sh/);
   assert.match(dev, /https:\/\/code-dev-v2\.tlooto\.com/);
+  assert.match(dev, /EDITOR_WOPI_BASE_URL=.*EDITOR_PUBLIC_URL/);
+  assert.match(dev, /EDITOR_WOPI_ALIASES=.*127\.0\.0\.1/);
   assert.match(dev, /academic-editor-native-dev/);
   assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
   assert.match(dev, /deploy-native-editor\.sh/);

@@ -311,6 +311,24 @@ function withConfigParam(extraParams, key, value) {
   return `${extraParams} ${paramPrefix}${value}`;
 }
 
+function withNativeWopiAliasGroupParams(extraParams, aliasGroup) {
+  const origins = String(aliasGroup || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (origins.length === 0) {
+    return extraParams;
+  }
+
+  let params = withConfigParam(extraParams, 'storage.wopi.alias_groups[@mode]', 'groups');
+  params = withConfigParam(params, 'storage.wopi.alias_groups.group[0].host[@allow]', 'true');
+  params = withConfigParam(params, 'storage.wopi.alias_groups.group[0].host', origins[0]);
+  for (const [index, origin] of origins.slice(1).entries()) {
+    params = withConfigParam(params, `storage.wopi.alias_groups.group[0].alias[${index}]`, origin);
+  }
+  return params;
+}
+
 function withPublicEditorParams(extraParams) {
   let params = extraParams;
   const publicHost = resolvePublicHost();
@@ -783,13 +801,14 @@ async function startNative(context) {
   const describe = runQuiet('pm2', ['describe', pm2Name]);
   const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
   const extraFontsDir = resolveDocxExtraFontsDir();
+  const nativeExtraParams = withNativeWopiAliasGroupParams(context.extraParams, context.wopiAliasGroup);
   const env = {
     ...process.env,
     EDITOR_ALLOWED_DOMAIN: context.allowedDomain,
     EDITOR_ADMIN_USERNAME: context.adminUsername,
     EDITOR_ADMIN_PASSWORD: context.adminPassword,
     EDITOR_HOST_PORT: context.hostPort,
-    EDITOR_EXTRA_PARAMS: context.extraParams,
+    EDITOR_EXTRA_PARAMS: nativeExtraParams,
     ...(extraFontsDir ? { SAL_PRIVATE_FONTPATH: extraFontsDir } : {}),
   };
 
