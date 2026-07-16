@@ -154,8 +154,13 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /exec bash "\$0" "\$@"/);
   assert.match(helper, /npm run install:native:artifact/);
   assert.match(helper, /sync_native_systemplate/);
+  assert.match(helper, /sync_native_academic_dictionary/);
+  assert.match(helper, /refusing to replace unmanaged shared wordbook/);
   assert.match(helper, /sudo.*coolwsd-systemplate-setup|sudo "\$\{setup\[@\]\}"/);
-  assert.match(helper, /install_artifact_if_needed\s+sync_native_systemplate\s+run_optional_checks/);
+  assert.match(
+    helper,
+    /install_artifact_if_needed\s+sync_native_academic_dictionary\s+sync_native_systemplate\s+run_optional_checks/,
+  );
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
   assert.match(helper, /start_editor_gateway/);

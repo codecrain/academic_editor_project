@@ -2,6 +2,10 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
+import {
+  DEFAULT_ACADEMIC_DICTIONARY_SOURCE,
+  assertAcademicDictionarySynced,
+} from './academic-dictionary.mjs';
 import { assertSystemplateFontsSynced } from './native-systemplate-fonts.mjs';
 
 function readEnv(name, fallback) {
@@ -63,6 +67,10 @@ function main() {
   const systemplateDir = path.join(runtimeDir, 'systemplate');
   const officeDir = readEnv('EDITOR_NATIVE_OFFICE_DIR', '/opt/collaboraoffice');
   const academicFontDir = readEnv('EDITOR_NATIVE_ACADEMIC_FONT_DIR', '/usr/local/share/fonts/tlooto-academic');
+  const academicDictionarySource = readEnv(
+    'EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE',
+    DEFAULT_ACADEMIC_DICTIONARY_SOURCE,
+  );
 
   mkdirSync(path.join(runtimeDir, 'child-roots'), { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
@@ -85,8 +93,13 @@ function main() {
     systemplateDir,
     officeDir,
   });
-  if (systemplateSetupError && syncedFonts.count > 0) {
-    console.warn('[editor] systemplate refresh needs elevated permissions; verified existing academic fonts instead.');
+  const syncedDictionary = assertAcademicDictionarySynced({
+    sourcePath: academicDictionarySource,
+    systemplateDir,
+    officeDir,
+  });
+  if (systemplateSetupError && (syncedFonts.count > 0 || syncedDictionary.count > 0)) {
+    console.warn('[editor] systemplate refresh needs elevated permissions; verified existing academic assets instead.');
   }
 
   const args = [

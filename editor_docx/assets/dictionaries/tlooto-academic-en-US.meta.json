@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "language": "en-US",
+  "format": "OOoUserDict1",
+  "installedFilename": "standard.dic",
+  "entryCount": 2924,
+  "sha256": "96b5681821e41547c3fc38a08391b714cbe55ab6cf0f1b239e5ab212ccdb643e",
+  "baseDictionary": {
+    "product": "Collabora Office 26.04.2",
+    "path": "/opt/collaboraoffice/share/extensions/dict-en/en_US.dic",
+    "version": "2020.12.07",
+    "sha256": "f0b1a234bd178bdd01875b2a392a9647f888b8fe879f79c52aae62c2759b3647"
+  },
+  "upstream": {
+    "name": "English Speller Database (ESDB, formerly SCOWL)",
+    "repository": "https://github.com/en-wl/wordlist",
+    "commit": "1e5b7d3a72f47a71da5d28686c1dd4b397178485",
+    "maxSize": 60,
+    "spelling": "A",
+    "variantLevel": 1,
+    "generatedWordCount": 109143,
+    "baseRejectedWordCount": 2870
+  },
+  "curation": {
+    "additionalAcademicWordCount": 54,
+    "knownTypoRegressionCount": 23,
+    "strategy": "Only ESDB size-60 words rejected by the bundled base dictionary, plus a small reviewed academic overlay.",
+    "activation": "Collabora discovers arbitrary shared wordbooks but only activates configured names. The deployment uses the reserved standard.dic name and an ownership marker rather than modifying registry/main.xcd."
+  }
+}

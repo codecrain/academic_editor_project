@@ -36,7 +36,7 @@
     "docx:validate:render": "node editor_docx/scripts/validate-docx-render.mjs",
     "hwpx:fill:esg": "node editor_hwpx/scripts/fill-esg-api-preserve.mjs",
     "hwpx:author:sample": "node editor_hwpx/scripts/author-sample-report-api-preserve.mjs",
-    "test:runtime": "node --test editor_common/document-api-core.test.mjs editor_common/editor-api-command-contract.test.mjs editor_docx/scripts/start-editor.test.mjs editor_docx/scripts/export-source-offer.test.mjs editor_docx/scripts/dev-tools.test.mjs editor_docx/scripts/editor-gateway.test.mjs editor_docx/scripts/docx-api-utils.test.mjs editor_docx/scripts/native-systemplate-fonts.test.mjs",
+    "test:runtime": "node --test editor_common/document-api-core.test.mjs editor_common/editor-api-command-contract.test.mjs editor_docx/scripts/start-editor.test.mjs editor_docx/scripts/export-source-offer.test.mjs editor_docx/scripts/dev-tools.test.mjs editor_docx/scripts/editor-gateway.test.mjs editor_docx/scripts/docx-api-utils.test.mjs editor_docx/scripts/native-systemplate-fonts.test.mjs editor_docx/scripts/academic-dictionary.test.mjs",
     "verify:public": "node editor_docx/scripts/verify-public-safety.mjs",
     "stop": "node editor_docx/scripts/stop-local-editors.mjs",
     "stop:editor": "node editor_docx/scripts/stop-editor.mjs",

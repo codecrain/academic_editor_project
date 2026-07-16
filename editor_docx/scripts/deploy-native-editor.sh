@@ -65,6 +65,10 @@ apply_runtime_defaults() {
   export EDITOR_NATIVE_RUNTIME_DIR="${EDITOR_NATIVE_RUNTIME_DIR:-/var/lib/academic-editor}"
   export EDITOR_NATIVE_OFFICE_DIR="${EDITOR_NATIVE_OFFICE_DIR:-/opt/collaboraoffice}"
   export EDITOR_NATIVE_ACADEMIC_FONT_DIR="${EDITOR_NATIVE_ACADEMIC_FONT_DIR:-/usr/local/share/fonts/tlooto-academic}"
+  export EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE:-$ROOT_DIR/editor_docx/assets/dictionaries/tlooto-academic-en-US.dic}"
+  export EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET:-$EDITOR_NATIVE_OFFICE_DIR/share/wordbook/standard.dic}"
+  export EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE:-$ROOT_DIR/editor_docx/assets/dictionaries/tlooto-academic-en-US.owner}"
+  export EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET:-$EDITOR_NATIVE_OFFICE_DIR/share/wordbook/standard.dic.tlooto-owner}"
   export EDITOR_HOST_PORT="${EDITOR_HOST_PORT:-9980}"
   export EDITOR_SERVICE_ROOT="${EDITOR_SERVICE_ROOT:-/docx}"
   export EDITOR_SERVICE_ROOT="/${EDITOR_SERVICE_ROOT#/}"
@@ -134,9 +138,81 @@ native_systemplate_fonts_synced() {
   [ -n "$source_signature" ] && [ "$source_signature" = "$target_signature" ]
 }
 
+native_academic_dictionary_installed() {
+  [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" ] &&
+    [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" ] &&
+    [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET" ] &&
+    [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET" ] &&
+    cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET" &&
+    cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET"
+}
+
+native_systemplate_dictionary_synced() {
+  local target="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET}"
+  [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" ] &&
+    [ -f "$target" ] &&
+    cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$target"
+}
+
+sync_native_academic_dictionary() {
+  node "$ROOT_DIR/editor_docx/scripts/academic-dictionary.mjs" \
+    "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" >/dev/null
+  [ -f "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" ] || die \
+    "academic dictionary ownership marker is missing: ${EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE}"
+
+  native_academic_dictionary_installed && {
+    log "native academic dictionary is current"
+    return 0
+  }
+
+  if [ -e "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET" ] &&
+      ! cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET" &&
+      { [ ! -e "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET" ] ||
+        ! cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET"; }; then
+    die "refusing to replace unmanaged shared wordbook: ${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET}"
+  fi
+
+  local target_dir
+  target_dir="$(dirname "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET")"
+  log "installing supplemental academic dictionary"
+  if [ -d "$target_dir" ] && [ -w "$target_dir" ]; then
+    install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET"
+    install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET"
+  elif [ -t 0 ]; then
+    ensure_command sudo
+    sudo install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET"
+    sudo install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET"
+  else
+    ensure_command sudo
+    sudo -n install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET" || die \
+      "academic dictionary ownership marker requires elevated permissions: ${EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_TARGET}"
+    sudo -n install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET" || die \
+      "academic dictionary installation requires elevated permissions: ${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET}"
+  fi
+
+  native_academic_dictionary_installed || die \
+    "academic dictionary was not installed exactly: ${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET}"
+}
+
+native_systemplate_content_synced() {
+  native_systemplate_fonts_synced && native_systemplate_dictionary_synced
+}
+
 sync_native_systemplate() {
-  native_systemplate_fonts_synced && {
-    log "native systemplate academic fonts are current"
+  native_systemplate_content_synced && {
+    log "native systemplate academic assets are current"
     return 0
   }
 
@@ -144,7 +220,7 @@ sync_native_systemplate() {
   local systemplate_dir="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate"
   local setup=(coolwsd-systemplate-setup "$systemplate_dir" "$EDITOR_NATIVE_OFFICE_DIR")
 
-  log "syncing native systemplate and academic fonts"
+  log "syncing native systemplate academic fonts and dictionary"
   if [ -w "$systemplate_dir" ] || { [ ! -e "$systemplate_dir" ] && [ -w "$EDITOR_NATIVE_RUNTIME_DIR" ]; }; then
     "${setup[@]}"
   elif [ -t 0 ]; then
@@ -156,8 +232,8 @@ sync_native_systemplate() {
       "systemplate fonts are stale and require elevated permissions. Run: sudo ${setup[*]}"
   fi
 
-  native_systemplate_fonts_synced || die \
-    "academic fonts were not copied into ${systemplate_dir}."
+  native_systemplate_content_synced || die \
+    "academic fonts or dictionary were not copied into ${systemplate_dir}."
 }
 
 ensure_runtime_url_uses_service_root() {
@@ -385,6 +461,7 @@ main() {
   install_deps_if_requested
   ensure_command pm2
   install_artifact_if_needed
+  sync_native_academic_dictionary
   sync_native_systemplate
   run_optional_checks
   save_pm2_state
