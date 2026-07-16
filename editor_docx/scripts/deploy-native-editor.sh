@@ -62,6 +62,9 @@ apply_runtime_defaults() {
   export EDITOR_RUNTIME_MODE="${EDITOR_RUNTIME_MODE:-native}"
   export EDITOR_DEPLOY_ENV="${EDITOR_DEPLOY_ENV:-server}"
   export EDITOR_NATIVE_PM2_NAME="${EDITOR_NATIVE_PM2_NAME:-academic-editor-native}"
+  export EDITOR_NATIVE_RUNTIME_DIR="${EDITOR_NATIVE_RUNTIME_DIR:-/var/lib/academic-editor}"
+  export EDITOR_NATIVE_OFFICE_DIR="${EDITOR_NATIVE_OFFICE_DIR:-/opt/collaboraoffice}"
+  export EDITOR_NATIVE_ACADEMIC_FONT_DIR="${EDITOR_NATIVE_ACADEMIC_FONT_DIR:-/usr/local/share/fonts/tlooto-academic}"
   export EDITOR_HOST_PORT="${EDITOR_HOST_PORT:-9980}"
   export EDITOR_SERVICE_ROOT="${EDITOR_SERVICE_ROOT:-/docx}"
   export EDITOR_SERVICE_ROOT="/${EDITOR_SERVICE_ROOT#/}"
@@ -108,6 +111,53 @@ apply_runtime_defaults() {
   if truthy "${EDITOR_REQUIRE_PUBLIC_URL:-false}" && [ -z "${EDITOR_PUBLIC_URL:-}" ]; then
     die "set EDITOR_PUBLIC_URL=https://your-service-domain before running production sh.start."
   fi
+}
+
+font_tree_signature() {
+  local font_dir="$1"
+  [ -d "$font_dir" ] || return 0
+  (
+    cd "$font_dir"
+    find . -type f \( -iname '*.ttf' -o -iname '*.ttc' -o -iname '*.otf' \) \
+      -printf '%P|%s\n' | LC_ALL=C sort | sha256sum | awk '{print $1}'
+  )
+}
+
+native_systemplate_fonts_synced() {
+  local source_dir="$EDITOR_NATIVE_ACADEMIC_FONT_DIR"
+  local target_dir="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate${source_dir}"
+  local source_signature target_signature
+
+  [ -d "$source_dir" ] || return 0
+  source_signature="$(font_tree_signature "$source_dir")"
+  target_signature="$(font_tree_signature "$target_dir")"
+  [ -n "$source_signature" ] && [ "$source_signature" = "$target_signature" ]
+}
+
+sync_native_systemplate() {
+  native_systemplate_fonts_synced && {
+    log "native systemplate academic fonts are current"
+    return 0
+  }
+
+  ensure_command coolwsd-systemplate-setup
+  local systemplate_dir="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate"
+  local setup=(coolwsd-systemplate-setup "$systemplate_dir" "$EDITOR_NATIVE_OFFICE_DIR")
+
+  log "syncing native systemplate and academic fonts"
+  if [ -w "$systemplate_dir" ] || { [ ! -e "$systemplate_dir" ] && [ -w "$EDITOR_NATIVE_RUNTIME_DIR" ]; }; then
+    "${setup[@]}"
+  elif [ -t 0 ]; then
+    ensure_command sudo
+    sudo "${setup[@]}"
+  else
+    ensure_command sudo
+    sudo -n "${setup[@]}" || die \
+      "systemplate fonts are stale and require elevated permissions. Run: sudo ${setup[*]}"
+  fi
+
+  native_systemplate_fonts_synced || die \
+    "academic fonts were not copied into ${systemplate_dir}."
 }
 
 ensure_runtime_url_uses_service_root() {
@@ -335,6 +385,7 @@ main() {
   install_deps_if_requested
   ensure_command pm2
   install_artifact_if_needed
+  sync_native_systemplate
   run_optional_checks
   save_pm2_state
 

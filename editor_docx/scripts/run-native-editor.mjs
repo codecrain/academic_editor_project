@@ -1,6 +1,8 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
+
+import { assertSystemplateFontsSynced } from './native-systemplate-fonts.mjs';
 
 function readEnv(name, fallback) {
   const value = process.env[name];
@@ -58,24 +60,40 @@ function main() {
   const extraParams = readEnv('EDITOR_EXTRA_PARAMS', '--o:ssl.enable=false --o:ssl.termination=true --o:welcome.enable=false --o:allow_update_popup=false');
   const coolwsd = readEnv('EDITOR_NATIVE_COOLWSD_BIN', '/usr/bin/coolwsd');
   const disableCoolUserChecking = readEnv('EDITOR_DISABLE_COOL_USER_CHECKING', 'true') === 'true';
+  const systemplateDir = path.join(runtimeDir, 'systemplate');
+  const officeDir = readEnv('EDITOR_NATIVE_OFFICE_DIR', '/opt/collaboraoffice');
+  const academicFontDir = readEnv('EDITOR_NATIVE_ACADEMIC_FONT_DIR', '/usr/local/share/fonts/tlooto-academic');
 
   mkdirSync(path.join(runtimeDir, 'child-roots'), { recursive: true });
   mkdirSync(cacheDir, { recursive: true });
 
+  let systemplateSetupError;
   try {
-    execFileSync('coolwsd-systemplate-setup', [path.join(runtimeDir, 'systemplate'), '/opt/collaboraoffice'], {
+    execFileSync('coolwsd-systemplate-setup', [systemplateDir, officeDir], {
       stdio: 'ignore',
     });
-  } catch {
-    // The install step normally prepares the systemplate. Keep runtime startup
-    // tolerant so pm2 restarts do not fail on a transient setup refresh.
+  } catch (error) {
+    systemplateSetupError = error;
+  }
+
+  if (!existsSync(systemplateDir)) {
+    throw systemplateSetupError ?? new Error(`Native editor systemplate is missing: ${systemplateDir}`);
+  }
+
+  const syncedFonts = assertSystemplateFontsSynced({
+    sourceDir: academicFontDir,
+    systemplateDir,
+    officeDir,
+  });
+  if (systemplateSetupError && syncedFonts.count > 0) {
+    console.warn('[editor] systemplate refresh needs elevated permissions; verified existing academic fonts instead.');
   }
 
   const args = [
     '--use-env-vars',
     ...(disableCoolUserChecking ? ['--disable-cool-user-checking'] : []),
     `--port=${hostPort}`,
-    `--o:sys_template_path=${path.join(runtimeDir, 'systemplate')}`,
+    `--o:sys_template_path=${systemplateDir}`,
     `--o:child_root_path=${path.join(runtimeDir, 'child-roots')}`,
     '--o:file_server_root_path=/usr/share/coolwsd',
     `--o:cache_files.path=${cacheDir}`,
