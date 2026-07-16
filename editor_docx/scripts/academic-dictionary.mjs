@@ -11,6 +11,9 @@ export const ACADEMIC_DICTIONARY_INSTALLED_FILENAME = 'standard.dic';
 export const DEFAULT_ACADEMIC_DICTIONARY_SOURCE = fileURLToPath(
   new URL(`../assets/dictionaries/${ACADEMIC_DICTIONARY_SOURCE_FILENAME}`, import.meta.url),
 );
+export const DEFAULT_REVIEWED_ACADEMIC_TERMS_SOURCE = fileURLToPath(
+  new URL('../assets/dictionaries/reviewed-academic-terms.txt', import.meta.url),
+);
 
 export const REQUIRED_ACADEMIC_WORDS = Object.freeze([
   'auditability',
@@ -88,6 +91,23 @@ export function parseAcademicDictionary(content) {
   return { entries, uniqueEntries };
 }
 
+export function parseReviewedAcademicTerms(content) {
+  const entries = String(content)
+    .replaceAll('\r\n', '\n')
+    .split('\n')
+    .filter((line) => line !== '' && !line.startsWith('#'));
+  if (entries.length === 0) {
+    throw new Error('Reviewed academic term list has no entries.');
+  }
+  if (entries.some((entry) => entry.trim() !== entry || /\s/.test(entry))) {
+    throw new Error('Reviewed academic terms must be one whitespace-free entry per line.');
+  }
+  if (new Set(entries).size !== entries.length) {
+    throw new Error('Reviewed academic term list contains duplicate entries.');
+  }
+  return entries;
+}
+
 export function sha256File(filePath) {
   return createHash('sha256').update(readFileSync(filePath)).digest('hex');
 }
@@ -97,9 +117,18 @@ export function validateAcademicDictionaryFile(sourcePath = DEFAULT_ACADEMIC_DIC
     throw new Error(`Academic dictionary is missing: ${sourcePath}`);
   }
   const parsed = parseAcademicDictionary(readFileSync(sourcePath, 'utf8'));
+  const reviewedTerms = parseReviewedAcademicTerms(
+    readFileSync(DEFAULT_REVIEWED_ACADEMIC_TERMS_SOURCE, 'utf8'),
+  );
+  for (const reviewedTerm of reviewedTerms) {
+    if (!parsed.uniqueEntries.has(reviewedTerm)) {
+      throw new Error(`Academic dictionary is missing reviewed term: ${reviewedTerm}`);
+    }
+  }
   return {
     sourcePath,
     count: parsed.entries.length,
+    reviewedTermCount: reviewedTerms.length,
     sha256: sha256File(sourcePath),
   };
 }

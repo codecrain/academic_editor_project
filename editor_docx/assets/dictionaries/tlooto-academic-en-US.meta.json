@@ -3,8 +3,8 @@
   "language": "en-US",
   "format": "OOoUserDict1",
   "installedFilename": "standard.dic",
-  "entryCount": 2924,
-  "sha256": "96b5681821e41547c3fc38a08391b714cbe55ab6cf0f1b239e5ab212ccdb643e",
+  "entryCount": 3490,
+  "sha256": "3b56444e61280687e4da4e69b35a77caa78c69ecc827c96bde630bd3d38b0010",
   "baseDictionary": {
     "product": "Collabora Office 26.04.2",
     "path": "/opt/collaboraoffice/share/extensions/dict-en/en_US.dic",
@@ -22,9 +22,10 @@
     "baseRejectedWordCount": 2870
   },
   "curation": {
-    "additionalAcademicWordCount": 54,
+    "additionalAcademicWordCount": 620,
+    "reviewedTermCount": 618,
     "knownTypoRegressionCount": 23,
-    "strategy": "Only ESDB size-60 words rejected by the bundled base dictionary, plus a small reviewed academic overlay.",
+    "strategy": "Only ESDB size-60 words rejected by the bundled base dictionary, plus a bounded reviewed overlay for scholarly URLs, publishing, methods, statistics, open science, and AI.",
     "activation": "Collabora discovers arbitrary shared wordbooks but only activates configured names. The deployment uses the reserved standard.dic name and an ownership marker rather than modifying registry/main.xcd."
   }
 }

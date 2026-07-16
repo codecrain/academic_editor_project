@@ -7,10 +7,12 @@ import test from 'node:test';
 import {
   ACADEMIC_DICTIONARY_INSTALLED_FILENAME,
   DEFAULT_ACADEMIC_DICTIONARY_SOURCE,
+  DEFAULT_REVIEWED_ACADEMIC_TERMS_SOURCE,
   KNOWN_ACADEMIC_TYPOS,
   REQUIRED_ACADEMIC_WORDS,
   assertAcademicDictionarySynced,
   parseAcademicDictionary,
+  parseReviewedAcademicTerms,
   resolveSystemplateDictionaryPath,
   validateAcademicDictionaryFile,
 } from './academic-dictionary.mjs';
@@ -20,14 +22,23 @@ test('repository academic wordbook is bounded and rejects the typo regression se
   const parsed = parseAcademicDictionary(
     readFileSync(DEFAULT_ACADEMIC_DICTIONARY_SOURCE, 'utf8'),
   );
+  const reviewedTerms = parseReviewedAcademicTerms(
+    readFileSync(DEFAULT_REVIEWED_ACADEMIC_TERMS_SOURCE, 'utf8'),
+  );
 
-  assert.equal(validation.count, 2_924);
-  assert.ok(validation.count < 3_500, 'wordbook must stay a narrow overlay');
+  assert.equal(validation.count, 3_490);
+  assert.equal(reviewedTerms.length, 618);
+  assert.equal(validation.reviewedTermCount, reviewedTerms.length);
+  assert.ok(validation.count < 5_000, 'wordbook must stay a bounded overlay');
+  assert.ok(reviewedTerms.length >= 400, 'reviewed academic coverage unexpectedly shrank');
   for (const word of REQUIRED_ACADEMIC_WORDS) {
     assert.equal(parsed.uniqueEntries.has(word), true, word);
   }
   for (const typo of KNOWN_ACADEMIC_TYPOS) {
     assert.equal(parsed.uniqueEntries.has(typo), false, typo);
+  }
+  for (const term of ['doi.org', 'Crossref', 'ORCID', 'PRISMA', 'meta-analysis', 'ChatGPT']) {
+    assert.equal(parsed.uniqueEntries.has(term), true, term);
   }
 });
 
@@ -41,6 +52,14 @@ test('parser rejects an invalid header and duplicate entries', () => {
       'OOoUserDict1\nlang: en-US\ntype: positive\n---\nauditability\nauditability\n',
     ),
     /duplicate/,
+  );
+  assert.throws(
+    () => parseReviewedAcademicTerms('doi\ndoi\n'),
+    /duplicate/,
+  );
+  assert.throws(
+    () => parseReviewedAcademicTerms('systematic review\n'),
+    /whitespace-free/,
   );
 });
 
@@ -66,7 +85,7 @@ test('sync assertion compares repository, office, and systemplate copies', () =>
       sourcePath: DEFAULT_ACADEMIC_DICTIONARY_SOURCE,
       systemplateDir,
     });
-    assert.equal(synced.count, 2_924);
+    assert.equal(synced.count, 3_490);
 
     writeFileSync(systemplatePath, 'stale', 'utf8');
     assert.throws(

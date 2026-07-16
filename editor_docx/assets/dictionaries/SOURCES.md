@@ -13,6 +13,18 @@ Collabora Office 26.04.2 bundled base dictionary rejected were retained. A
 small reviewed set of academic and AI terminology was then added. See the JSON
 manifest beside the wordbook for exact counts and hashes.
 
+The reviewed overlay in `reviewed-academic-terms.txt` covers scholarly URL and
+identifier tokens, publication metadata, evidence synthesis and reporting
+guidelines, statistics and psychometrics, open science, and AI terminology.
+Terminology categories were cross-checked against the DOI Foundation resolver
+documentation, Crossref metadata documentation, the NLM MeSH vocabulary, and
+the EQUATOR Network reporting-guideline catalog:
+
+- https://www.doi.org/the-identifier/resources/factsheets/doi-resolution-documentation/
+- https://www.crossref.org/documentation/
+- https://www.nlm.nih.gov/mesh/meshhome.html
+- https://www.equator-network.org/reporting-guidelines/
+
 Copyright 2000-2026 by Kevin Atkinson
 
 Permission to use, copy, modify, distribute, and sell any part of the English
