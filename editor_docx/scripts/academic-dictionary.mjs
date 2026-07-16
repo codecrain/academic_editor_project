@@ -58,7 +58,7 @@ export const KNOWN_ACADEMIC_TYPOS = Object.freeze([
 ]);
 
 export function parseAcademicDictionary(content) {
-  const lines = String(content).replaceAll('\r\n', '\n').split('\n');
+  const lines = String(content).replace(/\r\n/g, '\n').split('\n');
   if (lines[0] !== 'OOoUserDict1' || lines[1] !== 'lang: en-US' ||
       lines[2] !== 'type: positive' || lines[3] !== '---') {
     throw new Error('Academic dictionary must use the OOoUserDict1 en-US positive-wordbook header.');
@@ -93,7 +93,7 @@ export function parseAcademicDictionary(content) {
 
 export function parseReviewedAcademicTerms(content) {
   const entries = String(content)
-    .replaceAll('\r\n', '\n')
+    .replace(/\r\n/g, '\n')
     .split('\n')
     .filter((line) => line !== '' && !line.startsWith('#'));
   if (entries.length === 0) {
