@@ -155,6 +155,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /npm run install:native:artifact/);
   assert.match(helper, /sync_native_systemplate/);
   assert.match(helper, /sync_native_academic_dictionary/);
+  assert.match(helper, /sync_native_systemplate_dictionary\(\)/);
+  assert.match(helper, /systemplate dictionary synchronization requires elevated permissions/);
   assert.match(helper, /refusing to replace unmanaged shared wordbook/);
   assert.match(helper, /sudo.*coolwsd-systemplate-setup|sudo "\$\{setup\[@\]\}"/);
   assert.match(

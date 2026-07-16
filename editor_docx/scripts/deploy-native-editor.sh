@@ -154,6 +154,31 @@ native_systemplate_dictionary_synced() {
     cmp -s "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$target"
 }
 
+sync_native_systemplate_dictionary() {
+  native_systemplate_dictionary_synced && return 0
+
+  local target target_dir
+  target="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET}"
+  target_dir="$(dirname "$target")"
+  log "syncing supplemental academic dictionary into native systemplate"
+
+  if { [ -d "$target_dir" ] && [ -w "$target_dir" ]; } ||
+      { [ ! -e "$target_dir" ] && [ -w "${EDITOR_NATIVE_RUNTIME_DIR}/systemplate" ]; }; then
+    install -D -m 0644 "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$target"
+  elif [ -t 0 ]; then
+    ensure_command sudo
+    sudo install -D -m 0644 "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$target"
+  else
+    ensure_command sudo
+    sudo -n install -D -m 0644 \
+      "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" "$target" || die \
+      "systemplate dictionary synchronization requires elevated permissions: ${target}"
+  fi
+
+  native_systemplate_dictionary_synced || die \
+    "academic dictionary was not copied into native systemplate: ${target}"
+}
+
 sync_native_academic_dictionary() {
   node "$ROOT_DIR/editor_docx/scripts/academic-dictionary.mjs" \
     "$EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE" >/dev/null
@@ -216,22 +241,27 @@ sync_native_systemplate() {
     return 0
   }
 
-  ensure_command coolwsd-systemplate-setup
   local systemplate_dir="${EDITOR_NATIVE_RUNTIME_DIR}/systemplate"
-  local setup=(coolwsd-systemplate-setup "$systemplate_dir" "$EDITOR_NATIVE_OFFICE_DIR")
+  if [ ! -d "$systemplate_dir" ] || ! native_systemplate_fonts_synced; then
+    ensure_command coolwsd-systemplate-setup
+    local setup=(coolwsd-systemplate-setup "$systemplate_dir" "$EDITOR_NATIVE_OFFICE_DIR")
 
-  log "syncing native systemplate academic fonts and dictionary"
-  if [ -w "$systemplate_dir" ] || { [ ! -e "$systemplate_dir" ] && [ -w "$EDITOR_NATIVE_RUNTIME_DIR" ]; }; then
-    "${setup[@]}"
-  elif [ -t 0 ]; then
-    ensure_command sudo
-    sudo "${setup[@]}"
+    log "syncing native systemplate and academic fonts"
+    if [ -w "$systemplate_dir" ] || { [ ! -e "$systemplate_dir" ] && [ -w "$EDITOR_NATIVE_RUNTIME_DIR" ]; }; then
+      "${setup[@]}"
+    elif [ -t 0 ]; then
+      ensure_command sudo
+      sudo "${setup[@]}"
+    else
+      ensure_command sudo
+      sudo -n "${setup[@]}" || die \
+        "systemplate fonts are stale and require elevated permissions. Run: sudo ${setup[*]}"
+    fi
   else
-    ensure_command sudo
-    sudo -n "${setup[@]}" || die \
-      "systemplate fonts are stale and require elevated permissions. Run: sudo ${setup[*]}"
+    log "native systemplate academic fonts are current"
   fi
 
+  sync_native_systemplate_dictionary
   native_systemplate_content_synced || die \
     "academic fonts or dictionary were not copied into ${systemplate_dir}."
 }
