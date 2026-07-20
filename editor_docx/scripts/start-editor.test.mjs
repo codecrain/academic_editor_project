@@ -260,6 +260,11 @@ test('docx runtime supports project extra font directory', () => {
   assert.match(starter, /fontBinds\.flatMap/);
 });
 
+test('native runtime pins the PM2 interpreter to the active Node executable', () => {
+  const starter = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'start-editor.mjs'), 'utf8');
+  assert.match(starter, /'--interpreter',\s*process\.execPath/);
+});
+
 test('source and native runtimes install common Korean and document fonts', () => {
   const sourceBuilder = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'build-source-editor-image.mjs'), 'utf8');
   const nativeDeps = readFileSync(path.join(repoRoot, 'editor_docx', 'scripts', 'install-native-deps.sh'), 'utf8');

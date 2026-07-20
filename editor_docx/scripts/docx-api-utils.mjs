@@ -15,6 +15,7 @@ import {
   stableStringify as coreStableStringify,
   wrapLine as coreWrapLine,
 } from '../../editor_common/document-api-core.mjs';
+import { resolveDocxCommand, validateDocxCommands } from './docx-command-catalog.mjs';
 
 export const WORD_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 export const REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
@@ -139,6 +140,79 @@ export function generatePngBytes(options = {}) {
     pngChunk('IDAT', deflateSync(scanlines)),
     pngChunk('IEND'),
   ]);
+}
+
+const IMAGE_FORMATS = Object.freeze({
+  png: { mimeType: 'image/png', extensions: ['png'] },
+  jpeg: { mimeType: 'image/jpeg', extensions: ['jpg', 'jpeg'] },
+  gif: { mimeType: 'image/gif', extensions: ['gif'] },
+  bmp: { mimeType: 'image/bmp', extensions: ['bmp'] },
+  emf: { mimeType: 'image/emf', extensions: ['emf'] },
+  wmf: { mimeType: 'image/wmf', extensions: ['wmf'] },
+});
+const IMAGE_FORMAT_BY_EXTENSION = new Map(Object.entries(IMAGE_FORMATS)
+  .flatMap(([format, spec]) => spec.extensions.map((extension) => [extension, format])));
+
+function detectImageFormat(bytes) {
+  const buffer = Buffer.from(bytes ?? []);
+  const pngTrailer = Buffer.from([0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+  if (buffer.length >= 33
+    && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    && buffer.subarray(-12).equals(pngTrailer)) {
+    return 'png';
+  }
+  if (buffer.length >= 14 && ['GIF87a', 'GIF89a'].includes(buffer.subarray(0, 6).toString('ascii'))
+    && buffer[buffer.length - 1] === 0x3b) {
+    return 'gif';
+  }
+  if (buffer.length >= 14 && buffer.subarray(0, 2).toString('ascii') === 'BM') {
+    return 'bmp';
+  }
+  if (buffer.length >= 44 && buffer.subarray(40, 44).equals(Buffer.from([0x20, 0x45, 0x4d, 0x46]))) {
+    return 'emf';
+  }
+  if (buffer.length >= 4 && (buffer.subarray(0, 4).equals(Buffer.from([0xd7, 0xcd, 0xc6, 0x9a]))
+    || ((buffer.readUInt16LE(0) === 1 || buffer.readUInt16LE(0) === 2) && buffer.readUInt16LE(2) === 9))) {
+    return 'wmf';
+  }
+  if (buffer.length >= 6 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff
+    && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9) {
+    return 'jpeg';
+  }
+  return '';
+}
+
+function validateImageBytesForPackage(imageName, bytes, declaredMimeType = '') {
+  const extensionMatch = String(imageName ?? '').toLowerCase().match(/\.([a-z0-9]+)$/);
+  const extension = extensionMatch?.[1] ?? '';
+  const expectedFormat = IMAGE_FORMAT_BY_EXTENSION.get(extension);
+  assert.ok(expectedFormat, `image.replace does not support package extension: .${extension || '<missing>'}`);
+  const detectedFormat = detectImageFormat(bytes);
+  assert.ok(detectedFormat, 'image.replace bytes do not contain a recognized, complete image signature');
+  assert.equal(detectedFormat, expectedFormat, `image.replace signature ${detectedFormat} does not match package extension .${extension}`);
+  const expectedMimeType = IMAGE_FORMATS[expectedFormat].mimeType;
+  const normalizedMimeType = String(declaredMimeType || '').trim().toLowerCase().replace('image/jpg', 'image/jpeg');
+  if (normalizedMimeType) {
+    assert.equal(normalizedMimeType, expectedMimeType, `image.replace MIME ${normalizedMimeType} does not match ${expectedMimeType}`);
+  }
+  return { extension, format: expectedFormat, mimeType: expectedMimeType };
+}
+
+function imageBytesFromOperation(op) {
+  if (op.bytes) {
+    return Buffer.isBuffer(op.bytes) ? Buffer.from(op.bytes) : Buffer.from(op.bytes);
+  }
+  if (op.bytesBase64) {
+    const encoded = String(op.bytesBase64).trim();
+    assert.match(encoded, /^[A-Za-z0-9+/]+={0,2}$/, 'image.replace bytesBase64 is not valid base64');
+    const bytes = Buffer.from(encoded, 'base64');
+    assert.equal(bytes.toString('base64').replace(/=+$/, ''), encoded.replace(/=+$/, ''), 'image.replace bytesBase64 is not canonical base64');
+    return bytes;
+  }
+  if (op.filePath) {
+    return readFileSync(op.filePath);
+  }
+  return Buffer.alloc(0);
 }
 
 export function readZip(bufferLike) {
@@ -353,6 +427,20 @@ function replaceOrInsertChild(xml, parentOpenPattern, childTag, childXml) {
   return xml.replace(parentOpenPattern, (match) => `${match}${childXml}`);
 }
 
+function replaceOrInsertXmlTextElement(xml, qualifiedName, value) {
+  const escapedName = qualifiedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const expanded = new RegExp(`(<${escapedName}\\b[^>]*>)[\\s\\S]*?(<\\/${escapedName}>)`);
+  const selfClosing = new RegExp(`<${escapedName}\\b[^>]*/>`);
+  const replacement = `<${qualifiedName}>${escapeXmlText(value ?? '')}</${qualifiedName}>`;
+  if (expanded.test(xml)) {
+    return xml.replace(expanded, (_match, open, close) => `${open}${escapeXmlText(value ?? '')}${close}`);
+  }
+  if (selfClosing.test(xml)) {
+    return xml.replace(selfClosing, replacement);
+  }
+  return xml.replace('</cp:coreProperties>', `${replacement}</cp:coreProperties>`);
+}
+
 function runPropertiesXml(style = {}) {
   const parts = [];
   if (style.runStyleId) {
@@ -410,12 +498,16 @@ function paragraphPropertiesXml(style = {}) {
   return parts.length ? `<w:pPr>${parts.join('')}</w:pPr>` : '';
 }
 
+function textRunXml(text, rPrXml = '') {
+  const textValue = String(text ?? '');
+  const preserve = /^\s|\s$/.test(textValue) ? ' xml:space="preserve"' : '';
+  return `<w:r>${rPrXml}<w:t${preserve}>${escapeXmlText(textValue)}</w:t></w:r>`;
+}
+
 function paragraphXml(text, options = {}) {
   const pPr = options.pPrXml ?? paragraphPropertiesXml(options.paragraphStyle);
   const rPr = options.rPrXml ?? runPropertiesXml(options.runStyle);
-  const textValue = String(text ?? '');
-  const preserve = /^\s|\s$/.test(textValue) ? ' xml:space="preserve"' : '';
-  return `<w:p>${pPr}<w:r>${rPr}<w:t${preserve}>${escapeXmlText(textValue)}</w:t></w:r></w:p>`;
+  return `<w:p>${pPr}${textRunXml(text, rPr)}</w:p>`;
 }
 
 function paragraphsXmlFromText(text, options = {}) {
@@ -429,11 +521,24 @@ function tableCellXml(text = '', options = {}) {
 }
 
 function tableXml(rows, cols, options = {}) {
+  // A Word table requires a tblGrid to describe its logical columns.  Word and
+  // Collabora can sometimes repair a missing grid while opening the package,
+  // but strict OOXML consumers (including python-docx) reject such tables.
+  // Keep the existing automatic layout behaviour while emitting an equal-width
+  // advisory grid that renderers may subsequently resize to the page.
+  const defaultTableWidth = 9360;
+  const baseGridWidth = Math.floor(defaultTableWidth / cols);
+  const gridXml = Array.from({ length: cols }, (_, index) => {
+    const width = index === cols - 1
+      ? defaultTableWidth - (baseGridWidth * (cols - 1))
+      : baseGridWidth;
+    return `<w:gridCol w:w="${width}"/>`;
+  }).join('');
   const rowXml = Array.from({ length: rows }, () => {
     const cells = Array.from({ length: cols }, () => tableCellXml('', options)).join('');
     return `<w:tr>${cells}</w:tr>`;
   }).join('');
-  return `<w:tbl>${options.tblPrXml ?? '<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'}${rowXml}</w:tbl>`;
+  return `<w:tbl>${options.tblPrXml ?? '<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'}<w:tblGrid>${gridXml}</w:tblGrid>${rowXml}</w:tbl>`;
 }
 
 function inlineImageParagraphXml({ relationshipId = 'rIdImage1', name = 'image1.png', widthEmu = 3200000, heightEmu = 1600000 } = {}) {
@@ -457,8 +562,8 @@ function cellStyleXml(style = {}) {
   if (style.gridSpan) {
     parts.push(`<w:gridSpan w:val="${escapeXmlAttr(style.gridSpan)}"/>`);
   }
-  if (style.margin) {
-    const margin = style.margin;
+  if (style.margin || style.margins) {
+    const margin = style.margin ?? style.margins;
     parts.push(`<w:tcMar>${['top', 'left', 'bottom', 'right'].map((side) => margin[side] ? `<w:${side} w:w="${escapeXmlAttr(margin[side])}" w:type="dxa"/>` : '').join('')}</w:tcMar>`);
   }
   if (style.borderColor || style.borderSize) {
@@ -532,6 +637,26 @@ function paragraphStyleFromXml(pXml) {
   };
 }
 
+function paragraphRunsFromXml(pXml) {
+  return elementBlocks(pXml, 'r').map((block, index) => {
+    const rPrXml = tagXml(block.xml, 'rPr');
+    const text = extractText(block.xml);
+    return {
+      index,
+      text,
+      textLength: text.length,
+      rPrXml,
+      style: rPrBasis(rPrXml),
+    };
+  });
+}
+
+function runHasEquivalentVisibleFormatting(left = {}, right = {}) {
+  const { hash: _leftHash, ...leftVisible } = left;
+  const { hash: _rightHash, ...rightVisible } = right;
+  return JSON.stringify(leftVisible) === JSON.stringify(rightVisible);
+}
+
 function cellStyleFromXml(cellXml) {
   const firstParagraph = elementBlocks(cellXml, 'p')[0]?.xml ?? '<w:p/>';
   const tcPr = tagXml(cellXml, 'tcPr');
@@ -593,6 +718,146 @@ function estimateCellCapacity(style = {}) {
     recommendedChars: Math.floor(maxCharsPerLine * maxLines * 0.88),
     basis: { width, fontSize, unit: 'estimated-docx-dxa' },
   };
+}
+
+const BASELINE_COMPARABLE_TABLE_WARNING_CODES = new Set([
+  'empty-table',
+  'cell-overflow-risk',
+  'cell-line-overflow-risk',
+]);
+const CAPACITY_RISK_EPSILON = 1e-9;
+
+function stableTableLocationKey(table = {}) {
+  const tableId = String(table.id ?? table.location?.tableId ?? '').trim();
+  if (tableId) {
+    return `table:${tableId}`;
+  }
+  const rawTableIndex = table.tableIndex ?? table.native?.tableIndex;
+  const tableIndex = rawTableIndex === undefined || rawTableIndex === null || rawTableIndex === ''
+    ? Number.NaN
+    : Number(rawTableIndex);
+  return Number.isInteger(tableIndex) && tableIndex >= 0 ? `table-index:${tableIndex}` : '';
+}
+
+function stableCellLocationKey(cell = {}) {
+  const location = cell.location ?? {};
+  const tableKey = stableTableLocationKey({
+    id: location.tableId ?? location.table?.id,
+    tableIndex: cell.native?.tableIndex,
+  });
+  const rawCellNumber = location.cell?.number ?? cell.cellIndex ?? cell.native?.cellIndex;
+  const cellNumber = rawCellNumber === undefined || rawCellNumber === null || rawCellNumber === ''
+    ? Number.NaN
+    : Number(rawCellNumber);
+  if (!tableKey || !Number.isInteger(cellNumber) || cellNumber < 0) {
+    return '';
+  }
+  return `${tableKey}/cell:${cellNumber}`;
+}
+
+function tableCapacityRiskIssues(json = {}) {
+  const issues = [];
+  for (const table of json.tables ?? []) {
+    const tableLocationKey = stableTableLocationKey(table);
+    if (!table.dims?.cellCount) {
+      issues.push({
+        severity: 'warning',
+        code: 'empty-table',
+        message: 'A table has no cells',
+        tableId: table.id,
+        locationKey: tableLocationKey,
+        riskRatio: 1,
+        riskDimensions: { empty: 1 },
+      });
+    }
+    for (const cell of table.cells ?? []) {
+      const capacity = cell.layout?.capacity;
+      const text = String(cell.text ?? '');
+      const lines = text.split('\n');
+      const longestLine = Math.max(0, ...lines.map((line) => line.length));
+      const locationKey = stableCellLocationKey(cell);
+      if (capacity?.recommendedChars && capacity?.maxLines) {
+        const textRatio = text.length / (capacity.recommendedChars * 1.35);
+        const lineCountRatio = lines.length / capacity.maxLines;
+        if (textRatio > 1 && lineCountRatio > 1) {
+          issues.push({
+            severity: 'warning',
+            code: 'cell-overflow-risk',
+            message: 'Cell text may exceed estimated capacity.',
+            location: cell.location,
+            locationKey,
+            textLength: text.length,
+            recommendedChars: capacity.recommendedChars,
+            lineCount: lines.length,
+            maxLines: capacity.maxLines,
+            riskRatio: Math.max(textRatio, lineCountRatio),
+            riskDimensions: { text: textRatio, lines: lineCountRatio },
+          });
+        }
+      }
+      if (capacity?.maxCharsPerLine) {
+        const lineRatio = longestLine / (capacity.maxCharsPerLine * 1.25);
+        if (lineRatio > 1) {
+          issues.push({
+            severity: 'warning',
+            code: 'cell-line-overflow-risk',
+            message: 'A cell line may be too long for the estimated width.',
+            location: cell.location,
+            locationKey,
+            longestLine,
+            maxCharsPerLine: capacity.maxCharsPerLine,
+            riskRatio: lineRatio,
+            riskDimensions: { line: lineRatio },
+          });
+        }
+      }
+    }
+  }
+  return issues;
+}
+
+function riskDidNotWorsen(currentIssue, baselineIssue) {
+  const currentDimensions = currentIssue.riskDimensions ?? {};
+  const baselineDimensions = baselineIssue.riskDimensions ?? {};
+  const dimensionNames = Object.keys(currentDimensions);
+  if (dimensionNames.length) {
+    return dimensionNames.every((name) => {
+      const currentValue = Number(currentDimensions[name]);
+      const baselineValue = Number(baselineDimensions[name]);
+      return Number.isFinite(currentValue) && Number.isFinite(baselineValue)
+        && currentValue <= baselineValue + CAPACITY_RISK_EPSILON;
+    });
+  }
+  const currentRatio = Number(currentIssue.riskRatio);
+  const baselineRatio = Number(baselineIssue.riskRatio);
+  return Number.isFinite(currentRatio) && Number.isFinite(baselineRatio)
+    && currentRatio <= baselineRatio + CAPACITY_RISK_EPSILON;
+}
+
+function markNonRegressingBaselineWarnings(issues, baselineJson) {
+  if (!baselineJson) {
+    return issues;
+  }
+  const baselineByKey = new Map(tableCapacityRiskIssues(baselineJson).map((issue) => [
+    `${issue.code}|${issue.locationKey}`,
+    issue,
+  ]));
+  return issues.map((issue) => {
+    if (issue.severity !== 'warning' || !BASELINE_COMPARABLE_TABLE_WARNING_CODES.has(issue.code) || !issue.locationKey) {
+      return issue;
+    }
+    const baselineIssue = baselineByKey.get(`${issue.code}|${issue.locationKey}`);
+    if (!baselineIssue || !riskDidNotWorsen(issue, baselineIssue)) {
+      return issue;
+    }
+    return {
+      ...issue,
+      severity: 'info',
+      preexisting: true,
+      baselineSeverity: 'warning',
+      baselineRiskRatio: baselineIssue.riskRatio,
+    };
+  });
 }
 
 function discoverTables(documentXml) {
@@ -701,6 +966,12 @@ function editableTargets(sections, tables) {
       location: { paragraph: { section: 0, number: paragraph.index } },
       textLength: paragraph.text.length,
       styleFingerprint: paragraph.styleFingerprint,
+      runs: paragraphRunsFromXml(paragraph.xml).map(({ index, text, textLength, style }) => ({
+        index,
+        text,
+        textLength,
+        style,
+      })),
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
     }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
@@ -762,7 +1033,8 @@ function docxStyleXml(style) {
   const type = style.type || 'paragraph';
   const pPr = type === 'paragraph' ? paragraphPropertiesXml(style.paragraphStyle) : '';
   const rPr = runPropertiesXml(style.runStyle);
-  return `<w:style w:type="${escapeXmlAttr(type)}" w:styleId="${escapeXmlAttr(style.styleId)}"><w:name w:val="${escapeXmlAttr(style.name || style.styleId)}"/>${pPr}${rPr}</w:style>`;
+  const basedOn = style.basedOn ? `<w:basedOn w:val="${escapeXmlAttr(style.basedOn)}"/>` : '';
+  return `<w:style w:type="${escapeXmlAttr(type)}" w:styleId="${escapeXmlAttr(style.styleId)}"><w:name w:val="${escapeXmlAttr(style.name || style.styleId)}"/>${basedOn}${pPr}${rPr}</w:style>`;
 }
 
 function defaultContentTypesXml(includeImage = false) {
@@ -819,6 +1091,17 @@ export function getDocumentXml(docxBytes) {
   const xml = readZip(Buffer.from(docxBytes)).get('word/document.xml');
   assert.ok(xml, 'word/document.xml must exist');
   return xml.toString('utf8');
+}
+
+export function getDocumentVisibleText(docxBytes) {
+  const documentXml = getDocumentXml(docxBytes);
+  const values = [];
+  const pattern = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
+  let match;
+  while ((match = pattern.exec(documentXml))) {
+    values.push(unescapeXml(match[1] ?? ''));
+  }
+  return values.join('');
 }
 
 export function getZipText(docxBytes, name, fallback = '') {
@@ -931,7 +1214,11 @@ export class DocxApiSession {
   }
 
   paragraphFromLocation(location = {}) {
-    const { paragraph } = normalizeParagraphLocation(location);
+    const nodeId = location.range?.start?.nodeId ?? location.nodeId;
+    const nodeMatch = String(nodeId ?? '').match(/^p_(\d+)$/);
+    const { paragraph } = nodeMatch
+      ? { paragraph: Number(nodeMatch[1]) }
+      : normalizeParagraphLocation(location);
     assert.ok(paragraph !== undefined, `paragraph location is incomplete: ${JSON.stringify(location)}`);
     const item = discoverParagraphs(this.documentXml).find((entry) => entry.index === paragraph);
     assert.ok(item, `paragraph not found: ${paragraph}`);
@@ -963,6 +1250,12 @@ export class DocxApiSession {
       textLength: paragraph.text.length,
       style: paragraph.style,
       styleFingerprint: paragraph.styleFingerprint,
+      runs: paragraphRunsFromXml(paragraph.xml).map(({ index, text, textLength, style }) => ({
+        index,
+        text,
+        textLength,
+        style,
+      })),
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
       native: { section: 0, paragraph: paragraph.index },
     };
@@ -1030,11 +1323,13 @@ export class DocxApiSession {
 
   normalizeCommand(command, index = 0) {
     const key = commandKey(command);
+    const commandSpec = resolveDocxCommand(key);
+    const catalogOp = commandSpec?.op;
     const opId = commandId(command, index);
     const location = commandLocation(command);
     const tableId = command.tableId ?? location.tableId ?? location.table?.id;
 
-    if (key === 'setcelltext' || key === 'tablewritecell' || key === 'tablewriterichcell') {
+    if (catalogOp === 'table.writeCell' || catalogOp === 'table.writeRichCell') {
       const legacyTableId = key === 'setcelltext' && !tableId ? 'tbl_0' : tableId;
       return [{
         ...command,
@@ -1050,7 +1345,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'tablewritecells') {
+    if (catalogOp === 'table.writeCells') {
       return (command.cells ?? []).map((cellCommand, cellIndex) => ({
         ...cellCommand,
         opId: commandId(cellCommand, cellIndex) === `command-${cellIndex + 1}` ? `${opId}-${cellIndex + 1}` : commandId(cellCommand, cellIndex),
@@ -1066,46 +1361,50 @@ export class DocxApiSession {
       }));
     }
 
-    if (key === 'textreplaceparagraph' || key === 'replaceparagraphtext') {
+    if (catalogOp === 'text.replaceParagraph') {
       return [{ ...command, opId, op: 'text.replaceParagraph', location, text: commandText(command) }];
     }
 
-    if (key === 'textreplace' || key === 'replacetext') {
+    if (catalogOp === 'text.replace') {
       return [{ ...command, opId, op: 'text.replace', target: command.target ?? command.range ?? location, text: commandText(command) }];
     }
 
-    if (key === 'inserttext') {
+    if (catalogOp === 'insertText') {
       return [{ ...command, opId, op: 'text.insert', target: command.target ?? location, text: commandText(command) }];
     }
 
-    if (key === 'deleterange') {
+    if (catalogOp === 'deleteRange') {
       return [{ ...command, opId, op: 'text.delete', target: command.target ?? location }];
     }
 
-    if (key === 'appendparagraph') {
+    if (catalogOp === 'appendParagraph') {
       return [{ ...command, opId, op: 'paragraph.append', text: commandText(command) }];
     }
 
-    if (key === 'applystyle') {
+    if (catalogOp === 'applyStyle') {
       return [{ ...command, opId, op: 'paragraph.applyNamedStyle', target: command.target ?? location, styleId: command.styleId }];
     }
 
-    if (key === 'setrunstyle') {
+    if (catalogOp === 'setRunStyle') {
       return [{ ...command, opId, op: 'style.setRunStyle', target: command.target ?? location, style: command.style ?? {} }];
     }
 
-    if (key === 'setparagraphstyle') {
+    if (catalogOp === 'setParagraphStyle') {
       return [{ ...command, opId, op: 'style.setParagraphStyle', target: command.target ?? location, style: command.style ?? {} }];
     }
 
-    if (key === 'createtable') {
+    if (catalogOp === 'table.create') {
       return [{ ...command, opId, op: 'table.create' }];
     }
 
-    if (key === 'listwritebullets' || key === 'listwrite' || key === 'listapplynumbering' || key === 'paragraphapplynumbering') {
+    if (catalogOp === 'table.insertCaption') {
+      return [{ ...command, opId, op: 'table.insertCaption', tableId, text: commandText(command) }];
+    }
+
+    if (catalogOp === 'list.writeBullets' || catalogOp === 'list.applyNumbering') {
       const text = buildListText(command.items ?? command.content?.items ?? commandText(command), {
         ...command,
-        numbered: command.numbered ?? key.includes('numbering'),
+        numbered: command.numbered ?? catalogOp === 'list.applyNumbering',
       });
       return [{
         ...command,
@@ -1117,7 +1416,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'styleclone' || key === 'styleclonefromtarget') {
+    if (catalogOp === 'style.clone') {
       return [{
         ...command,
         opId,
@@ -1127,7 +1426,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'styleapplytext') {
+    if (catalogOp === 'style.applyText') {
       return [{
         ...command,
         opId,
@@ -1138,7 +1437,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'paragraphapplystyle' || key === 'styleapplyparagraph') {
+    if (catalogOp === 'paragraph.applyStyle') {
       return [{
         ...command,
         opId,
@@ -1148,7 +1447,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'tableapplycellstyle' || key === 'cellapplystyle') {
+    if (catalogOp === 'table.applyCellStyle') {
       return [{
         ...command,
         opId,
@@ -1159,11 +1458,11 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'layoutfittext') {
+    if (catalogOp === 'layout.fitText') {
       return [{ ...command, opId, op: 'layout.fitText', location, text: commandText(command), options: command.options ?? command.fitOptions ?? {} }];
     }
 
-    if (key === 'imagereplace' || key === 'objectreplaceimage' || key === 'chartreplaceimage') {
+    if (catalogOp === 'image.replace') {
       return [{
         ...command,
         opId,
@@ -1172,7 +1471,7 @@ export class DocxApiSession {
       }];
     }
 
-    if (key === 'imagegenerateandreplace' || key === 'objectgenerateandreplace' || key === 'chartgenerateandreplace') {
+    if (catalogOp === 'image.generateAndReplace') {
       return [{
         ...command,
         opId,
@@ -1182,7 +1481,131 @@ export class DocxApiSession {
       }];
     }
 
+    if (commandSpec) {
+      return [{ ...command, opId, op: commandSpec.normalizeAs }];
+    }
     return [{ ...command, opId }];
+  }
+
+  validateCommandInputs(commands) {
+    for (const command of commands) {
+      const entry = resolveDocxCommand(commandKey(command));
+      if (!entry) {
+        continue;
+      }
+      if (command.op === entry.op) {
+        validateDocxCommands([command]);
+      }
+      if (entry.op === 'table.create'
+        && (!Number.isInteger(command.rows) || command.rows <= 0 || !Number.isInteger(command.cols) || command.cols <= 0)) {
+        throw new Error('table.create rows and cols must be positive integers.');
+      }
+      if (entry.op === 'table.writeCells' && (!Array.isArray(command.cells) || command.cells.length === 0)) {
+        throw new Error('table.writeCells requires a nonempty cells array.');
+      }
+      if (entry.op === 'text.replaceParagraph' && command.segments !== undefined) {
+        if (!Array.isArray(command.segments) || command.segments.length === 0) {
+          throw new Error('text.replaceParagraph segments must be a nonempty array.');
+        }
+        for (const [segmentIndex, segment] of command.segments.entries()) {
+          if (!segment || typeof segment !== 'object' || Array.isArray(segment)
+            || !Number.isInteger(segment.sourceRun) || segment.sourceRun < 0 || typeof segment.text !== 'string') {
+            throw new Error(`text.replaceParagraph segments[${segmentIndex}] requires a nonnegative sourceRun and text string.`);
+          }
+        }
+        if (command.segments.map((segment) => segment.text).join('') !== command.text) {
+          throw new Error('text.replaceParagraph segment text must concatenate exactly to text.');
+        }
+      }
+      if ((entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering')
+        && (!Array.isArray(command.items) || command.items.length === 0
+          || command.items.some((item) => typeof item !== 'string' || item.trim() === ''))) {
+        throw new Error(`${entry.op} items must be a nonempty array of nonempty strings.`);
+      }
+      if (entry.op === 'defineStyle' && (typeof command.style?.styleId !== 'string' || command.style.styleId.trim() === '')) {
+        throw new Error('defineStyle style.styleId must be a nonempty string.');
+      }
+    }
+  }
+
+  validateNormalizedOperations(operations) {
+    const existingStyleIds = new Set(readStyleGraph(this.entries).styles
+      .map((style) => style.styleId)
+      .filter(Boolean));
+    const batchStyleIds = new Set(operations
+      .filter((operation) => operation.op === 'defineStyle')
+      .map((operation) => String(operation.style?.styleId ?? '').trim())
+      .filter(Boolean));
+    const inspect = (target, label) => {
+      try {
+        return this.inspectTarget(target);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${label} does not identify an existing stable target: ${detail}`);
+      }
+    };
+
+    for (const operation of operations) {
+      if (operation.op === 'table.writeCell' || operation.op === 'text.replaceParagraph' || operation.op === 'layout.fitText') {
+        inspect(operation.location, `${operation.op}.location`);
+        if (operation.styleSource) {
+          inspect(operation.styleSource, `${operation.op}.styleSource`);
+        }
+      } else if (operation.op === 'text.replace' || operation.op === 'text.insert' || operation.op === 'text.delete'
+        || operation.op === 'style.setRunStyle' || operation.op === 'style.setParagraphStyle'
+        || operation.op === 'insertFootnote') {
+        const target = inspect(operation.target, `${operation.op}.target`);
+        if (operation.op === 'text.replace' || operation.op === 'text.insert' || operation.op === 'text.delete') {
+          const range = operation.target?.range;
+          const native = operation.target?.native;
+          const startOffset = Number(native?.offset ?? native?.startOffset ?? range?.start?.offset ?? 0);
+          const nativeEnd = Number.isFinite(Number(native?.endOffset))
+            ? Number(native.endOffset)
+            : Number.isFinite(Number(native?.length))
+              ? startOffset + Number(native.length)
+              : Number.NaN;
+          const endOffset = operation.op === 'text.insert'
+            ? startOffset
+            : Number.isFinite(nativeEnd) ? nativeEnd : Number(range?.end?.offset ?? target.currentText.length);
+          assert.ok(Number.isInteger(startOffset) && Number.isInteger(endOffset)
+            && startOffset >= 0 && endOffset >= startOffset && endOffset <= target.currentText.length,
+          `${operation.op}.target range is outside the existing paragraph`);
+        }
+      } else if (operation.op === 'paragraph.applyNamedStyle') {
+        inspect(operation.target, 'applyStyle.target');
+        const styleId = String(operation.styleId ?? '').trim();
+        if (!existingStyleIds.has(styleId) && !batchStyleIds.has(styleId)) {
+          throw new Error(`applyStyle styleId does not exist in the document or this atomic batch: ${styleId || '<missing>'}`);
+        }
+      } else if (operation.op === 'style.applyText' || operation.op === 'paragraph.applyStyle') {
+        inspect(operation.target, `${operation.op}.target`);
+        if (operation.styleSource) {
+          inspect(operation.styleSource, `${operation.op}.styleSource`);
+        }
+      } else if (operation.op === 'table.applyCellStyle') {
+        const target = inspect(operation.target, 'table.applyCellStyle.target');
+        assert.equal(target.kind, 'cell', 'table.applyCellStyle.target must identify a table cell');
+        if (operation.styleSource) {
+          const source = inspect(operation.styleSource, 'table.applyCellStyle.styleSource');
+          assert.equal(source.kind, 'cell', 'table.applyCellStyle.styleSource must identify a table cell');
+        }
+      } else if (operation.op === 'table.create') {
+        assert.ok(Number.isInteger(operation.rows) && operation.rows > 0 && Number.isInteger(operation.cols) && operation.cols > 0,
+          'table.create rows and cols must be positive integers');
+      } else if (operation.op === 'table.insertCaption') {
+        this.tableFromLocation({ tableId: operation.tableId });
+      } else if (operation.op === 'defineStyle') {
+        assert.ok(String(operation.style?.styleId ?? '').trim(), 'defineStyle requires style.styleId');
+      } else if (operation.op === 'image.replace') {
+        assert.ok(this.entries.has(operation.imageName), `package entry not found: ${operation.imageName}`);
+        const bytes = imageBytesFromOperation(operation);
+        assert.ok(bytes.length > 0, 'image.replace requires bytes, bytesBase64, or filePath');
+        validateImageBytesForPackage(operation.imageName, bytes, operation.mimeType);
+      } else if (operation.op === 'image.generateAndReplace') {
+        assert.ok(this.entries.has(operation.imageName), `package entry not found: ${operation.imageName}`);
+        validateImageBytesForPackage(operation.imageName, generatePngBytes(operation.generator), 'image/png');
+      }
+    }
   }
 
   apply(commands) {
@@ -1190,9 +1613,20 @@ export class DocxApiSession {
   }
 
   commandsBatch(ops) {
+    this.validateCommandInputs(ops);
     const normalizedOps = ops.flatMap((op, index) => this.normalizeCommand(op, index));
+    this.validateNormalizedOperations(normalizedOps);
+    const snapshot = {
+      documentXml: this.documentXml,
+      entries: new Map([...this.entries].map(([name, bytes]) => [name, Buffer.from(bytes)])),
+      dirtyDocument: this.dirtyDocument,
+      dirtyPackage: this.dirtyPackage,
+      revision: this.revision,
+    };
     const results = [];
-    for (const op of normalizedOps) {
+    let mutated = false;
+    try {
+      for (const op of normalizedOps) {
       if (op.op === 'table.writeCell') {
         const target = this.inspectTarget(op.location);
         const shouldFit = op.fit === true || op.fitOptions;
@@ -1200,26 +1634,33 @@ export class DocxApiSession {
         const sourceTemplate = op.styleSource ? this.paragraphTemplateXml(op.styleSource) : this.paragraphTemplateXml(op.location);
         this.replaceCellXml(op.location, fit?.text ?? op.text, { templateParagraphXml: sourceTemplate });
         results.push({ opId: op.opId, ok: true, target: target.id, action: 'table.writeCell', fit });
+        mutated = true;
       } else if (op.op === 'text.replaceParagraph') {
         const template = op.styleSource ? this.paragraphTemplateXml(op.styleSource) : this.paragraphTemplateXml(op.location);
         const target = this.inspectTarget(op.location);
-        this.replaceParagraphXml(op.location, op.text, { templateParagraphXml: template });
+        this.replaceParagraphXml(op.location, op.text, { templateParagraphXml: template, segments: op.segments });
         results.push({ opId: op.opId, ok: true, target: target.id, action: 'text.replaceParagraph' });
+        mutated = true;
       } else if (op.op === 'text.replace' || op.op === 'text.insert' || op.op === 'text.delete') {
         this.replaceTextRange(op);
         results.push({ opId: op.opId, ok: true, action: op.op });
+        mutated = true;
       } else if (op.op === 'paragraph.append') {
         this.insertBeforeSectPr(paragraphXml(op.text, { paragraphStyle: op.paragraphStyle, runStyle: op.runStyle }));
         results.push({ opId: op.opId, ok: true, action: 'paragraph.append' });
+        mutated = true;
       } else if (op.op === 'paragraph.applyNamedStyle') {
         this.applyNamedStyle(op.target, op.styleId);
         results.push({ opId: op.opId, ok: true, action: 'applyStyle' });
+        mutated = true;
       } else if (op.op === 'style.setRunStyle') {
         this.setRunStyle(op.target, op.style);
         results.push({ opId: op.opId, ok: true, action: 'setRunStyle' });
+        mutated = true;
       } else if (op.op === 'style.setParagraphStyle') {
         this.setParagraphStyle(op.target, op.style);
         results.push({ opId: op.opId, ok: true, action: 'setParagraphStyle' });
+        mutated = true;
       } else if (op.op === 'table.create') {
         this.insertBeforeSectPr(tableXml(op.rows, op.cols, {
           cellStyle: op.cellStyle,
@@ -1227,7 +1668,25 @@ export class DocxApiSession {
           runStyle: op.runStyle,
           tblPrXml: op.tblPrXml,
         }));
-        results.push({ opId: op.opId, ok: true, action: 'createTable' });
+        const createdTable = this.readJson().tables.at(-1);
+        assert.ok(createdTable, 'table.create did not produce a discoverable table');
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'createTable',
+          target: createdTable.id,
+          tableId: createdTable.id,
+          dimensions: createdTable.dims,
+        });
+        mutated = true;
+      } else if (op.op === 'table.insertCaption') {
+        const table = this.tableFromLocation({ tableId: op.tableId });
+        this.insertTableCaption(op.tableId, op.text, {
+          paragraphStyle: op.paragraphStyle,
+          runStyle: op.runStyle,
+        });
+        results.push({ opId: op.opId, ok: true, action: 'table.insertCaption', target: table.id, tableId: table.id });
+        mutated = true;
       } else if (op.op === 'style.applyText' || op.op === 'paragraph.applyStyle') {
         const target = this.inspectTarget(op.target);
         const nextText = op.op === 'style.applyText' && op.text !== undefined ? op.text : target.currentText;
@@ -1238,40 +1697,57 @@ export class DocxApiSession {
           this.replaceParagraphXml(op.target, nextText, { templateParagraphXml });
         }
         results.push({ opId: op.opId, ok: true, target: target.id, action: op.op });
+        mutated = true;
       } else if (op.op === 'table.applyCellStyle') {
         const target = this.inspectTarget(op.target);
         const sourceCellStyle = op.styleSource ? this.cellOuterStyle(op.styleSource) : null;
         const explicitCellStyle = op.cellStyle ? cellStyleXml(op.cellStyle) : null;
         this.applyCellOuterStyle(op.target, sourceCellStyle ?? explicitCellStyle);
         results.push({ opId: op.opId, ok: true, target: target.id, action: 'table.applyCellStyle' });
+        mutated = true;
       } else if (op.op === 'layout.fitText') {
         results.push({ opId: op.opId, ok: true, action: 'layout.fitText', fit: this.fitText(op.location, op.text, op.options) });
       } else if (op.op === 'defineStyle') {
         this.defineStyle(op.style);
         results.push({ opId: op.opId, ok: true, action: 'defineStyle' });
+        mutated = true;
       } else if (op.op === 'setPageSetup') {
         this.setPageSetup(op);
         results.push({ opId: op.opId, ok: true, action: 'setPageSetup' });
+        mutated = true;
       } else if (op.op === 'setHeaderFooter') {
         this.setHeaderFooter(op);
         results.push({ opId: op.opId, ok: true, action: 'setHeaderFooter' });
+        mutated = true;
       } else if (op.op === 'setDocumentMetadata') {
         this.setDocumentMetadata(op);
         results.push({ opId: op.opId, ok: true, action: 'setDocumentMetadata' });
+        mutated = true;
       } else if (op.op === 'insertFootnote') {
         this.insertFootnote(op);
         results.push({ opId: op.opId, ok: true, action: 'insertFootnote' });
+        mutated = true;
       } else if (op.op === 'image.replace') {
         this.replaceImage(op);
         results.push({ opId: op.opId, ok: true, action: 'image.replace', target: op.imageName });
+        mutated = true;
       } else if (op.op === 'image.generateAndReplace') {
         this.replaceImage({ ...op, bytes: generatePngBytes(op.generator) });
         results.push({ opId: op.opId, ok: true, action: 'image.generateAndReplace', target: op.imageName });
+        mutated = true;
       } else {
         throw new Error(`unsupported DOCX API op: ${op.op}`);
       }
+      }
+    } catch (error) {
+      this.documentXml = snapshot.documentXml;
+      this.entries = snapshot.entries;
+      this.dirtyDocument = snapshot.dirtyDocument;
+      this.dirtyPackage = snapshot.dirtyPackage;
+      this.revision = snapshot.revision;
+      throw error;
     }
-    if (normalizedOps.length) {
+    if (mutated) {
       this.revision += 1;
     }
     return { revision: this.revision, results };
@@ -1281,20 +1757,54 @@ export class DocxApiSession {
     const paragraph = this.paragraphFromLocation(location);
     const template = options.templateParagraphXml ?? paragraph.xml;
     const pPrXml = tagXml(template, 'pPr');
-    const rPrXml = tagXml(template, 'rPr');
-    const replacement = paragraphsXmlFromText(text, { pPrXml, rPrXml });
+    const templateRuns = paragraphRunsFromXml(template);
+    let replacement;
+    if (options.segments) {
+      assert.ok(!String(text ?? '').includes('\n'), 'Segmented paragraph replacement does not accept line breaks.');
+      assert.equal(
+        options.segments.length,
+        templateRuns.length,
+        'text.replaceParagraph segments must preserve every inspected run exactly once.',
+      );
+      const runsXml = options.segments.map((segment, segmentIndex) => {
+        assert.equal(
+          segment.sourceRun,
+          segmentIndex,
+          'text.replaceParagraph segments must preserve inspected run order.',
+        );
+        const sourceRun = templateRuns[segment.sourceRun];
+        assert.ok(sourceRun, `text.replaceParagraph sourceRun does not exist: ${segment.sourceRun}`);
+        return textRunXml(segment.text, sourceRun.rPrXml);
+      }).join('');
+      const paragraphOpen = template.match(/^<w:p\b[^>]*>/)?.[0] ?? '<w:p>';
+      replacement = `${paragraphOpen}${pPrXml}${runsXml}</w:p>`;
+    } else {
+      const textRuns = templateRuns.filter((run) => run.textLength > 0);
+      const visibleTemplateRun = textRuns[0] ?? templateRuns[0];
+      assert.ok(
+        templateRuns.every((run) => runHasEquivalentVisibleFormatting(run.style, visibleTemplateRun?.style)),
+        'text.replaceParagraph requires segments when a paragraph contains visibly distinct run formatting. Call target_inspect and preserve every run index in order.',
+      );
+      const rPrXml = visibleTemplateRun?.rPrXml ?? tagXml(template, 'rPr');
+      replacement = paragraphsXmlFromText(text, { pPrXml, rPrXml });
+    }
     this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${replacement}${this.documentXml.slice(paragraph.end)}`;
     this.dirtyDocument = true;
   }
 
   replaceTextRange(op) {
-    const range = op.target?.range ?? op.target;
-    const nodeId = range?.start?.nodeId ?? op.target?.nodeId;
-    assert.ok(nodeId, `${op.op} requires target.range.start.nodeId`);
-    const paragraphIndex = Number(String(nodeId).replace(/^p_/, ''));
+    const target = op.target ?? {};
+    const range = target.range ?? target;
+    const native = target.native ?? range.native;
+    const nodeId = range?.start?.nodeId ?? target.nodeId;
+    const paragraphIndex = native
+      ? Number(native.para ?? native.paragraph ?? native.number)
+      : Number(String(nodeId).replace(/^p_/, ''));
+    assert.ok(Number.isFinite(paragraphIndex), `${op.op} requires target.range.start.nodeId or target.native.para`);
     const paragraph = this.paragraphFromLocation({ paragraph: { number: paragraphIndex } });
-    const startOffset = range?.start?.offset ?? 0;
-    const endOffset = op.op === 'text.insert' ? startOffset : (range?.end?.offset ?? paragraph.text.length);
+    const startOffset = Number(native?.offset ?? range?.start?.offset ?? 0);
+    const nativeEnd = Number.isFinite(Number(native?.length)) ? startOffset + Number(native.length) : undefined;
+    const endOffset = op.op === 'text.insert' ? startOffset : (nativeEnd ?? range?.end?.offset ?? paragraph.text.length);
     const replacementText = op.op === 'text.delete'
       ? `${paragraph.text.slice(0, startOffset)}${paragraph.text.slice(endOffset)}`
       : `${paragraph.text.slice(0, startOffset)}${op.text}${paragraph.text.slice(endOffset)}`;
@@ -1351,27 +1861,45 @@ export class DocxApiSession {
     this.dirtyDocument = true;
   }
 
+  insertTableCaption(tableId, text, options = {}) {
+    const table = this.tableFromLocation({ tableId });
+    const tableBlock = elementBlocks(this.documentXml, 'tbl')[table.tableIndex];
+    assert.ok(tableBlock, `table XML not found: ${tableId}`);
+    const captionXml = paragraphXml(text, {
+      paragraphStyle: options.paragraphStyle,
+      runStyle: options.runStyle,
+    });
+    this.documentXml = `${this.documentXml.slice(0, tableBlock.start)}${captionXml}${this.documentXml.slice(tableBlock.start)}`;
+    this.dirtyDocument = true;
+  }
+
   applyNamedStyle(target, styleId) {
-    const paragraphIndex = Number(String(target?.nodeId ?? '').replace(/^p_/, ''));
-    const location = Number.isFinite(paragraphIndex) ? { paragraph: { number: paragraphIndex } } : target;
-    const paragraph = this.paragraphFromLocation(location);
+    // paragraphFromLocation already handles nodeId, range, native, and canonical
+    // { paragraph: { number } } locations. Coercing a missing nodeId with Number('')
+    // resolves to paragraph 0 and silently styles the title instead of the inspected
+    // target. Always preserve the exact caller location here.
+    const paragraph = this.paragraphFromLocation(target);
+    const escapedStyleId = escapeXmlAttr(styleId);
     let next = paragraph.xml;
     const pPr = tagXml(next, 'pPr');
     if (pPr) {
       const replacement = pPr.includes('<w:pStyle')
-        ? pPr.replace(/<w:pStyle\b[^>]*\/>/, `<w:pStyle w:val="${escapeXmlAttr(styleId)}"/>`)
-        : pPr.replace('<w:pPr>', `<w:pPr><w:pStyle w:val="${escapeXmlAttr(styleId)}"/>`);
+        ? pPr.replace(/<w:pStyle\b[^>]*\/>/, `<w:pStyle w:val="${escapedStyleId}"/>`)
+        : pPr.replace('<w:pPr>', `<w:pPr><w:pStyle w:val="${escapedStyleId}"/>`);
       next = next.replace(pPr, replacement);
     } else {
-      next = next.replace(/<w:p\b[^>]*>/, (match) => `${match}<w:pPr><w:pStyle w:val="${escapeXmlAttr(styleId)}"/></w:pPr>`);
+      next = next.replace(/<w:p\b[^>]*>/, (match) => `${match}<w:pPr><w:pStyle w:val="${escapedStyleId}"/></w:pPr>`);
     }
+    assert.ok(tagXml(next, 'pStyle').includes(`w:val="${escapedStyleId}"`),
+      `applyStyle could not materialize paragraph style ${styleId}`);
     this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${next}${this.documentXml.slice(paragraph.end)}`;
     this.dirtyDocument = true;
+    assert.ok(tagXml(this.paragraphFromLocation(target).xml, 'pStyle').includes(`w:val="${escapedStyleId}"`),
+      `applyStyle did not persist paragraph style ${styleId}`);
   }
 
   setRunStyle(target, style = {}) {
-    const paragraphIndex = Number(String(target?.range?.start?.nodeId ?? target?.nodeId ?? '').replace(/^p_/, ''));
-    const paragraph = this.paragraphFromLocation({ paragraph: { number: paragraphIndex } });
+    const paragraph = this.paragraphFromLocation(target);
     let next = paragraph.xml;
     const rPr = runPropertiesXml(style);
     const firstRun = next.match(/<w:r\b[^>]*>/);
@@ -1386,8 +1914,7 @@ export class DocxApiSession {
   }
 
   setParagraphStyle(target, style = {}) {
-    const paragraphIndex = Number(String(target?.nodeId ?? '').replace(/^p_/, ''));
-    const paragraph = this.paragraphFromLocation({ paragraph: { number: paragraphIndex } });
+    const paragraph = this.paragraphFromLocation(target);
     const pPr = paragraphPropertiesXml(style);
     let next = paragraph.xml;
     if (tagXml(next, 'pPr')) {
@@ -1470,9 +1997,20 @@ export class DocxApiSession {
   }
 
   setPageSetup(setup) {
+    const margins = setup.margins ?? {
+      top: setup.marginTop,
+      right: setup.marginRight,
+      bottom: setup.marginBottom,
+      left: setup.marginLeft,
+      header: setup.marginHeader,
+      footer: setup.marginFooter,
+      gutter: setup.marginGutter,
+    };
+    for (const side of ['top', 'right', 'bottom', 'left']) {
+      assert.ok(Number.isFinite(Number(margins[side])), `setPageSetup requires margins.${side}`);
+    }
     this.updateSectPr((body) => {
       const pgSz = `<w:pgSz w:w="${setup.width}" w:h="${setup.height}"${setup.orientation === 'landscape' ? ' w:orient="landscape"' : ''}/>`;
-      const margins = setup.margins ?? {};
       const pgMar = `<w:pgMar w:top="${margins.top}" w:right="${margins.right}" w:bottom="${margins.bottom}" w:left="${margins.left}" w:header="${margins.header || 720}" w:footer="${margins.footer || 720}" w:gutter="${margins.gutter || 0}"/>`;
       return replaceOrInsertChild(replaceOrInsertChild(body, /^/, 'pgSz', pgSz), /^/, 'pgMar', pgMar);
     });
@@ -1480,17 +2018,53 @@ export class DocxApiSession {
 
   setHeaderFooter(op) {
     this.documentXml = ensureDocumentRelationshipNamespace(this.documentXml);
-    this.ensureContentTypeOverride('/word/header1.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml');
-    this.ensureDocumentRelationship('rIdHeader1', `${OFFICE_REL_NS}/header`, 'header1.xml');
-    this.entries.set('word/header1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="${WORD_NS}">${paragraphXml(op.text, { paragraphStyle: { align: op.align || 'center' } })}</w:hdr>`, 'utf8'));
-    this.updateSectPr((body) => `<w:headerReference w:type="default" r:id="rIdHeader1"/>${body.replace(/<w:headerReference\b[^>]*\/>/g, '')}`);
+    const header = op.header ?? op.text;
+    const footer = op.footer;
+    assert.ok(header !== undefined || footer !== undefined, 'setHeaderFooter requires header, footer, or text');
+    let headerReferenceXml = '';
+    let footerReferenceXml = '';
+    if (header !== undefined) {
+      this.ensureContentTypeOverride('/word/header1.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml');
+      this.ensureDocumentRelationship('rIdHeader1', `${OFFICE_REL_NS}/header`, 'header1.xml');
+      this.entries.set('word/header1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="${WORD_NS}">${paragraphXml(header, { paragraphStyle: { align: op.align || 'center' } })}</w:hdr>`, 'utf8'));
+      headerReferenceXml = '<w:headerReference w:type="default" r:id="rIdHeader1"/>';
+    }
+    if (footer !== undefined) {
+      this.ensureContentTypeOverride('/word/footer1.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml');
+      this.ensureDocumentRelationship('rIdFooter1', `${OFFICE_REL_NS}/footer`, 'footer1.xml');
+      this.entries.set('word/footer1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="${WORD_NS}">${paragraphXml(footer, { paragraphStyle: { align: op.align || 'center' } })}</w:ftr>`, 'utf8'));
+      footerReferenceXml = '<w:footerReference w:type="default" r:id="rIdFooter1"/>';
+    }
+    this.updateSectPr((body) => {
+      let next = body;
+      if (header !== undefined) {
+        next = `${headerReferenceXml}${next.replace(/<w:headerReference\b[^>]*\/>/g, '')}`;
+      }
+      if (footer !== undefined) {
+        next = `${footerReferenceXml}${next.replace(/<w:footerReference\b[^>]*\/>/g, '')}`;
+      }
+      return next;
+    });
     this.dirtyPackage = true;
   }
 
   setDocumentMetadata(op) {
     this.ensureContentTypeOverride('/docProps/core.xml', 'application/vnd.openxmlformats-package.core-properties+xml');
     this.ensurePackageRelationship('rIdCoreProps', `${PACKAGE_REL_NS}/metadata/core-properties`, 'docProps/core.xml');
-    this.entries.set('docProps/core.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>${escapeXmlText(op.title || '')}</dc:title><dc:subject>${escapeXmlText(op.subject || '')}</dc:subject></cp:coreProperties>`, 'utf8'));
+    let coreXml = this.entries.get('docProps/core.xml')?.toString('utf8')
+      ?? '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"></cp:coreProperties>';
+    for (const [field, qualifiedName] of [
+      ['title', 'dc:title'],
+      ['subject', 'dc:subject'],
+      ['creator', 'dc:creator'],
+      ['keywords', 'cp:keywords'],
+      ['description', 'dc:description'],
+    ]) {
+      if (op[field] !== undefined) {
+        coreXml = replaceOrInsertXmlTextElement(coreXml, qualifiedName, op[field]);
+      }
+    }
+    this.entries.set('docProps/core.xml', Buffer.from(coreXml, 'utf8'));
     this.dirtyPackage = true;
   }
 
@@ -1501,9 +2075,7 @@ export class DocxApiSession {
     const ids = [...current.matchAll(/w:id="(-?\d+)"/g)].map((match) => Number(match[1])).filter((id) => id > 0);
     const nextId = Math.max(0, ...ids) + 1;
     this.entries.set('word/footnotes.xml', Buffer.from(current.replace('</w:footnotes>', `<w:footnote w:id="${nextId}">${paragraphXml(op.text)}</w:footnote></w:footnotes>`), 'utf8'));
-    const nodeId = op.target?.range?.start?.nodeId ?? op.target?.nodeId;
-    const paragraphIndex = Number(String(nodeId).replace(/^p_/, ''));
-    const paragraph = this.paragraphFromLocation({ paragraph: { number: paragraphIndex } });
+    const paragraph = this.paragraphFromLocation(op.target);
     const next = paragraph.xml.replace('</w:p>', `<w:r><w:footnoteReference w:id="${nextId}"/></w:r></w:p>`);
     this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${next}${this.documentXml.slice(paragraph.end)}`;
     this.dirtyDocument = true;
@@ -1512,20 +2084,12 @@ export class DocxApiSession {
 
   replaceImage(op) {
     assert.ok(op.imageName, 'image.replace requires imageName');
-    let bytes = op.bytes;
-    if (bytes && !Buffer.isBuffer(bytes)) {
-      bytes = Buffer.from(bytes);
-    } else if (!bytes && op.bytesBase64) {
-      bytes = Buffer.from(op.bytesBase64, 'base64');
-    } else if (!bytes && op.filePath) {
-      bytes = readFileSync(op.filePath);
-    }
+    const bytes = imageBytesFromOperation(op);
     assert.ok(bytes && bytes.length > 0, 'image.replace requires bytes, bytesBase64, or filePath');
     assert.ok(this.entries.has(op.imageName), `package entry not found: ${op.imageName}`);
+    const image = validateImageBytesForPackage(op.imageName, bytes, op.mimeType);
     this.entries.set(op.imageName, Buffer.from(bytes));
-    if (/\.png$/i.test(op.imageName)) {
-      this.ensureContentTypeDefault('png', 'image/png');
-    }
+    this.ensureContentTypeDefault(image.extension, image.mimeType);
     this.dirtyPackage = true;
   }
 
@@ -1538,36 +2102,7 @@ export class DocxApiSession {
         issues.push({ severity: 'error', code: 'missing-package-entry', message: `${name} is missing` });
       }
     }
-    for (const table of json.tables) {
-      if (!table.dims.cellCount) {
-        issues.push({ severity: 'warning', code: 'empty-table', message: 'A table has no cells', tableId: table.id });
-      }
-      for (const cell of table.cells) {
-        const capacity = cell.layout?.capacity;
-        const lines = String(cell.text ?? '').split('\n');
-        const longestLine = Math.max(0, ...lines.map((line) => line.length));
-        if (capacity?.recommendedChars && cell.text.length > capacity.recommendedChars * 1.35 && lines.length > (capacity.maxLines ?? 1)) {
-          issues.push({
-            severity: 'warning',
-            code: 'cell-overflow-risk',
-            message: 'Cell text may exceed estimated capacity.',
-            location: cell.location,
-            textLength: cell.text.length,
-            recommendedChars: capacity.recommendedChars,
-          });
-        }
-        if (capacity?.maxCharsPerLine && longestLine > capacity.maxCharsPerLine * 1.25) {
-          issues.push({
-            severity: 'warning',
-            code: 'cell-line-overflow-risk',
-            message: 'A cell line may be too long for the estimated width.',
-            location: cell.location,
-            longestLine,
-            maxCharsPerLine: capacity.maxCharsPerLine,
-          });
-        }
-      }
-    }
+    issues.push(...tableCapacityRiskIssues(json));
     if (options.baselineJson) {
       const currentCells = new Map(json.tables.flatMap((table) => table.cells.map((cell) => [cell.id, cell])));
       for (const baselineTable of options.baselineJson.tables ?? []) {
@@ -1587,8 +2122,9 @@ export class DocxApiSession {
         }
       }
     }
+    const reportedIssues = markNonRegressingBaselineWarnings(issues, options.baselineJson);
     return {
-      ok: issues.every((issue) => issue.severity !== 'error'),
+      ok: reportedIssues.every((issue) => issue.severity !== 'error'),
       revision: this.revision,
       pageCount: json.pageCount,
       tableCount: json.tables.length,
@@ -1602,7 +2138,7 @@ export class DocxApiSession {
         paragraphTargets: json.editableTargets.paragraphs.length,
         cellTargets: json.editableTargets.cells.length,
       },
-      issues,
+      issues: reportedIssues,
       warnings: json.warnings,
     };
   }

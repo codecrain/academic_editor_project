@@ -58,6 +58,47 @@ only those editor runtimes. Local dev defaults to these stable subpaths:
 - DOCX discovery: `http://127.0.0.1:9980/docx/hosting/discovery`
 - HWP/HWPX Studio: `http://127.0.0.1:11004/hwpx/`
 
+## MCP Endpoint
+
+The editor gateway also exposes a stateless Streamable HTTP MCP endpoint at
+`/mcp`. It implements `initialize`, `ping`, `tools/list`, and `tools/call` for
+the DOCX open/read/target/inspect/apply/quality/finalize workflow. Finalization
+returns an opaque `artifactId`; an authenticated application server retrieves
+the bytes with `editor_docx_artifact_read` only after user approval. The model
+and browser never receive a server-local artifact path. Successfully applied
+artifacts are deleted immediately; abandoned artifacts expire after
+`EDITOR_MCP_ARTIFACT_TTL_MS` (24 hours by default).
+
+Agents must call `editor_docx_discard(documentId)` when an edit is cancelled or
+cannot be finalized. Discard closes the isolated session and clears its MCP
+inspection/inventory/quality/lock state without creating an artifact; repeated
+calls complete safely with `deleted=false`.
+
+Large papers are read through bounded projections. `editor_docx_read_json`
+defaults to one compact `summary` item and can page `blocks` or `tables` with
+`nextCursor`; text and table-cell previews have hard caps.
+`editor_docx_target_map` pages exactly one `paragraph` or `cell` stream and
+returns one `targets` array (no duplicated `editableTargets`/`locations`
+aliases). Cursors are integrity-protected and fixed to the current document
+revision and query. After any apply, an old cursor fails with `stale_cursor` and
+the caller must start a fresh stream. Normal structured pages are budgeted near
+9 KiB so the complete MCP JSON-RPC response stays near or below 24 KiB at item
+boundaries. See `API.md` and `tools/list` for exact limits and fields.
+
+When the gateway binds beyond loopback, startup is fail-closed unless a Bearer
+token is configured:
+
+```bash
+EDITOR_MCP_BEARER_TOKEN='<strong-random-secret>' \
+EDITOR_API_BEARER_TOKEN='<same-or-separate-secret>' \
+npm run start
+```
+
+Consumers configure `ACADEMIC_EDITOR_MCP_URL`, preferably through an HTTPS
+reverse proxy such as `https://editor.example.com/mcp`, and send the token in
+the `Authorization` header. Do not send a Bearer token to a public plain-HTTP
+endpoint or put it in prompts, JSON-RPC arguments, or source control.
+
 `npm run dev:check` runs the public-safety scan, runtime unit tests, and syntax
 checks without starting a server. To start the editor, verify
 `/hosting/discovery` plus `cool.html`, and then stop only the runtime that the
