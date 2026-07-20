@@ -441,7 +441,7 @@ start_editor_gateway() {
   RHWP_STUDIO_BASE_PATH="$RHWP_STUDIO_BASE_PATH" \
   pm2 start "$(command -v node)" --name "$EDITOR_GATEWAY_PM2_NAME" -- "$gateway_script"
 
-  wait_for_url "${EDITOR_INTERNAL_SERVER_URL}/" "DOCX gateway"
+  wait_for_url "${EDITOR_INTERNAL_SERVER_URL}/hosting/discovery" "DOCX gateway"
   if truthy "$RHWP_ENABLED"; then
     wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${RHWP_STUDIO_BASE_PATH}" "HWPX gateway"
   fi
