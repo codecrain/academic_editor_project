@@ -13,6 +13,15 @@ die() {
   exit 1
 }
 
+load_secret_env() {
+  local secret_file="${EDITOR_SECRET_ENV_FILE:-${HOME:-}/.config/academic-editor/mcp.env}"
+  [ -f "$secret_file" ] || return 0
+  set -a
+  # shellcheck source=/dev/null
+  . "$secret_file"
+  set +a
+}
+
 truthy() {
   case "${1:-}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -482,6 +491,7 @@ save_pm2_state() {
 
 main() {
   ensure_linux
+  load_secret_env
   load_node_runtime
   ensure_command node
   ensure_command npm

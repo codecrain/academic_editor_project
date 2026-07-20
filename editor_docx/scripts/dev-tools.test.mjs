@@ -148,6 +148,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(dev, /academic-editor-native-dev/);
   assert.match(dev, /EDITOR_NATIVE_AUTO_LATEST/);
   assert.match(dev, /deploy-native-editor\.sh/);
+  assert.match(helper, /\.config\/academic-editor\/mcp\.env/);
+  assert.match(helper, /load_secret_env/);
   assert.match(helper, /git pull --ff-only/);
   assert.match(helper, /before_head=.*git rev-parse HEAD/);
   assert.match(helper, /repository updated; restarting deployment with the latest script/);
