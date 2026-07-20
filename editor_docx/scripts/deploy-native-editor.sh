@@ -74,6 +74,7 @@ apply_runtime_defaults() {
   export EDITOR_NATIVE_RUNTIME_DIR="${EDITOR_NATIVE_RUNTIME_DIR:-/var/lib/academic-editor}"
   export EDITOR_NATIVE_OFFICE_DIR="${EDITOR_NATIVE_OFFICE_DIR:-/opt/collaboraoffice}"
   export EDITOR_NATIVE_ACADEMIC_FONT_DIR="${EDITOR_NATIVE_ACADEMIC_FONT_DIR:-/usr/local/share/fonts/tlooto-academic}"
+  export EDITOR_ACADEMIC_FONTS_DIR="${EDITOR_ACADEMIC_FONTS_DIR:-$EDITOR_NATIVE_ACADEMIC_FONT_DIR}"
   export EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_SOURCE:-$ROOT_DIR/editor_docx/assets/dictionaries/tlooto-academic-en-US.dic}"
   export EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_TARGET:-$EDITOR_NATIVE_OFFICE_DIR/share/wordbook/standard.dic}"
   export EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE="${EDITOR_NATIVE_ACADEMIC_DICTIONARY_OWNER_SOURCE:-$ROOT_DIR/editor_docx/assets/dictionaries/tlooto-academic-en-US.owner}"
@@ -125,6 +126,55 @@ apply_runtime_defaults() {
   if truthy "${EDITOR_REQUIRE_PUBLIC_URL:-false}" && [ -z "${EDITOR_PUBLIC_URL:-}" ]; then
     die "set EDITOR_PUBLIC_URL=https://your-service-domain before running production sh.start."
   fi
+}
+
+academic_fonts_current() {
+  local manifest="$EDITOR_NATIVE_ACADEMIC_FONT_DIR/INSTALL-MANIFEST.txt"
+  local source_config="$ROOT_DIR/editor_docx/assets/fonts/tlooto-academic-substitutions.conf"
+  local installed_config="/etc/fonts/conf.avail/65-tlooto-academic-substitutions.conf"
+  local enabled_config="/etc/fonts/conf.d/65-tlooto-academic-substitutions.conf"
+
+  [ -f "$manifest" ] &&
+    grep -qx 'install_complete=yes' "$manifest" &&
+    [ -e "$enabled_config" ] &&
+    cmp -s "$source_config" "$installed_config"
+}
+
+ensure_academic_fonts() {
+  academic_fonts_current && {
+    log "academic fonts are current"
+    return 0
+  }
+
+  local manifest="$EDITOR_NATIVE_ACADEMIC_FONT_DIR/INSTALL-MANIFEST.txt"
+  local eula_accepted="${ACCEPT_MICROSOFT_CORE_FONTS_EULA:-}"
+  if [ "$eula_accepted" != "yes" ] &&
+      [ -f "$manifest" ] &&
+      grep -qx 'microsoft_core_fonts_eula_accepted=yes' "$manifest"; then
+    eula_accepted="yes"
+  fi
+  [ "$eula_accepted" = "yes" ] || die \
+    "academic fonts need installation. Re-run with ACCEPT_MICROSOFT_CORE_FONTS_EULA=yes after reviewing the Microsoft Core Fonts EULA."
+
+  local installer=(
+    env
+    ACCEPT_MICROSOFT_CORE_FONTS_EULA=yes
+    EDITOR_NATIVE_ACADEMIC_FONT_DIR="$EDITOR_NATIVE_ACADEMIC_FONT_DIR"
+    bash "$ROOT_DIR/editor_docx/scripts/install-academic-fonts.sh"
+  )
+  log "installing or updating academic fonts"
+  if [ "$(id -u)" -eq 0 ]; then
+    "${installer[@]}"
+  elif [ -t 0 ]; then
+    ensure_command sudo
+    sudo "${installer[@]}"
+  else
+    ensure_command sudo
+    sudo -n "${installer[@]}" || die \
+      "academic font update requires elevated permissions. Run: npm run fonts:academic"
+  fi
+
+  academic_fonts_current || die "academic font update did not complete successfully."
 }
 
 font_tree_signature() {
@@ -502,6 +552,7 @@ main() {
   install_deps_if_requested
   ensure_command pm2
   install_artifact_if_needed
+  ensure_academic_fonts
   sync_native_academic_dictionary
   sync_native_systemplate
   run_optional_checks

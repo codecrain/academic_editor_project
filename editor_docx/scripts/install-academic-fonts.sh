@@ -11,7 +11,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-FONT_ROOT="/usr/local/share/fonts/tlooto-academic"
+FONT_ROOT="${EDITOR_NATIVE_ACADEMIC_FONT_DIR:-${EDITOR_ACADEMIC_FONTS_DIR:-/usr/local/share/fonts/tlooto-academic}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUBSTITUTIONS_FILE="$SCRIPT_DIR/../assets/fonts/tlooto-academic-substitutions.conf"
 WORK_DIR="$(mktemp -d /tmp/tlooto-academic-fonts.XXXXXX)"

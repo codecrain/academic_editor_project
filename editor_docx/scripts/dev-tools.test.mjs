@@ -157,6 +157,9 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /repository updated; restarting deployment with the latest script/);
   assert.match(helper, /exec bash "\$0" "\$@"/);
   assert.match(helper, /npm run install:native:artifact/);
+  assert.match(helper, /ensure_academic_fonts/);
+  assert.match(helper, /install_complete=yes/);
+  assert.match(helper, /tlooto-academic-substitutions\.conf/);
   assert.match(helper, /sync_native_systemplate/);
   assert.match(helper, /sync_native_academic_dictionary/);
   assert.match(helper, /sync_native_systemplate_dictionary\(\)/);
@@ -165,7 +168,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /sudo.*coolwsd-systemplate-setup|sudo "\$\{setup\[@\]\}"/);
   assert.match(
     helper,
-    /install_artifact_if_needed\s+sync_native_academic_dictionary\s+sync_native_systemplate\s+run_optional_checks/,
+    /install_artifact_if_needed\s+ensure_academic_fonts\s+sync_native_academic_dictionary\s+sync_native_systemplate\s+run_optional_checks/,
   );
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
