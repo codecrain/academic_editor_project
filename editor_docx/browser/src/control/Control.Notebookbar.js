@@ -603,7 +603,16 @@ window.L.Control.Notebookbar = window.L.Control.extend({
 			// for text documents, where jumping to the next change would possibly
 			// switch to the Home or Table tabs, which is not wanted.
 			if (docType !== 'text' || currentlySelectedTabName !== 'Review') {
-				contextTab.click();
+				const contextTabElement = contextTab.get(0);
+				const preserveDocumentViewport = docType === 'text' && requestedContext === 'Math';
+				if (preserveDocumentViewport)
+					contextTabElement.preserveDocumentViewportOnClick = true;
+				try {
+					contextTab.click();
+				} finally {
+					if (preserveDocumentViewport)
+						delete contextTabElement.preserveDocumentViewportOnClick;
+				}
 			}
 			const tabId = contextTab.attr('id');
 			this.updateButtonVisibilityForContext(requestedContext, tabId);

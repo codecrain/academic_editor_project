@@ -249,6 +249,7 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 			tabs[t].removeAttribute('data-cooltip');
 		}
 		return function(event) {
+			const preserveDocumentViewport = tabs[t].preserveDocumentViewportOnClick === true;
 			if (isFileTabForCoda) {
 				if (builder.map.backstageView) {
 					console.log('NotebookbarBuilder: Calling backstageView.toggle()');
@@ -292,7 +293,8 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 				}
 			}
 			$(contentDivs[t]).removeClass('hidden');
-			$(window).resize();
+			if (!preserveDocumentViewport)
+				$(window).resize();
 			builder.map.fire('refreshoverflows',{force: true});
 			builder.wizard.selectedTab(tabIds[t]);
 
@@ -300,7 +302,7 @@ window.L.Control.NotebookbarBuilder = window.L.Control.JSDialogBuilder.extend({
 			if (!tabs[t].enterPressed) {
 				// don't lose focus on tab change
 				event.preventDefault();
-				if (!JSDialog.IsAnyInputFocused())
+				if (!preserveDocumentViewport && !JSDialog.IsAnyInputFocused())
 					builder.map.focus();
 				t.enterPressed = false;
 			}
