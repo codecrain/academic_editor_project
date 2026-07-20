@@ -586,6 +586,7 @@ table.create
 createTable
 table.insertCaption
 insertTableCaption
+image.insertAfterParagraph
 setCellText
 ```
 
@@ -943,6 +944,27 @@ signature matching the existing package filename extension. An optional
 `mimeType` must agree with both. Corrupt, truncated, or extension-mismatched
 media fails the entire atomic command batch. `image.generateAndReplace` always
 produces PNG and therefore only accepts a `.png` package target.
+
+Insert a new DOCX image after an inspected paragraph without requiring an
+existing package image or placeholder:
+
+```json
+{
+  "commandId": "image-insert-1",
+  "op": "image.insertAfterParagraph",
+  "location": { "paragraph": { "section": 0, "number": 3 } },
+  "bytesBase64": "...",
+  "mimeType": "image/png",
+  "widthEmu": 5486400,
+  "heightEmu": 3086100,
+  "altText": "Research methodology framework",
+  "caption": "Figure 1. Research methodology framework."
+}
+```
+
+The command creates a unique `word/media` package entry, document relationship,
+and drawing ID, then optionally inserts a caption paragraph. Its precondition is
+`target_inspect`; callers should calculate positive EMU dimensions before apply.
 
 Aliases:
 

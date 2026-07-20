@@ -198,15 +198,26 @@ function validateImageBytesForPackage(imageName, bytes, declaredMimeType = '') {
   return { extension, format: expectedFormat, mimeType: expectedMimeType };
 }
 
+function validateNewImageBytes(bytes, declaredMimeType = '') {
+  const detectedFormat = detectImageFormat(bytes);
+  assert.ok(detectedFormat, 'image insertion bytes do not contain a recognized, complete image signature');
+  const spec = IMAGE_FORMATS[detectedFormat];
+  const normalizedMimeType = String(declaredMimeType || '').trim().toLowerCase().replace('image/jpg', 'image/jpeg');
+  if (normalizedMimeType) {
+    assert.equal(normalizedMimeType, spec.mimeType, `image insertion MIME ${normalizedMimeType} does not match ${spec.mimeType}`);
+  }
+  return { extension: spec.extensions[0], format: detectedFormat, mimeType: spec.mimeType };
+}
+
 function imageBytesFromOperation(op) {
   if (op.bytes) {
     return Buffer.isBuffer(op.bytes) ? Buffer.from(op.bytes) : Buffer.from(op.bytes);
   }
   if (op.bytesBase64) {
     const encoded = String(op.bytesBase64).trim();
-    assert.match(encoded, /^[A-Za-z0-9+/]+={0,2}$/, 'image.replace bytesBase64 is not valid base64');
+    assert.match(encoded, /^[A-Za-z0-9+/]+={0,2}$/, 'image command bytesBase64 is not valid base64');
     const bytes = Buffer.from(encoded, 'base64');
-    assert.equal(bytes.toString('base64').replace(/=+$/, ''), encoded.replace(/=+$/, ''), 'image.replace bytesBase64 is not canonical base64');
+    assert.equal(bytes.toString('base64').replace(/=+$/, ''), encoded.replace(/=+$/, ''), 'image command bytesBase64 is not canonical base64');
     return bytes;
   }
   if (op.filePath) {
@@ -541,8 +552,16 @@ function tableXml(rows, cols, options = {}) {
   return `<w:tbl>${options.tblPrXml ?? '<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'}<w:tblGrid>${gridXml}</w:tblGrid>${rowXml}</w:tbl>`;
 }
 
-function inlineImageParagraphXml({ relationshipId = 'rIdImage1', name = 'image1.png', widthEmu = 3200000, heightEmu = 1600000 } = {}) {
-  return `<w:p><w:r><w:drawing><wp:inline xmlns:wp="${WORD_DRAWING_NS}" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="1" name="${escapeXmlAttr(name)}"/><a:graphic xmlns:a="${DRAWING_NS}"><a:graphicData uri="${PICTURE_NS}"><pic:pic xmlns:pic="${PICTURE_NS}"><pic:nvPicPr><pic:cNvPr id="0" name="${escapeXmlAttr(name)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${escapeXmlAttr(relationshipId)}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+function inlineImageParagraphXml({
+  relationshipId = 'rIdImage1',
+  name = 'image1.png',
+  widthEmu = 3200000,
+  heightEmu = 1600000,
+  docPrId = 1,
+  altText = '',
+  align = 'center',
+} = {}) {
+  return `<w:p><w:pPr><w:jc w:val="${escapeXmlAttr(align)}"/></w:pPr><w:r><w:drawing><wp:inline xmlns:wp="${WORD_DRAWING_NS}" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${widthEmu}" cy="${heightEmu}"/><wp:docPr id="${docPrId}" name="${escapeXmlAttr(name)}" descr="${escapeXmlAttr(altText)}"/><a:graphic xmlns:a="${DRAWING_NS}"><a:graphicData uri="${PICTURE_NS}"><pic:pic xmlns:pic="${PICTURE_NS}"><pic:nvPicPr><pic:cNvPr id="0" name="${escapeXmlAttr(name)}"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${escapeXmlAttr(relationshipId)}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
 }
 
 function cellStyleXml(style = {}) {
@@ -972,7 +991,7 @@ function editableTargets(sections, tables) {
         textLength,
         style,
       })),
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering', 'image.insertAfterParagraph'],
     }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
       id: cell.id,
@@ -1256,7 +1275,7 @@ export class DocxApiSession {
         textLength,
         style,
       })),
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering', 'image.insertAfterParagraph'],
       native: { section: 0, paragraph: paragraph.index },
     };
   }
@@ -1471,6 +1490,15 @@ export class DocxApiSession {
       }];
     }
 
+    if (catalogOp === 'image.insertAfterParagraph') {
+      return [{
+        ...command,
+        opId,
+        op: 'image.insertAfterParagraph',
+        location,
+      }];
+    }
+
     if (catalogOp === 'image.generateAndReplace') {
       return [{
         ...command,
@@ -1601,6 +1629,14 @@ export class DocxApiSession {
         const bytes = imageBytesFromOperation(operation);
         assert.ok(bytes.length > 0, 'image.replace requires bytes, bytesBase64, or filePath');
         validateImageBytesForPackage(operation.imageName, bytes, operation.mimeType);
+      } else if (operation.op === 'image.insertAfterParagraph') {
+        const target = inspect(operation.location, 'image.insertAfterParagraph.location');
+        assert.equal(target.kind, 'paragraph', 'image.insertAfterParagraph.location must identify a paragraph');
+        const bytes = imageBytesFromOperation(operation);
+        assert.ok(bytes.length > 0, 'image.insertAfterParagraph requires bytes, bytesBase64, or filePath');
+        validateNewImageBytes(bytes, operation.mimeType);
+        assert.ok(Number.isInteger(operation.widthEmu) && operation.widthEmu > 0, 'image.insertAfterParagraph widthEmu must be a positive integer');
+        assert.ok(Number.isInteger(operation.heightEmu) && operation.heightEmu > 0, 'image.insertAfterParagraph heightEmu must be a positive integer');
       } else if (operation.op === 'image.generateAndReplace') {
         assert.ok(this.entries.has(operation.imageName), `package entry not found: ${operation.imageName}`);
         validateImageBytesForPackage(operation.imageName, generatePngBytes(operation.generator), 'image/png');
@@ -1730,6 +1766,10 @@ export class DocxApiSession {
       } else if (op.op === 'image.replace') {
         this.replaceImage(op);
         results.push({ opId: op.opId, ok: true, action: 'image.replace', target: op.imageName });
+        mutated = true;
+      } else if (op.op === 'image.insertAfterParagraph') {
+        const inserted = this.insertImageAfterParagraph(op);
+        results.push({ opId: op.opId, ok: true, action: 'image.insertAfterParagraph', ...inserted });
         mutated = true;
       } else if (op.op === 'image.generateAndReplace') {
         this.replaceImage({ ...op, bytes: generatePngBytes(op.generator) });
@@ -2091,6 +2131,57 @@ export class DocxApiSession {
     this.entries.set(op.imageName, Buffer.from(bytes));
     this.ensureContentTypeDefault(image.extension, image.mimeType);
     this.dirtyPackage = true;
+  }
+
+  insertImageAfterParagraph(op) {
+    const paragraph = this.paragraphFromLocation(op.location);
+    const bytes = imageBytesFromOperation(op);
+    assert.ok(bytes && bytes.length > 0, 'image.insertAfterParagraph requires bytes, bytesBase64, or filePath');
+    const image = validateNewImageBytes(bytes, op.mimeType);
+
+    const mediaNames = new Set([...this.entries.keys()].map((name) => name.toLowerCase()));
+    let imageNumber = 1;
+    while (mediaNames.has(`word/media/image${imageNumber}.${image.extension}`.toLowerCase())) {
+      imageNumber += 1;
+    }
+    const imageFileName = `image${imageNumber}.${image.extension}`;
+    const imageName = `word/media/${imageFileName}`;
+
+    const rels = this.entries.get('word/_rels/document.xml.rels')?.toString('utf8') ?? '';
+    const relationshipIds = new Set([...rels.matchAll(/\bId="([^"]+)"/g)].map((match) => match[1]));
+    let relationshipNumber = 1;
+    while (relationshipIds.has(`rIdGeneratedImage${relationshipNumber}`)) {
+      relationshipNumber += 1;
+    }
+    const relationshipId = `rIdGeneratedImage${relationshipNumber}`;
+
+    const docPrIds = [...this.documentXml.matchAll(/<wp:docPr\b[^>]*\bid="(\d+)"/g)].map((match) => Number(match[1]));
+    const docPrId = Math.max(0, ...docPrIds) + 1;
+    const pictureParagraph = inlineImageParagraphXml({
+      relationshipId,
+      name: imageFileName,
+      widthEmu: op.widthEmu,
+      heightEmu: op.heightEmu,
+      docPrId,
+      altText: op.altText ?? '',
+    });
+    const captionParagraph = op.caption
+      ? paragraphXml(op.caption, { paragraphStyle: op.captionParagraphStyle, runStyle: op.captionRunStyle })
+      : '';
+
+    this.entries.set(imageName, Buffer.from(bytes));
+    this.ensureContentTypeDefault(image.extension, image.mimeType);
+    this.ensureDocumentRelationship(relationshipId, `${OFFICE_REL_NS}/image`, `media/${imageFileName}`);
+    this.documentXml = ensureDocumentRelationshipNamespace(this.documentXml);
+    this.documentXml = `${this.documentXml.slice(0, paragraph.end)}${pictureParagraph}${captionParagraph}${this.documentXml.slice(paragraph.end)}`;
+    this.dirtyDocument = true;
+    this.dirtyPackage = true;
+    return {
+      target: imageName,
+      relationshipId,
+      imageLocation: { paragraph: { section: 0, number: paragraph.index + 1 } },
+      captionLocation: captionParagraph ? { paragraph: { section: 0, number: paragraph.index + 2 } } : null,
+    };
   }
 
   qualityCheck(options = {}) {

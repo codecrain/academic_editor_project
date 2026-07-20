@@ -186,6 +186,33 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'image.replace', imageName: 'word/media/image1.png', bytesBase64: '<base64 image bytes>' },
   }),
   command({
+    op: 'image.insertAfterParagraph', category: 'image', precondition: 'target_inspect',
+    description: 'Insert a new inline image immediately after an inspected paragraph, with an optional caption paragraph.',
+    required: ['location'], anyOf: [['bytesBase64', 'bytes', 'filePath']], aliases: ['image.insert', 'object.insertImage'],
+    fields: {
+      location: locationField,
+      bytesBase64: 'Base64-encoded image bytes.',
+      bytes: 'Trusted in-process binary input only.',
+      filePath: 'Trusted same-host file input only.',
+      mimeType: 'Optional declared image MIME type; it must match the image bytes.',
+      widthEmu: 'Positive inline-image width in English Metric Units.',
+      heightEmu: 'Positive inline-image height in English Metric Units.',
+      altText: 'Optional accessible image description.',
+      caption: 'Optional caption paragraph inserted immediately below the image.',
+      captionParagraphStyle: 'Optional caption paragraph style object; use { styleId: "StyleId" } for a named style.',
+      captionRunStyle: 'Optional caption run style object.',
+    },
+    example: {
+      op: 'image.insertAfterParagraph',
+      location: { paragraph: { section: 0, number: 1 } },
+      bytesBase64: '<base64 image bytes>',
+      widthEmu: 5486400,
+      heightEmu: 3086100,
+      altText: 'Research methodology framework',
+      caption: 'Figure 1. Research methodology framework.',
+    },
+  }),
+  command({
     op: 'image.generateAndReplace', category: 'image', precondition: 'object_inventory',
     description: 'Generate a simple PNG from numeric values and replace an existing PNG.', required: ['imageName', 'generator'], aliases: ['object.generateAndReplace', 'chart.generateAndReplace'],
     fields: { imageName: 'Exact PNG package name from object_inventory.', generator: 'Object with width, height, colors, and numeric values.' },
@@ -398,7 +425,8 @@ function commandInspectionTargets(command, entry, commandIndex = 0) {
       addOptional(cell.styleSource ?? command.styleSource, `cells[${cellIndex}].styleSource`);
     }
   } else if (entry.op === 'text.replaceParagraph' || entry.op === 'list.writeBullets'
-    || entry.op === 'list.applyNumbering' || entry.op === 'layout.fitText') {
+    || entry.op === 'list.applyNumbering' || entry.op === 'layout.fitText'
+    || entry.op === 'image.insertAfterParagraph') {
     add(command.location ?? command.target, 'location');
     addOptional(command.styleSource, 'styleSource');
   } else if (entry.op === 'text.replace' || entry.op === 'insertText' || entry.op === 'deleteRange'
@@ -467,6 +495,16 @@ function validateDocxCommands(commands) {
     if (entry.op === 'table.create') {
       if (!Number.isInteger(value.rows) || value.rows <= 0 || !Number.isInteger(value.cols) || value.cols <= 0) {
         throw new Error('table.create rows and cols must be positive integers.');
+      }
+    }
+    if (entry.op === 'image.insertAfterParagraph') {
+      for (const field of ['widthEmu', 'heightEmu']) {
+        if (value[field] !== undefined && (!Number.isInteger(value[field]) || value[field] <= 0)) {
+          throw new Error(`image.insertAfterParagraph ${field} must be a positive integer.`);
+        }
+      }
+      if (value.caption !== undefined && typeof value.caption !== 'string') {
+        throw new Error('image.insertAfterParagraph caption must be a string.');
       }
     }
     if (entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering') {

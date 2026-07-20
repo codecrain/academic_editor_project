@@ -389,6 +389,36 @@ test('DOCX API image.replace accepts caller-provided bytes', () => {
   assert.equal(readZip(saved).get(image.name).length, replacement.length);
 });
 
+test('DOCX API inserts a new image and caption after a target paragraph without a placeholder', () => {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Before image', 'After image'] }));
+  const imageBytes = generatePngBytes({ width: 180, height: 90, values: [1, 4, 2] });
+
+  const result = session.apply([{
+    commandId: 'insert-image',
+    op: 'image.insertAfterParagraph',
+    location: { paragraph: { section: 0, number: 0 } },
+    bytes: imageBytes,
+    mimeType: 'image/png',
+    widthEmu: 2743200,
+    heightEmu: 1371600,
+    altText: 'Generated framework diagram',
+    caption: 'Figure 1. Generated framework diagram',
+  }]);
+
+  const saved = session.save().bytes;
+  const reopened = new DocxApiSession(saved);
+  const inventory = reopened.objectInventory();
+  assert.equal(inventory.images.length, 1);
+  assert.equal(Buffer.compare(readZip(saved).get(inventory.images[0].name), imageBytes), 0);
+  const xml = getDocumentXml(saved);
+  assert.ok(xml.indexOf('Before image') < xml.indexOf('<w:drawing>'));
+  assert.ok(xml.indexOf('<w:drawing>') < xml.indexOf('Figure 1. Generated framework diagram'));
+  assert.ok(xml.indexOf('Figure 1. Generated framework diagram') < xml.indexOf('After image'));
+  assert.match(xml, /wp:docPr id="1"[^>]*descr="Generated framework diagram"/);
+  assert.equal(result.results[0].action, 'image.insertAfterParagraph');
+  assert.equal(reopened.qualityCheck().ok, true);
+});
+
 test('DOCX API rejects damaged or extension-mismatched media atomically and accepts JPEG signatures', () => {
   const session = new DocxApiSession(createStyledDocx());
   const image = session.objectInventory().images[0];

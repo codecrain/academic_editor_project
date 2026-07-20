@@ -53,6 +53,7 @@ const MATRIX_CASES = Object.freeze([
   { op: 'table.writeCells', document: 'korean', render: { pages: [5], includeBaseline: true } },
   { op: 'table.applyCellStyle', document: 'korean' },
   { op: 'table.create', document: 'korean' },
+  { op: 'table.insertCaption', document: 'korean' },
   { op: 'style.applyText', document: 'korean' },
   { op: 'paragraph.applyStyle', document: 'korean' },
   { op: 'style.clone', document: 'korean', render: { pages: [5], includeBaseline: true } },
@@ -63,6 +64,7 @@ const MATRIX_CASES = Object.freeze([
   { op: 'list.applyNumbering', document: 'korean', render: { pages: [6], includeBaseline: true } },
   { op: 'layout.fitText', document: 'korean' },
   { op: 'image.replace', document: 'english', render: { pages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], includeBaseline: true } },
+  { op: 'image.insertAfterParagraph', document: 'english', render: { pages: [1, 2], includeBaseline: true } },
   { op: 'image.generateAndReplace', document: 'english', render: { pages: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], includeBaseline: true } },
   { op: 'setDocumentMetadata', document: 'korean' },
   { op: 'defineStyle', document: 'korean' },
@@ -649,6 +651,11 @@ function buildPlan(op, source) {
       inspectLocations: [],
       expected: { rows: 2, cols: 3 },
     },
+    'table.insertCaption': {
+      command: { op, tableId: 'tbl_0', text: 'Table QA. Inserted caption.' },
+      inspectLocations: [],
+      expected: { text: 'Table QA. Inserted caption.' },
+    },
     'style.applyText': {
       command: { op, target: paragraphLocation(603), styleSource: paragraphLocation(602), text: 'DOCX MCP QA styled text' },
       inspectLocations: [paragraphLocation(603), paragraphLocation(602)],
@@ -708,6 +715,20 @@ function buildPlan(op, source) {
       inspectLocations: [],
       expected: { imageName },
     },
+    'image.insertAfterParagraph': {
+      command: {
+        op,
+        location: paragraphLocation(0),
+        bytesBase64: generatePngBytes({ width: 360, height: 200, values: [2, 7, 4, 9] }).toString('base64'),
+        mimeType: 'image/png',
+        widthEmu: 3429000,
+        heightEmu: 1905000,
+        altText: 'DOCX MCP QA inserted image',
+        caption: 'Figure QA. Inserted image.',
+      },
+      inspectLocations: [paragraphLocation(0)],
+      expected: { imageCount: before.objectInventory().images.length + 1 },
+    },
     'image.generateAndReplace': {
       command: {
         op,
@@ -760,7 +781,7 @@ function buildPlan(op, source) {
   };
   const plan = plans[op];
   assert.ok(plan, `No live matrix plan exists for ${op}.`);
-  if (op.startsWith('image.')) {
+  if (op === 'image.replace' || op === 'image.generateAndReplace') {
     assert.ok(plan.expected.imageName, `${op} requires an actual image in the English paper.`);
   }
   return { ...plan, inspectLocations: uniqueLocations(plan.inspectLocations) };
@@ -806,6 +827,9 @@ function verifyPersistedCase({ op, source, artifactBytes, plan, applyData }) {
   } else if (op === 'table.create') {
     assert.equal(afterJson.tables.length, beforeJson.tables.length + 1);
     deepEqual(afterJson.tables.at(-1).dims, { rowCount: 2, colCount: 3, cellCount: 6 }, 'Created table dimensions differ.');
+  } else if (op === 'table.insertCaption') {
+    assert.equal(afterJson.tables.length, beforeJson.tables.length);
+    assert.match(after.documentXml, /Table QA\. Inserted caption\./);
   } else if (op === 'style.applyText') {
     assert.equal(inspectText(after, 603).currentText, plan.expected.text);
     deepEqual(inspectText(after, 603).styleFingerprint.basis, inspectText(before, 602).styleFingerprint.basis, 'style.applyText did not clone source style.');
@@ -850,6 +874,11 @@ function verifyPersistedCase({ op, source, artifactBytes, plan, applyData }) {
     assert.equal(after.objectInventory().relationships.length, before.objectInventory().relationships.length);
     evidence.mediaSha256Before = sha256(beforeBytes);
     evidence.mediaSha256After = sha256(afterBytes);
+  } else if (op === 'image.insertAfterParagraph') {
+    assert.equal(after.objectInventory().images.length, plan.expected.imageCount);
+    assert.equal(after.objectInventory().pictures.length, before.objectInventory().pictures.length + 1);
+    assert.match(after.documentXml, /Figure QA\. Inserted image\./);
+    evidence.insertedImageCount = after.objectInventory().images.length;
   } else if (op === 'setDocumentMetadata') {
     const beforeCore = entryText(before, 'docProps/core.xml');
     const afterCore = entryText(after, 'docProps/core.xml');
@@ -2091,17 +2120,17 @@ async function runBoundedContractSelfTest() {
 async function runSelfTest(args = {}) {
   assert.equal(EDITOR_MCP_TOOLS.length, 15);
   deepEqual(EDITOR_MCP_TOOLS.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'Local MCP tool definitions drifted from the expected 15-tool contract.');
-  assert.equal(DOCX_COMMAND_CATALOG.length, 26);
-  assert.equal(DOCX_COMMAND_OPS.length, 26);
-  assert.equal(new Set(DOCX_COMMAND_OPS).size, 26);
-  assert.equal(MATRIX_CASES.length, 26);
+  assert.equal(DOCX_COMMAND_CATALOG.length, 28);
+  assert.equal(DOCX_COMMAND_OPS.length, 28);
+  assert.equal(new Set(DOCX_COMMAND_OPS).size, 28);
+  assert.equal(MATRIX_CASES.length, 28);
   deepEqual(MATRIX_CASES.map((item) => item.op), DOCX_COMMAND_OPS, 'Matrix order or coverage differs from canonical catalog.');
   for (const matrixCase of MATRIX_CASES) {
     const entry = commandCatalogEntry(matrixCase.op);
     assert.ok(['none', 'target_inspect', 'object_inventory'].includes(entry.precondition));
     assert.equal(matrixCase.document, entry.category === 'image' ? 'english' : 'korean');
   }
-  assert.equal(MATRIX_CASES.filter((item) => item.document === 'english').length, 2);
+  assert.equal(MATRIX_CASES.filter((item) => item.document === 'english').length, 3);
   assert.equal(DEEP_INVALID_CASES.length, 11);
   deepEqual(ROLLBACK_CATEGORIES, [...new Set(DOCX_COMMAND_CATALOG.map((entry) => entry.category))], 'Rollback categories do not cover the catalog.');
 
@@ -2166,7 +2195,7 @@ async function runSelfTest(args = {}) {
   return {
     passed: true,
     serverCalled: false,
-    commandCount: 26,
+    commandCount: 28,
     matrixRows: MATRIX_CASES.length,
     deepInvalidRows: DEEP_INVALID_CASES.length,
     rollbackCategories: ROLLBACK_CATEGORIES.length,

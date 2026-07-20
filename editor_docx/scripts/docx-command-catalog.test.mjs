@@ -33,11 +33,12 @@ const EXECUTABLE_OPS = new Set([
   'setDocumentMetadata',
   'insertFootnote',
   'image.replace',
+  'image.insertAfterParagraph',
   'image.generateAndReplace',
 ]);
 
 test('DOCX command catalog is the complete unique public contract', () => {
-  assert.equal(DOCX_COMMAND_CATALOG.length, 27);
+  assert.equal(DOCX_COMMAND_CATALOG.length, 28);
   assert.equal(new Set(DOCX_COMMAND_OPS).size, DOCX_COMMAND_OPS.length);
   assert.deepEqual(getDocxCommandCatalog().commands, DOCX_COMMAND_CATALOG);
 
