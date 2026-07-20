@@ -38,14 +38,10 @@ function hashBytes(bytes) {
 export class EditorDocumentStore {
   constructor(options) {
     this.root = path.resolve(options.root);
-    this.apiKey = String(options.apiKey || '');
     this.tokenSecret = String(options.tokenSecret || '');
     this.tokenTtlMs = Number(options.tokenTtlMs || 60 * 60 * 1000);
     this.maxFileSize = Number(options.maxFileSize || 50 * 1024 * 1024);
     this.maxDocuments = Number(options.maxDocuments || 1000);
-    if (this.apiKey.length < 24) {
-      throw new Error('EDITOR_GATEWAY_API_KEY must be at least 24 characters');
-    }
     if (this.tokenSecret.length < 32) {
       throw new Error('EDITOR_GATEWAY_TOKEN_SECRET must be at least 32 characters');
     }
@@ -58,12 +54,6 @@ export class EditorDocumentStore {
 
   isDocumentId(value) {
     return DOCUMENT_ID_PATTERN.test(String(value || ''));
-  }
-
-  isAuthorizedApiRequest(value) {
-    const candidate = Buffer.from(String(value || ''));
-    const expected = Buffer.from(this.apiKey);
-    return candidate.length === expected.length && timingSafeEqual(candidate, expected);
   }
 
   async createBlank(options = {}) {

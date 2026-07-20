@@ -89,14 +89,15 @@ When the gateway binds beyond loopback, startup is fail-closed unless a Bearer
 token is configured:
 
 ```bash
-EDITOR_MCP_BEARER_TOKEN='<strong-random-secret>' \
-EDITOR_API_BEARER_TOKEN='<same-or-separate-secret>' \
+ACADEMIC_EDITOR_MCP_BEARER_TOKEN='<strong-random-secret>' \
 npm run start
 ```
 
-Consumers configure `ACADEMIC_EDITOR_MCP_URL`, preferably through an HTTPS
-reverse proxy such as `https://editor.example.com/mcp`, and send the token in
-the `Authorization` header. Do not send a Bearer token to a public plain-HTTP
+Consumers configure `ACADEMIC_EDITOR_API_ORIGIN`, preferably through an HTTPS
+reverse proxy such as `https://editor.example.com`, and use its fixed `/mcp`
+path. Both MCP and `/api/documents` use `ACADEMIC_EDITOR_MCP_BEARER_TOKEN` in
+the `Authorization` header. WOPI uses a separate short-lived signed document
+token; never reuse either token for the other role. Do not send a Bearer token to a public plain-HTTP
 endpoint or put it in prompts, JSON-RPC arguments, or source control.
 
 `npm run dev:check` runs the public-safety scan, runtime unit tests, and syntax

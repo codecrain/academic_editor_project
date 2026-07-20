@@ -301,7 +301,7 @@ function usage() {
     '  node live-paper-command-matrix.mjs --korean <current.docx> --english <image-paper.docx> --out <report.json>',
     '',
     'Environment:',
-    '  ACADEMIC_EDITOR_MCP_URL',
+    '  ACADEMIC_EDITOR_API_ORIGIN',
     '  ACADEMIC_EDITOR_MCP_BEARER_TOKEN',
     '',
     'Offline validation:',
@@ -1783,10 +1783,11 @@ async function runLiveMatrix(args) {
   assert.ok(args.korean, '--korean is required.');
   assert.ok(args.english, '--english is required.');
   assert.ok(args.out, '--out is required.');
-  const mcpUrl = String(process.env.ACADEMIC_EDITOR_MCP_URL || '').trim();
+  const editorOrigin = String(process.env.ACADEMIC_EDITOR_API_ORIGIN || '').trim().replace(/\/+$/, '');
+  const mcpUrl = `${editorOrigin}/mcp`;
   const bearerToken = String(process.env.ACADEMIC_EDITOR_MCP_BEARER_TOKEN || '').trim();
-  assert.ok(mcpUrl, 'ACADEMIC_EDITOR_MCP_URL is required.');
-  assert.ok(/^https?:\/\//i.test(mcpUrl), 'ACADEMIC_EDITOR_MCP_URL must be HTTP(S).');
+  assert.ok(editorOrigin, 'ACADEMIC_EDITOR_API_ORIGIN is required.');
+  assert.ok(/^https?:\/\//i.test(editorOrigin), 'ACADEMIC_EDITOR_API_ORIGIN must be HTTP(S).');
   assert.ok(bearerToken, 'ACADEMIC_EDITOR_MCP_BEARER_TOKEN is required.');
   const outputPath = await assertSafeOutputPath(args.out, [args.korean, args.english]);
   const sanitizer = createSanitizer(bearerToken);

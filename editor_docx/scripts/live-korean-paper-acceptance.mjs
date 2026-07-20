@@ -251,7 +251,7 @@ function usage() {
     'all final-page WebP images, six baseline comparison WebPs, and report.json.',
     '',
     'Environment:',
-    '  ACADEMIC_EDITOR_MCP_URL',
+    '  ACADEMIC_EDITOR_API_ORIGIN',
     '  ACADEMIC_EDITOR_MCP_BEARER_TOKEN',
     '',
     'Offline validation (does not call a server):',
@@ -1092,9 +1092,10 @@ function callSummary(toolCalls) {
 async function runLive(args) {
   assert.ok(args.source, '--source is required.');
   assert.ok(args.out, '--out is required.');
-  const mcpUrl = String(process.env.ACADEMIC_EDITOR_MCP_URL || '').trim();
+  const editorOrigin = String(process.env.ACADEMIC_EDITOR_API_ORIGIN || '').trim().replace(/\/+$/, '');
+  const mcpUrl = `${editorOrigin}/mcp`;
   const secret = String(process.env.ACADEMIC_EDITOR_MCP_BEARER_TOKEN || '').trim();
-  assert.match(mcpUrl, /^https?:\/\//i, 'ACADEMIC_EDITOR_MCP_URL must be an HTTP(S) URL.');
+  assert.match(editorOrigin, /^https?:\/\//i, 'ACADEMIC_EDITOR_API_ORIGIN must be an HTTP(S) URL.');
   assert.ok(secret, 'ACADEMIC_EDITOR_MCP_BEARER_TOKEN is required.');
   const sourcePath = path.resolve(args.source);
   const outputDirectory = await prepareOutputDirectory(args.out, sourcePath);

@@ -11,7 +11,6 @@ async function createStore() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'academic-editor-store-'));
   const store = new EditorDocumentStore({
     root,
-    apiKey: 'test-api-key-with-at-least-24-characters',
     tokenSecret: 'test-token-secret-with-at-least-32-characters',
     tokenTtlMs: 60_000,
     maxDocuments: 10,

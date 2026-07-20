@@ -15,7 +15,7 @@ const gatewayPm2Name = process.env.EDITOR_GATEWAY_PM2_NAME || 'academic-editor-g
 const gatewayHost = process.env.EDITOR_GATEWAY_HOST || '127.0.0.1';
 const gatewayPort = String(process.env.EDITOR_GATEWAY_PORT || '11004');
 const gatewayOrigin = normalizeOrigin(
-  process.env.EDITOR_GATEWAY_PUBLIC_ORIGIN || `http://${gatewayHost}:${gatewayPort}`,
+  process.env.ACADEMIC_EDITOR_API_ORIGIN || `http://${gatewayHost}:${gatewayPort}`,
 );
 const rhwpBasePath = normalizeBasePath(process.env.RHWP_STUDIO_BASE_PATH || '/hwpx/');
 const rhwpStaticRoot = path.resolve(rhwpRoot, 'rhwp-studio', 'dist');
@@ -264,7 +264,7 @@ async function startGateway() {
     ...process.env,
     EDITOR_GATEWAY_HOST: gatewayHost,
     EDITOR_GATEWAY_PORT: gatewayPort,
-    EDITOR_GATEWAY_PUBLIC_ORIGIN: gatewayOrigin,
+    ACADEMIC_EDITOR_API_ORIGIN: gatewayOrigin,
     EDITOR_GATEWAY_WOPI_BASE_URL: gatewayWopiBaseUrl,
     EDITOR_GATEWAY_DOCX_ORIGIN: `http://127.0.0.1:${docxHostPort}`,
     EDITOR_GATEWAY_HWPX_STATIC_ROOT: rhwpStaticRoot,

@@ -411,33 +411,20 @@ function tokensEqual(actual, expected) {
   return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
 }
 
-function authorizeInternalRoute(req, res, config, tokenName) {
-  if (config.allowUnauthenticatedInternalRoutes === true) {
-    return true;
-  }
-  const expected = String(config[tokenName] || '');
+function authorizeInternalRoute(req, res, config) {
+  const expected = String(config.internalBearerToken || '');
   if (!expected && isLoopbackHost(config.host)) {
     return true;
   }
   if (!expected) {
     sendJson(res, 503, {
       ok: false,
-      message: `${tokenName} must be configured when the editor gateway binds beyond loopback.`,
+      message: 'ACADEMIC_EDITOR_MCP_BEARER_TOKEN must be configured when the gateway binds beyond loopback.',
     });
     return false;
   }
   if (!tokensEqual(readBearerToken(req), expected)) {
     sendJson(res, 401, { ok: false, message: 'Valid Bearer authorization is required.' }, {
-      'WWW-Authenticate': 'Bearer',
-    });
-    return false;
-  }
-  return true;
-}
-
-function authorizeDocumentApi(req, res, config) {
-  if (!config.documentStore?.isAuthorizedApiRequest(readBearerToken(req))) {
-    sendJson(res, 401, { ok: false, message: 'Valid editor API key is required.' }, {
       'WWW-Authenticate': 'Bearer',
     });
     return false;
@@ -467,7 +454,7 @@ function editorDocumentErrorStatus(error) {
 }
 
 async function handleStoredDocumentApi(req, res, config, route) {
-  if (!authorizeDocumentApi(req, res, config)) {
+  if (!authorizeInternalRoute(req, res, config)) {
     return true;
   }
   const store = config.documentStore;
@@ -1938,8 +1925,8 @@ function localEditorApiOrigin(req) {
 
 async function postLocalEditorApi(req, config, pathname, body) {
   const headers = { 'Content-Type': 'application/json' };
-  if (config.editorApiBearerToken) {
-    headers.Authorization = `Bearer ${config.editorApiBearerToken}`;
+  if (config.internalBearerToken) {
+    headers.Authorization = `Bearer ${config.internalBearerToken}`;
   }
   const response = await fetch(`${localEditorApiOrigin(req)}${pathname}`, {
     method: 'POST',
@@ -2226,8 +2213,7 @@ async function handleEditorMcp(req, res, config, state) {
 function createGatewayServer(config) {
   config = {
     mcpPath: '/mcp',
-    mcpBearerToken: '',
-    editorApiBearerToken: '',
+    internalBearerToken: '',
     mcpAllowBytesRef: false,
     ...config,
   };
@@ -2247,7 +2233,7 @@ function createGatewayServer(config) {
       }
 
       if (pathname === config.mcpPath) {
-        if (!authorizeInternalRoute(req, res, config, 'mcpBearerToken')) {
+        if (!authorizeInternalRoute(req, res, config)) {
           return;
         }
         await handleEditorMcp(req, res, config, state);
@@ -2293,7 +2279,7 @@ function createGatewayServer(config) {
       }
 
       if (isEditorApiPath(pathname)) {
-        if (!authorizeInternalRoute(req, res, config, 'editorApiBearerToken')) {
+        if (!authorizeInternalRoute(req, res, config)) {
           return;
         }
         if (await handleEditorApi(req, res, config, state, pathname)) {
@@ -2367,7 +2353,7 @@ function buildConfigFromEnv() {
   const port = parsePositiveInteger(readEnv('EDITOR_GATEWAY_PORT', '11004'), 11004);
   const docxServiceRoot = normalizeServiceRoot(readEnv('EDITOR_SERVICE_ROOT', '/docx'));
   const hwpxBasePath = normalizeBasePath(readEnv('RHWP_STUDIO_BASE_PATH', '/hwpx/'));
-  const publicOrigin = normalizeOrigin(readEnv('EDITOR_GATEWAY_PUBLIC_ORIGIN', `http://${host}:${port}`));
+  const publicOrigin = normalizeOrigin(readEnv('ACADEMIC_EDITOR_API_ORIGIN', `http://${host}:${port}`));
   const runtimeMode = readEnv('EDITOR_RUNTIME_MODE', process.platform === 'linux' ? 'native' : 'auto').toLowerCase();
   const defaultWopiHost =
     runtimeMode === 'docker' || (runtimeMode === 'auto' && process.platform !== 'linux')
@@ -2383,7 +2369,9 @@ function buildConfigFromEnv() {
   const frameAncestorOrigins = parseFrameAncestorOrigins(readEnv(
     'EDITOR_GATEWAY_FRAME_ANCESTORS',
   ));
-  const mcpBearerToken = readEnv('EDITOR_MCP_BEARER_TOKEN');
+  // MCP and /api/documents are one server-to-server trust boundary and share one token.
+  // WOPI document sessions use documentTokenSecret below and must remain independent.
+  const internalBearerToken = readEnv('ACADEMIC_EDITOR_MCP_BEARER_TOKEN');
 
   return {
     host,
@@ -2404,9 +2392,7 @@ function buildConfigFromEnv() {
     allowedWopiOrigins,
     frameAncestorOrigins,
     mcpPath: normalizeServiceRoot(readEnv('EDITOR_MCP_PATH', '/mcp')) || '/mcp',
-    mcpBearerToken,
-    editorApiBearerToken: readEnv('EDITOR_API_BEARER_TOKEN', mcpBearerToken),
-    allowUnauthenticatedInternalRoutes: readEnv('EDITOR_ALLOW_UNAUTHENTICATED_INTERNAL_ROUTES', 'false').toLowerCase() === 'true',
+    internalBearerToken,
     mcpAllowBytesRef: readEnv('EDITOR_MCP_ALLOW_BYTES_REF', 'false').toLowerCase() === 'true',
     mcpArtifactTtlMs: parsePositiveInteger(readEnv('EDITOR_MCP_ARTIFACT_TTL_MS', '86400000'), 86_400_000),
     apiSessionTtlMs: parsePositiveInteger(readEnv('EDITOR_API_SESSION_TTL_MS', '3600000'), 3_600_000),
@@ -2425,10 +2411,6 @@ function buildConfigFromEnv() {
         ? path.join(os.homedir(), '.local', 'share', 'academic-editor', 'documents')
         : path.join(repoRoot, '.build', 'editor-documents'),
     )),
-    documentApiKey: readEnv(
-      'EDITOR_GATEWAY_API_KEY',
-      isLoopbackHost(host) ? 'local-development-editor-api-key' : '',
-    ),
     documentTokenSecret: readEnv(
       'EDITOR_GATEWAY_TOKEN_SECRET',
       isLoopbackHost(host) ? 'local-development-editor-token-secret-change-me' : '',
@@ -2441,9 +2423,15 @@ function buildConfigFromEnv() {
 
 async function main() {
   const config = buildConfigFromEnv();
+  // Production must fail during startup, not after a user's first edit request.
+  // Local loopback development intentionally remains token-optional.
+  if (!config.internalBearerToken && !isLoopbackHost(config.host)) {
+    throw new Error(
+      'ACADEMIC_EDITOR_MCP_BEARER_TOKEN must be configured when the gateway binds beyond loopback.',
+    );
+  }
   config.documentStore = new EditorDocumentStore({
     root: config.documentRoot,
-    apiKey: config.documentApiKey,
     tokenSecret: config.documentTokenSecret,
     tokenTtlMs: config.documentTokenTtlMs,
     maxFileSize: config.documentMaxFileSize,

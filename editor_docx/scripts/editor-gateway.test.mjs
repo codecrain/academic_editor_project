@@ -1009,8 +1009,7 @@ test('gateway requires Bearer auth for MCP and editor API when bound beyond loop
     wopiBaseUrl: 'http://127.0.0.1:11004',
     sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
     enableSampleDocx: false,
-    mcpBearerToken: 'mcp-test-token',
-    editorApiBearerToken: 'mcp-test-token',
+    internalBearerToken: 'mcp-test-token',
   });
   const address = await listen(server);
   assert.equal(typeof address, 'object');
@@ -1037,38 +1036,6 @@ test('gateway requires Bearer auth for MCP and editor API when bound beyond loop
       body: JSON.stringify({ filename: 'blocked.docx', source: { bytesBase64: 'AA==' } }),
     });
     assert.equal(apiUnauthorized.status, 401);
-  } finally {
-    await close(server);
-  }
-});
-
-test('gateway can explicitly allow unauthenticated internal routes during the approved low-complexity phase', async () => {
-  const server = createGatewayServer({
-    host: '0.0.0.0',
-    port: 0,
-    publicOrigin: 'http://127.0.0.1:11004',
-    docxServiceRoot: '/docx',
-    hwpxBasePath: '/hwpx/',
-    docxRuntimeOrigin: 'http://127.0.0.1:9',
-    hwpxRuntimeOrigin: '',
-    hwpxStaticRoot: '',
-    wopiBaseUrl: 'http://127.0.0.1:11004',
-    sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
-    enableSampleDocx: false,
-    mcpBearerToken: '',
-    editorApiBearerToken: '',
-    allowUnauthenticatedInternalRoutes: true,
-  });
-  const address = await listen(server);
-  assert.equal(typeof address, 'object');
-  try {
-    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }),
-    });
-    assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).result, {});
   } finally {
     await close(server);
   }
@@ -1383,7 +1350,6 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
   const documentRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-documents-'));
   const documentStore = new EditorDocumentStore({
     root: documentRoot,
-    apiKey: 'gateway-test-api-key-with-24-characters',
     tokenSecret: 'gateway-test-token-secret-with-at-least-32-characters',
     tokenTtlMs: 60_000,
   });
@@ -1403,6 +1369,7 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
     enableSampleDocx: false,
     allowedWopiOrigins: new Set([gatewayOrigin]),
+    internalBearerToken: 'gateway-test-api-key-with-24-characters',
     documentStore,
   });
   const address = await listen(server, gatewayPort);
@@ -1483,7 +1450,11 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     const callMcp = async (id, name, args) => {
       const response = await fetch(`${gatewayOrigin}/mcp`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        headers: {
+          ...apiHeaders,
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        },
         body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }),
       });
       assert.equal(response.status, 200);

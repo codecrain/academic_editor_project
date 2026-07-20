@@ -770,7 +770,7 @@ Insert a caption immediately before an existing DOCX table without moving or rew
 
 Use the exact `tableId` returned by `target_map` or `table.create`. The caption is a normal Word paragraph placed directly before that table and participates in normal style, quality-check, render, and save flows.
 
-For the current approved low-complexity deployment phase, `EDITOR_ALLOW_UNAUTHENTICATED_INTERNAL_ROUTES=true` may be set explicitly to let ServiceV2 call MCP without a Bearer token even when the gateway binds beyond loopback. The secure default remains `false`; remove this compatibility flag and configure `EDITOR_MCP_BEARER_TOKEN` when authentication is introduced.
+When the gateway binds beyond loopback, `ACADEMIC_EDITOR_MCP_BEARER_TOKEN` is required. The same token authenticates `/mcp` and `/api/documents`; WOPI session signatures remain separate. Loopback-only development may omit the server-to-server token.
 
 ## Style Commands
 
