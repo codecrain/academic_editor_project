@@ -5,6 +5,8 @@ import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { assertAcademicFontReadiness } from './academic-font-readiness.mjs';
+
 const DEFAULT_WAIT_TIMEOUT_MS = 60_000;
 const DEFAULT_WAIT_INTERVAL_MS = 2_000;
 const DEFAULT_EDITOR_READY_TIMEOUT_MS = 90_000;
@@ -796,7 +798,9 @@ async function startNative(context) {
   const runnerPath = path.join(__dirname, 'run-native-editor.mjs');
   const describe = runQuiet('pm2', ['describe', pm2Name]);
   const recreate = readEnv('EDITOR_RECREATE', 'false') === 'true';
+  const academicFonts = assertAcademicFontReadiness();
   const extraFontsDir = resolveDocxExtraFontsDir();
+  const nativeFontPaths = [...new Set([academicFonts.fontRoot, extraFontsDir].filter(Boolean))];
   const env = {
     ...process.env,
     EDITOR_ALLOWED_DOMAIN: context.allowedDomain,
@@ -805,9 +809,10 @@ async function startNative(context) {
     EDITOR_HOST_PORT: context.hostPort,
     EDITOR_EXTRA_PARAMS: context.extraParams,
     ...buildWopiAliasGroupEnv(context.wopiAliasGroups),
-    ...(extraFontsDir ? { SAL_PRIVATE_FONTPATH: extraFontsDir } : {}),
+    SAL_PRIVATE_FONTPATH: nativeFontPaths.join(path.delimiter),
   };
 
+  console.log(`[editor] verified academic DOCX fonts: ${academicFonts.manifestPath}`);
   if (extraFontsDir) {
     console.log(`[editor] using native DOCX extra fonts: ${extraFontsDir}`);
   }
@@ -817,12 +822,25 @@ async function startNative(context) {
     return;
   }
 
-  if (describe.status === 0) {
+  if (describe.status === 0 && recreate) {
+    console.log(`[editor] recreating native pm2 process ${pm2Name}...`);
+    run('pm2', ['delete', pm2Name], { env });
+  }
+
+  if (describe.status === 0 && !recreate) {
     console.log(`[editor] restarting native pm2 process ${pm2Name}...`);
     run('pm2', ['restart', pm2Name, '--update-env'], { env });
   } else {
     console.log(`[editor] starting native pm2 process ${pm2Name}...`);
-    run('pm2', ['start', runnerPath, '--name', pm2Name, '--update-env'], { env });
+    run('pm2', [
+      'start',
+      runnerPath,
+      '--name',
+      pm2Name,
+      '--interpreter',
+      process.execPath,
+      '--update-env',
+    ], { env });
   }
 
   console.log(`[editor] waiting for ${context.discoveryUrl}...`);

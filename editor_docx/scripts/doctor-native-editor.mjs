@@ -3,6 +3,8 @@ import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
+import { inspectAcademicFontReadiness } from './academic-font-readiness.mjs';
+
 const REQUIRED_COMMANDS = [
   'git',
   'node',
@@ -12,6 +14,7 @@ const REQUIRED_COMMANDS = [
   'coolwsd-systemplate-setup',
   'setcap',
   'rsync',
+  'fc-match',
 ];
 
 function readEnv(name, fallback) {
@@ -124,6 +127,9 @@ async function main() {
 
   const officeDir = '/opt/collaboraoffice';
   addResult(results, existsSync(officeDir), 'office engine install dir', officeDir);
+
+  const academicFonts = inspectAcademicFontReadiness();
+  results.push(...academicFonts.results);
 
   const runtimeDir = readEnv('EDITOR_NATIVE_RUNTIME_DIR', '/var/lib/academic-editor');
   const cacheDir = readEnv('EDITOR_NATIVE_CACHE_DIR', '/var/cache/academic-editor');

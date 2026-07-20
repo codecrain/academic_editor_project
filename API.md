@@ -2,6 +2,132 @@
 
 Audience: an LLM agent with no prior project context.
 
+## MCP Transport
+
+The production agent integration uses the Streamable HTTP endpoint `POST /mcp`
+with JSON-RPC 2.0. Call `tools/list` to discover the compact schemas instead of
+placing this full API document in every model context. The MCP broker delegates
+to the same `/v1/docx` implementation; it does not duplicate document editing
+logic.
+
+DOCX MCP tools:
+
+- `editor_docx_open`
+- `editor_docx_discard` (close an abandoned session without creating an artifact)
+- `editor_docx_read_json`
+- `editor_docx_target_map`
+- `editor_docx_target_find`
+- `editor_docx_target_inspect`
+- `editor_docx_object_inventory`
+- `editor_docx_command_catalog`
+- `editor_docx_apply`
+- `editor_docx_render_pages`
+- `editor_docx_quality_check`
+- `editor_docx_export_pdf`
+- `editor_docx_save_source`
+- `editor_docx_artifact_read` (application-side binary handoff)
+- `editor_docx_artifact_delete` (delete a handed-off DOCX/PDF artifact)
+
+`editor_docx_command_catalog` is the machine-readable source of truth for all
+26 public DOCX commands and their accepted aliases. Agents should query it by
+category or operation before the first apply. The broker validates every apply
+against that catalog before the document session can mutate.
+
+The broker enforces exact revisions, command-specific inspection or object
+inventory preconditions, and a clean quality check before finalization or PDF
+export. Information-only findings do not block; warnings and errors do.
+Every `tools/call` argument object is validated against the schema returned by
+`tools/list` before the tool executes. In particular, `editor_docx_open`
+requires top-level `filename` plus exactly one of `bytesBase64` or `bytesRef`;
+the nested REST shape `{source:{...}}` is invalid for MCP and never opens a
+sample or fallback document.
+`save_source` returns `artifactId`, package
+SHA-256, and visible-text SHA-256. It never exposes the server-local path.
+If work is cancelled or cannot pass quality checks, call `editor_docx_discard`
+with the open `documentId`. It removes the isolated session and its inspection,
+inventory, quality, and lock state without saving or creating an artifact. The
+call is idempotent: an already-closed session still returns `status=completed`
+with `deleted=false`.
+
+### Bounded MCP reads
+
+MCP never returns the raw `readJson()` graph or the legacy duplicated target
+map. Those objects can grow to megabytes on a real paper. Use these paged
+projections instead:
+
+```json
+{
+  "name": "editor_docx_read_json",
+  "arguments": {
+    "documentId": "doc_...",
+    "view": "blocks",
+    "limit": 40,
+    "textPreviewChars": 200,
+    "cellPreviewLimit": 3
+  }
+}
+```
+
+`view` is `summary` (default), `blocks`, or `tables`. `limit` is `1..100`,
+`textPreviewChars` is `32..512`, and `cellPreviewLimit` is `0..12`. The summary
+view is always one compact item. Blocks contain an exact location, length,
+style fingerprint, and capped `textPreview`; tables contain compact metadata
+and at most `cellPreviewLimit` compact cell previews.
+
+Every read page has this envelope:
+
+```json
+{
+  "ok": true,
+  "revision": 1,
+  "view": "blocks",
+  "total": 604,
+  "returned": 24,
+  "nextCursor": "v1.opaque.integrity-protected",
+  "textPreviewChars": 200,
+  "items": []
+}
+```
+
+For table pages the envelope also includes `cellPreviewLimit`. An item whose
+own compact projection cannot fit the response budget is returned atomically
+with `oversizedItem=true`; the server never splits one target or table across
+pages.
+
+Target enumeration is a separate one-kind stream:
+
+```json
+{
+  "name": "editor_docx_target_map",
+  "arguments": {
+    "documentId": "doc_...",
+    "kind": "cell",
+    "tableId": "tbl_3",
+    "limit": 60
+  }
+}
+```
+
+`kind` is `paragraph` (default) or `cell`, `limit` is `1..120`, and `tableId`
+is an optional filter valid only for cells. The response is
+`{ok,revision,kind,tableId,total,returned,nextCursor,targets}`. It deliberately
+does not repeat targets under `editableTargets` or `locations` aliases.
+
+To fetch the next page, send only `documentId` and `cursor` set to the returned
+`nextCursor`.
+The integrity-protected cursor fixes the document, revision, stream, options,
+and offset. Repeating the same cursor is safe. Changing options while following
+a cursor returns `cursor_query_mismatch`; tampering returns `invalid_cursor`;
+using it after any successful apply returns `stale_cursor`. Start again without
+a cursor after a revision change. The gateway budgets the structured page near
+9 KiB so the MCP response containing both text and structured content remains
+near or below 24 KiB at item boundaries.
+
+The direct `/v1/docx/.../documents/read-json` and `/target/map` routes keep
+their legacy unpaged response for trusted non-MCP callers. New agent code must
+use the bounded MCP tools; the internal bounded projection marker is not a
+public REST contract.
+
 This file is the contract for API-only editing of DOCX and HWPX documents. It is not a UI automation guide. Do not click editor iframes, do not infer from screen coordinates, and do not edit by vague text alone.
 
 ## Runtime Boundary
@@ -15,6 +141,7 @@ Local implementation files:
 - Shared contract tests: `editor_common/document-api-core.test.mjs`
 - Cross-format command contract tests: `editor_common/editor-api-command-contract.test.mjs`
 - DOCX API utility: `editor_docx/scripts/docx-api-utils.mjs`
+- DOCX UNO renderer: `editor_docx/scripts/docx-renderer.mjs` and `render-docx-uno.py`
 - HWPX API utility: `editor_hwpx/scripts/hwpx-api-utils.mjs`
 - Local API bridge/gateway: `editor_docx/scripts/editor-gateway.mjs`
 
@@ -45,18 +172,22 @@ save()
 For every edit:
 
 ```text
-open -> read-json -> target-map/find -> inspect -> apply -> quality/check -> save/export -> visual validation if deliverable
+open -> read-json -> command-catalog -> target-map/find -> inspect -> apply -> quality/check -> render/compare -> save/export
 ```
+
+On cancellation or unrecoverable failure, replace `save/export` with
+`editor_docx_discard` so the isolated server session is released immediately.
 
 Rules:
 - Never write before `read-json`.
 - Never write to a text match before `target/inspect` confirms the exact paragraph/cell/object.
+- Inspect every target in a batch and every `styleSource`/`source`; inspecting a different target at the same revision does not authorize it.
 - Prefer exact table `cell.number` / `cellIndex`; use row/column only when no merge ambiguity exists.
 - Preserve style by choosing a nearby `styleSource` from `read-json` or `target/inspect`.
 - Use `fit: true` or `layout.fitText` before writing long cell text.
 - Treat append-only generation as insufficient when the task asks to modify an existing document.
 - After each write batch, run `quality/check`.
-- For user-visible DOCX output, local validation must include Word open/export and rendered PNG inspection.
+- For user-visible DOCX output, validate actual WebP pages; use baseline comparison for layout-affecting changes.
 - For user-visible HWPX output, preserve-package save and reopen/structure checks are mandatory; visual renderer gaps must be reported.
 
 ## Local Gateway Route Status
@@ -76,12 +207,12 @@ POST /v1/{format}/documents/{id}/quality/render-compare
 POST /v1/{format}/documents/{id}/pages/render-page
 POST /v1/{format}/documents/{id}/pages/render-all
 POST /v1/{format}/documents/{id}/documents/save-source
+POST /v1/docx/documents/{id}/documents/export-pdf
 ```
 
 Known local bridge gaps:
-- `POST /v1/{format}/documents/{id}/documents/export-pdf` currently returns `501`; it is a required production API but not exposed by the local bridge yet.
-- DOCX page rendering through the local bridge is structural only. Current DOCX visual validation uses `npm.cmd run docx:validate:render`, which opens DOCX with Word COM, exports PDF, then rasterizes PNG pages.
 - HWPX page rendering through the local bridge returns RHWP SVG payloads. The production API must convert this to WebP `quality=20`, max bounding box `1700x1700`, white background, stripped metadata.
+- HWPX PDF export is not implemented. DOCX PDF export is implemented through the isolated Collabora UNO renderer.
 
 Route aliases accepted by the local bridge:
 
@@ -97,7 +228,7 @@ documents/save-source                         -> save
 quality/check                                 -> health/check
 export with body.type=json                    -> documents/read-json
 export with body.type=pages-image             -> pages/render-all
-export with body.type=pdf                     -> documents/export-pdf, currently 501 locally
+export with body.type=pdf                     -> documents/export-pdf (DOCX)
 ```
 
 ## Open
@@ -453,6 +584,9 @@ setRunStyle
 setParagraphStyle
 table.create
 createTable
+table.insertCaption
+insertTableCaption
+image.insertAfterParagraph
 setCellText
 ```
 
@@ -476,6 +610,23 @@ Replace one paragraph:
   "text": "2026 report"
 }
 ```
+
+For DOCX paragraphs whose `target_inspect` result contains more than one run, preserve every run explicitly with `segments`. Provide one segment per inspected run in the same order. Each segment copies the exact run properties from `sourceRun`, and all segment text must concatenate exactly to `text`:
+
+```json
+{
+  "commandId": "p-abstract",
+  "op": "text.replaceParagraph",
+  "location": { "paragraph": { "section": 0, "number": 14 } },
+  "text": "Revised lead. Revised remainder.",
+  "segments": [
+    { "sourceRun": 0, "text": "Revised lead." },
+    { "sourceRun": 1, "text": " Revised remainder." }
+  ]
+}
+```
+
+DOCX rejects a multi-run paragraph replacement without complete `segments` instead of silently flattening its structure or formatting. Single-run paragraph replacement remains unchanged.
 
 Aliases:
 
@@ -601,6 +752,25 @@ Explicit DOCX-like table creation:
 ```
 
 Use `table.create` only on DOCX local utility unless HWPX support is explicitly added and tested later.
+
+On success, the matching `results` item returns `tableId`, `target`, and exact `dimensions` (`rowCount`, `colCount`, `cellCount`). Use that returned `tableId` for all subsequent `target_map`, `target_inspect`, and cell-write calls; do not guess `tbl_0` or select an older table by position.
+
+Insert a caption immediately before an existing DOCX table without moving or rewriting it:
+
+```json
+{
+  "commandId": "table-caption-2",
+  "op": "table.insertCaption",
+  "tableId": "tbl_22",
+  "text": "Table 2. Controlled evaluation matrix",
+  "paragraphStyle": { "styleId": "FollowupCaption" },
+  "runStyle": { "bold": true }
+}
+```
+
+Use the exact `tableId` returned by `target_map` or `table.create`. The caption is a normal Word paragraph placed directly before that table and participates in normal style, quality-check, render, and save flows.
+
+When the gateway binds beyond loopback, `ACADEMIC_EDITOR_MCP_BEARER_TOKEN` is required. The same token authenticates `/mcp` and `/api/documents`; WOPI session signatures remain separate. Loopback-only development may omit the server-to-server token.
 
 ## Style Commands
 
@@ -769,6 +939,33 @@ bytesBase64
 filePath
 ```
 
+The replacement bytes must have a complete PNG, JPEG, GIF, BMP, EMF, or WMF
+signature matching the existing package filename extension. An optional
+`mimeType` must agree with both. Corrupt, truncated, or extension-mismatched
+media fails the entire atomic command batch. `image.generateAndReplace` always
+produces PNG and therefore only accepts a `.png` package target.
+
+Insert a new DOCX image after an inspected paragraph without requiring an
+existing package image or placeholder:
+
+```json
+{
+  "commandId": "image-insert-1",
+  "op": "image.insertAfterParagraph",
+  "location": { "paragraph": { "section": 0, "number": 3 } },
+  "bytesBase64": "...",
+  "mimeType": "image/png",
+  "widthEmu": 5486400,
+  "heightEmu": 3086100,
+  "altText": "Research methodology framework",
+  "caption": "Figure 1. Research methodology framework."
+}
+```
+
+The command creates a unique `word/media` package entry, document relationship,
+and drawing ID, then optionally inserts a caption paragraph. Its precondition is
+`target_inspect`; callers should calculate positive EMU dimensions before apply.
+
 Aliases:
 
 ```text
@@ -864,10 +1061,12 @@ DOCX-only page setup:
   "op": "setPageSetup",
   "width": 11906,
   "height": 16838,
-  "marginTop": 1440,
-  "marginBottom": 1440,
-  "marginLeft": 1440,
-  "marginRight": 1440
+  "margins": {
+    "top": 1440,
+    "bottom": 1440,
+    "left": 1440,
+    "right": 1440
+  }
 }
 ```
 
@@ -877,7 +1076,8 @@ DOCX-only header/footer:
 {
   "commandId": "header-1",
   "op": "setHeaderFooter",
-  "header": "Double-anonymized submission"
+  "header": "Double-anonymized submission",
+  "footer": "Confidential manuscript"
 }
 ```
 
@@ -910,7 +1110,7 @@ All or selected pages:
 { "pages": [1, 2, 3] }
 ```
 
-Target production image contract:
+DOCX image contract:
 
 ```json
 {
@@ -929,20 +1129,25 @@ Current local bridge response for HWPX:
 {
   "renderer": "rhwp-svg",
   "page": { "page": 1, "format": "svg", "nonBlank": true, "svg": "<svg>...</svg>" },
+  "pages": [{ "page": 1, "format": "webp", "mimeType": "image/webp", "sha256": "64hex", "byteLength": 12345, "bytesBase64": "..." }]
+}
+```
+
+Current bridge response for DOCX:
+
+```json
+{
+  "ok": true,
+  "renderer": "collabora-uno",
+  "pageCount": 3,
+  "selectedPages": [1],
+  "settings": { "quality": 20, "maxWidth": 1700, "maxHeight": 1700, "background": "white", "metadata": "stripped" },
+  "page": { "page": 1, "format": "webp", "mimeType": "image/webp", "sha256": "64hex", "byteLength": 12345, "bytesBase64": "..." },
   "pages": []
 }
 ```
 
-Current local bridge response for DOCX:
-
-```json
-{
-  "page": { "page": 1, "format": "structure-only", "nonBlank": true },
-  "warnings": [{ "code": "docx-render-not-wired" }]
-}
-```
-
-Production server must provide real WebP bytes or stable byte references for both formats.
+The renderer uses one isolated Collabora profile and returns only after its owned office process and temporary profile are gone.
 
 ## Save
 
@@ -978,25 +1183,37 @@ HWPX save mode:
 
 DOCX save validation:
 - Internal reopen is not enough.
-- For deliverables, run Word open/export and inspect rendered page PNGs.
+- For deliverables, call page rendering and inspect the actual WebP output before save.
 
 ## PDF Export
 
-Required production API:
+Implemented DOCX API:
 
 `POST /v1/{format}/documents/{id}/documents/export-pdf`
 
 ```json
-{ "pages": "all" }
+{ "filename": "edited.pdf" }
 ```
 
-Current local bridge:
+Response without `outputPath`:
 
 ```json
-{ "ok": false, "status": 501, "message": "PDF export is not exposed by the local API bridge yet." }
+{
+  "ok": true,
+  "mimeType": "application/pdf",
+  "filename": "edited.pdf",
+  "pageCount": 3,
+  "sha256": "64hex",
+  "byteLength": 23456,
+  "bytesBase64": "..."
+}
 ```
 
-Current local DOCX validation command:
+The MCP `editor_docx_export_pdf` form writes an opaque `.pdf` artifact after a
+clean quality check. The application-side wrapper reads it, verifies its hash,
+returns it as a real model file input, and deletes the temporary artifact.
+
+Optional Windows/Word validation command:
 
 ```powershell
 npm.cmd run docx:validate:render
@@ -1032,15 +1249,23 @@ Response:
 
 Use `quality/check` after every command batch. If `ok=false`, do not save as final output unless the user explicitly accepts the issue.
 
+DOCX table-capacity findings are evaluated against the JSON captured when the
+isolated session opened. An `empty-table`, `cell-overflow-risk`, or
+`cell-line-overflow-risk` warning at the same stable table/cell location is
+reported as `severity=info`, `preexisting=true`, and
+`baselineSeverity=warning` only when every risk ratio is unchanged or lower.
+New or worsened warnings remain warnings and continue to block MCP save/PDF
+export. Errors are never downgraded.
+
 `POST /v1/{format}/documents/{id}/quality/render-compare`
 
 Purpose:
 - Detect blank pages, unexpected page count changes, object loss, overflow risk, and visual drift.
 
-Current local behavior:
+Current behavior:
 - HWPX returns SVG pages plus structural quality.
-- DOCX returns structural quality with render warning.
-- Production must perform actual image comparison using the WebP render pipeline.
+- DOCX returns structural quality plus labeled baseline/current WebP pages.
+- The model must visually compare the labeled page pairs; the gateway does not pretend that matching hashes prove acceptable layout.
 
 ## Format-Specific Local Coverage
 
@@ -1119,6 +1344,8 @@ setRunStyle
 setParagraphStyle
 table.create
 createTable
+table.insertCaption
+insertTableCaption
 table.writeCell
 setCellText
 table.writeCells
