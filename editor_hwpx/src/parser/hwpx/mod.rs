@@ -330,6 +330,15 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     Ok(doc)
 }
 
+/// HWPX 패키지에서 공개 문서 메타데이터만 읽는다.
+pub fn parse_hwpx_metadata(
+    data: &[u8],
+) -> Result<crate::model::document::DocumentMetadata, HwpxError> {
+    let mut reader = reader::HwpxReader::open(data)?;
+    let content_xml = reader.read_file("Contents/content.hpf")?;
+    Ok(content::parse_content_hpf(&content_xml)?.metadata)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

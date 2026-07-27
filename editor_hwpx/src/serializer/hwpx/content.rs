@@ -7,6 +7,8 @@ use std::io::Cursor;
 
 use quick_xml::Writer;
 
+use crate::model::document::DocumentMetadata;
+
 use super::utils::{empty_tag, end_tag, start_tag_attrs, text, write_xml_decl};
 use super::SerializeError;
 
@@ -22,6 +24,7 @@ pub struct BinDataEntry {
 pub fn write_content_hpf(
     section_hrefs: &[String],
     bin_data: &[BinDataEntry],
+    metadata: &DocumentMetadata,
 ) -> Result<Vec<u8>, SerializeError> {
     let buf = Cursor::new(Vec::new());
     let mut w = Writer::new(buf);
@@ -61,7 +64,9 @@ pub fn write_content_hpf(
 
     // <opf:metadata>
     start_tag_attrs(&mut w, "opf:metadata", &[])?;
-    empty_tag(&mut w, "opf:title", &[])?;
+    start_tag_attrs(&mut w, "opf:title", &[])?;
+    text(&mut w, &metadata.title)?;
+    end_tag(&mut w, "opf:title")?;
     start_tag_attrs(&mut w, "opf:language", &[])?;
     text(&mut w, "ko")?;
     end_tag(&mut w, "opf:language")?;
@@ -70,8 +75,11 @@ pub fn write_content_hpf(
         "opf:meta",
         &[("name", "creator"), ("content", "text")],
     )?;
-    text(&mut w, "rhwp")?;
+    text(&mut w, &metadata.author)?;
     end_tag(&mut w, "opf:meta")?;
+    write_metadata_field(&mut w, "subject", &metadata.subject)?;
+    write_metadata_field(&mut w, "keyword", &metadata.keywords)?;
+    write_metadata_field(&mut w, "description", &metadata.description)?;
     empty_tag(
         &mut w,
         "opf:meta",
@@ -148,4 +156,40 @@ pub fn write_content_hpf(
     end_tag(&mut w, "opf:package")?;
 
     Ok(w.into_inner().into_inner())
+}
+
+fn write_metadata_field<W: std::io::Write>(
+    writer: &mut Writer<W>,
+    name: &str,
+    value: &str,
+) -> Result<(), SerializeError> {
+    start_tag_attrs(writer, "opf:meta", &[("name", name), ("content", "text")])?;
+    text(writer, value)?;
+    end_tag(writer, "opf:meta")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::document::DocumentMetadata;
+
+    #[test]
+    fn write_content_hpf_serializes_public_metadata() {
+        let metadata = DocumentMetadata {
+            title: "2026년 안전 & 운영계획".to_string(),
+            subject: "공공기관 <확정본>".to_string(),
+            author: "데이터혁신처".to_string(),
+            keywords: "안전, 예산".to_string(),
+            description: "감사 대응용".to_string(),
+        };
+
+        let bytes = write_content_hpf(&[], &[], &metadata).unwrap();
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(xml.contains("2026년 안전 &amp; 운영계획"));
+        assert!(xml.contains("공공기관 &lt;확정본&gt;"));
+        assert!(xml.contains("name=\"creator\""));
+        assert!(xml.contains(">데이터혁신처</opf:meta>"));
+        assert!(xml.contains("name=\"keyword\""));
+        assert!(xml.contains("name=\"description\""));
+    }
 }

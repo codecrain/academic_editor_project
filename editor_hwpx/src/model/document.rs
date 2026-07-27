@@ -8,6 +8,16 @@ use super::paragraph::Paragraph;
 use super::style::{BorderFill, Bullet, CharShape, Font, Numbering, ParaShape, Style, TabDef};
 use super::*;
 
+/// HWPX `Contents/content.hpf`에 저장되는 공개 문서 메타데이터.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocumentMetadata {
+    pub title: String,
+    pub subject: String,
+    pub author: String,
+    pub keywords: String,
+    pub description: String,
+}
+
 /// 파서가 모델링하지 않는 원시 레코드 (라운드트립 보존용)
 #[derive(Debug, Clone, Default)]
 pub struct RawRecord {

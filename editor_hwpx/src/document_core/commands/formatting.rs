@@ -1488,6 +1488,12 @@ impl DocumentCore {
         para_idx: usize,
         style_id: usize,
     ) -> Result<String, HwpError> {
+        if style_id > u8::MAX as usize {
+            return Err(HwpError::RenderError(format!(
+                "style ID {} exceeds the HWP u8 storage range",
+                style_id
+            )));
+        }
         let style = self
             .document
             .doc_info
@@ -1548,6 +1554,12 @@ impl DocumentCore {
         cell_para_idx: usize,
         style_id: usize,
     ) -> Result<String, HwpError> {
+        if style_id > u8::MAX as usize {
+            return Err(HwpError::RenderError(format!(
+                "style ID {} exceeds the HWP u8 storage range",
+                style_id
+            )));
+        }
         let style = self
             .document
             .doc_info

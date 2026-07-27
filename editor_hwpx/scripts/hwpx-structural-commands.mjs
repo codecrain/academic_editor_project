@@ -394,17 +394,18 @@ function applyCreateTable(doc, command, context) {
     colCount: columns,
     treatAsChar: false,
   };
+  let desiredColumnWidths = null;
   if (command.width !== undefined) {
     const width = positiveInteger(command.width);
-    if (width === null || width < columns) {
+    if (width === null || width < columns * 200) {
       throw structuralError(
         'HWPX_TABLE_DIMENSIONS_INVALID',
-        'table.create width must be large enough to allocate every column.',
+        'table.create width must allocate at least 200 HWP units per column.',
         { width: command.width, columns },
       );
     }
     const base = Math.floor(width / columns);
-    options.colWidths = Array.from(
+    desiredColumnWidths = Array.from(
       { length: columns },
       (_, index) => base + (index < width % columns ? 1 : 0),
     );
@@ -441,10 +442,11 @@ function applyCreateTable(doc, command, context) {
       'table.create caption must be a nonempty string.',
     );
   }
-  const getCellProperties = command.height === undefined
+  const resizeRequested = command.width !== undefined || command.height !== undefined;
+  const getCellProperties = !resizeRequested
     ? null
     : requireMethod(doc, 'getCellProperties');
-  const resizeTableCells = command.height === undefined
+  const resizeTableCells = !resizeRequested
     ? null
     : requireMethod(doc, 'resizeTableCells');
   const insertTextInCell = command.cellTexts?.some(text => text.length > 0)
@@ -468,9 +470,11 @@ function applyCreateTable(doc, command, context) {
   const native = { table: tableNative };
   const createdTargets = [createdTarget];
 
-  if (command.height !== undefined) {
-    const desiredBaseHeight = Math.floor(command.height / rows);
-    const heightRemainder = command.height % rows;
+  if (resizeRequested) {
+    const desiredBaseHeight = command.height === undefined
+      ? null
+      : Math.floor(command.height / rows);
+    const heightRemainder = command.height === undefined ? 0 : command.height % rows;
     const updates = [];
     for (let cellIndex = 0; cellIndex < cellCount; cellIndex += 1) {
       const properties = parseNativeObject(
@@ -482,20 +486,33 @@ function applyCreateTable(doc, command, context) {
         ),
         'getCellProperties',
       );
-      const currentHeight = positiveInteger(properties.height);
-      if (currentHeight === null) {
-        throw structuralError(
-          'HWPX_ENGINE_RESULT_INVALID',
-          'getCellProperties omitted a positive cell height.',
-          { cellIndex, value: properties.height },
-        );
-      }
       const row = Math.floor(cellIndex / columns);
-      const desiredHeight = desiredBaseHeight + (row < heightRemainder ? 1 : 0);
-      updates.push({
-        cellIdx: cellIndex,
-        heightDelta: desiredHeight - currentHeight,
-      });
+      const column = cellIndex % columns;
+      const update = { cellIdx: cellIndex };
+      if (desiredColumnWidths) {
+        const currentWidth = positiveInteger(properties.width);
+        if (currentWidth === null) {
+          throw structuralError(
+            'HWPX_ENGINE_RESULT_INVALID',
+            'getCellProperties omitted a positive cell width.',
+            { cellIndex, value: properties.width },
+          );
+        }
+        update.widthDelta = desiredColumnWidths[column] - currentWidth;
+      }
+      if (desiredBaseHeight !== null) {
+        const currentHeight = positiveInteger(properties.height);
+        if (currentHeight === null) {
+          throw structuralError(
+            'HWPX_ENGINE_RESULT_INVALID',
+            'getCellProperties omitted a positive cell height.',
+            { cellIndex, value: properties.height },
+          );
+        }
+        const desiredHeight = desiredBaseHeight + (row < heightRemainder ? 1 : 0);
+        update.heightDelta = desiredHeight - currentHeight;
+      }
+      updates.push(update);
     }
     native.resize = parseNativeResult(
       resizeTableCells(
@@ -646,6 +663,13 @@ function sniffImage(bytes, declaredMimeType, filePath) {
   const declaredExtension = IMAGE_MIME_TO_EXTENSION.get(
     String(declaredMimeType ?? '').toLowerCase(),
   );
+  if (declaredMimeType !== undefined && !declaredExtension) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'The declared image MIME type is not supported by RHWP.',
+      { mimeType: declaredMimeType },
+    );
+  }
   let signatureExtension = null;
   if (bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
     signatureExtension = 'png';
@@ -663,13 +687,29 @@ function sniffImage(bytes, declaredMimeType, filePath) {
       { declaredExtension, signatureExtension },
     );
   }
-  let extension = declaredExtension;
-  if (!extension && filePath) {
+  let fileExtension = null;
+  if (filePath) {
     const candidate = extname(filePath).slice(1).toLowerCase();
     if (['png', 'jpg', 'jpeg', 'gif', 'bmp'].includes(candidate)) {
-      extension = candidate === 'jpeg' ? 'jpg' : candidate;
+      fileExtension = candidate === 'jpeg' ? 'jpg' : candidate;
     }
   }
+  if (fileExtension && signatureExtension && fileExtension !== signatureExtension) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'The image file extension does not match the binary signature.',
+      { fileExtension, signatureExtension },
+    );
+  }
+  if (declaredExtension && fileExtension && declaredExtension !== fileExtension) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'The declared image MIME type does not match the file extension.',
+      { declaredExtension, fileExtension },
+    );
+  }
+  let extension = declaredExtension;
+  extension ??= fileExtension;
   extension ??= signatureExtension;
   if (!extension) {
     throw structuralError(
@@ -1024,6 +1064,505 @@ function applyInsertFootnote(doc, command, context) {
   }, createdTarget, [createdTarget]);
 }
 
+const CHARACTER_STYLE_KEYS = new Set([
+  'bold',
+  'italic',
+  'underline',
+  'strikethrough',
+  'fontSize',
+  'fontId',
+  'textColor',
+  'shadeColor',
+  'underlineType',
+  'underlineColor',
+  'outlineType',
+  'shadowType',
+  'shadowColor',
+  'shadowOffsetX',
+  'shadowOffsetY',
+  'strikeColor',
+  'subscript',
+  'superscript',
+  'emboss',
+  'engrave',
+  'emphasisDot',
+  'underlineShape',
+  'strikeShape',
+  'kerning',
+  'fontIds',
+  'ratios',
+  'spacings',
+  'relativeSizes',
+  'charOffsets',
+]);
+
+const PARAGRAPH_STYLE_KEYS = new Set([
+  'alignment',
+  'lineSpacing',
+  'lineSpacingType',
+  'indent',
+  'marginLeft',
+  'marginRight',
+  'spacingBefore',
+  'spacingAfter',
+  'headType',
+  'paraLevel',
+  'numberingId',
+  'widowOrphan',
+  'keepWithNext',
+  'keepLines',
+  'pageBreakBefore',
+  'fontLineHeight',
+  'borderSpacing',
+]);
+
+function normalizeCharacterStyle(doc, style) {
+  if (!style || typeof style !== 'object' || Array.isArray(style)) {
+    throw structuralError('HWPX_RUN_STYLE_INVALID', 'A character style object is required.');
+  }
+  const normalized = {};
+  for (const [key, value] of Object.entries(style)) {
+    if (CHARACTER_STYLE_KEYS.has(key)) normalized[key] = value;
+  }
+  if (style.fontSizePt !== undefined) {
+    const points = Number(style.fontSizePt);
+    if (!Number.isFinite(points) || points <= 0) {
+      throw structuralError(
+        'HWPX_RUN_STYLE_INVALID',
+        'fontSizePt must be a positive number.',
+      );
+    }
+    normalized.fontSize = Math.round(points * 100);
+  }
+  if (style.color !== undefined) normalized.textColor = style.color;
+  if (style.fontFamily !== undefined) {
+    if (typeof style.fontFamily !== 'string' || style.fontFamily.trim().length === 0) {
+      throw structuralError(
+        'HWPX_RUN_STYLE_INVALID',
+        'fontFamily must be a nonblank string.',
+      );
+    }
+    const findOrCreateFontId = requireMethod(doc, 'findOrCreateFontId');
+    const fontId = findOrCreateFontId(style.fontFamily.trim());
+    if (!Number.isInteger(fontId) || fontId < 0 || fontId > 0xFFFF) {
+      throw structuralError(
+        'HWPX_ENGINE_RESULT_INVALID',
+        'findOrCreateFontId returned an invalid font ID.',
+        { fontId },
+      );
+    }
+    normalized.fontId = fontId;
+  }
+  if (Object.keys(normalized).length === 0) {
+    throw structuralError(
+      'HWPX_RUN_STYLE_INVALID',
+      'The character style does not contain any supported RHWP property.',
+    );
+  }
+  return normalized;
+}
+
+function normalizeParagraphStyle(style) {
+  if (!style || typeof style !== 'object' || Array.isArray(style)) {
+    throw structuralError(
+      'HWPX_PARAGRAPH_STYLE_INVALID',
+      'A paragraph style object is required.',
+    );
+  }
+  const normalized = {};
+  for (const [key, value] of Object.entries(style)) {
+    if (PARAGRAPH_STYLE_KEYS.has(key)) normalized[key] = value;
+  }
+  if (style.align !== undefined) normalized.alignment = style.align;
+  const marginMap = {
+    left: 'marginLeft',
+    right: 'marginRight',
+  };
+  for (const [publicName, nativeName] of Object.entries(marginMap)) {
+    if (style.margins?.[publicName] !== undefined) {
+      normalized[nativeName] = style.margins[publicName];
+    }
+  }
+  if (Object.keys(normalized).length === 0) {
+    throw structuralError(
+      'HWPX_PARAGRAPH_STYLE_INVALID',
+      'The paragraph style does not contain any supported RHWP property.',
+    );
+  }
+  return normalized;
+}
+
+function splitNamedStyleProperties(doc, properties) {
+  const charCandidate = {};
+  const paraCandidate = {};
+  for (const [key, value] of Object.entries(properties ?? {})) {
+    if (CHARACTER_STYLE_KEYS.has(key)
+      || ['fontSizePt', 'color', 'fontFamily'].includes(key)) {
+      charCandidate[key] = value;
+    }
+    if (PARAGRAPH_STYLE_KEYS.has(key) || ['align', 'margins'].includes(key)) {
+      paraCandidate[key] = value;
+    }
+  }
+  const charProperties = Object.keys(charCandidate).length > 0
+    ? normalizeCharacterStyle(doc, charCandidate)
+    : {};
+  const paraProperties = Object.keys(paraCandidate).length > 0
+    ? normalizeParagraphStyle(paraCandidate)
+    : {};
+  if (Object.keys(charProperties).length === 0 && Object.keys(paraProperties).length === 0) {
+    throw structuralError(
+      'HWPX_STYLE_PROPERTIES_INVALID',
+      'defineStyle properties must contain a supported character or paragraph property.',
+    );
+  }
+  return { charProperties, paraProperties };
+}
+
+function applyDefineStyle(doc, command) {
+  if (typeof command.name !== 'string' || command.name.trim().length === 0) {
+    throw structuralError('HWPX_STYLE_NAME_REQUIRED', 'defineStyle requires a nonblank name.');
+  }
+  if (!['paragraph', 'character'].includes(command.kind)) {
+    throw structuralError(
+      'HWPX_STYLE_KIND_INVALID',
+      'defineStyle kind must be paragraph or character.',
+    );
+  }
+  const nextStyleId = command.nextStyleId === undefined
+    ? 0
+    : nonNegativeInteger(command.nextStyleId);
+  if (nextStyleId === null || nextStyleId > 0xFF) {
+    throw structuralError(
+      'HWPX_STYLE_ID_INVALID',
+      'defineStyle nextStyleId must be an integer from 0 through 255.',
+      { nextStyleId: command.nextStyleId },
+    );
+  }
+  const createStyle = requireMethod(doc, 'createStyle');
+  const updateStyleShapes = requireMethod(doc, 'updateStyleShapes');
+  const { charProperties, paraProperties } = splitNamedStyleProperties(
+    doc,
+    command.properties,
+  );
+  const styleId = createStyle(JSON.stringify({
+    name: command.name.trim(),
+    englishName: String(command.englishName ?? ''),
+    type: command.kind === 'paragraph' ? 0 : 1,
+    nextStyleId,
+  }));
+  if (!Number.isInteger(styleId) || styleId < 0 || styleId > 0xFF) {
+    throw structuralError(
+      'HWPX_ENGINE_RESULT_INVALID',
+      'createStyle returned an invalid HWP u8 style ID.',
+      { styleId },
+    );
+  }
+  const shapesUpdated = updateStyleShapes(
+    styleId,
+    JSON.stringify(charProperties),
+    JSON.stringify(paraProperties),
+  );
+  if (shapesUpdated !== true) {
+    throw structuralError(
+      'HWPX_ENGINE_RESULT_INVALID',
+      'updateStyleShapes failed for the newly created style.',
+      { styleId },
+    );
+  }
+  return structuralResult(command, {
+    styleId,
+    shapesUpdated,
+  }, {
+    kind: 'style',
+    styleId,
+  }, [{
+    kind: 'style',
+    styleId,
+  }]);
+}
+
+function resolveHwpxCellTarget(command, context) {
+  const target = command.target ?? command.location ?? {};
+  const direct = target.native && typeof target.native === 'object' ? target.native : {};
+  let sectionIndex = firstSpecifiedInteger(
+    target.sectionIndex,
+    target.section,
+    direct.sectionIndex,
+    direct.section,
+  );
+  let paragraphIndex = firstSpecifiedInteger(
+    target.paragraphIndex,
+    target.para,
+    direct.paragraphIndex,
+    direct.paragraph,
+    direct.para,
+  );
+  let controlIndex = firstSpecifiedInteger(
+    target.controlIndex,
+    target.control,
+    target.controlIdx,
+    direct.controlIndex,
+    direct.control,
+    direct.controlIdx,
+  );
+  let cellIndex = firstSpecifiedInteger(
+    target.cellIndex,
+    target.cell?.number,
+    target.tableCell?.number,
+    direct.cellIndex,
+    direct.cell,
+  );
+  let cellParagraphIndex = firstSpecifiedInteger(
+    target.cellParagraphIndex,
+    target.cellParaIndex,
+    target.cellPara,
+    direct.cellParagraphIndex,
+    direct.cellParaIndex,
+    direct.cellPara,
+    0,
+  );
+  const tableId = target.tableId;
+  const table = tableId
+    ? context?.before?.tables?.find(item => item?.id === tableId)
+    : null;
+  if (table) {
+    const cell = table.cells?.find(item =>
+      firstSpecifiedInteger(
+        item?.native?.cellIndex,
+        item?.cellIndex,
+        item?.location?.cell?.number,
+      ) === cellIndex);
+    const native = cell?.native ?? {};
+    sectionIndex = firstSpecifiedInteger(native.sectionIndex, native.section);
+    paragraphIndex = firstSpecifiedInteger(
+      native.paragraphIndex,
+      native.paragraph,
+      native.para,
+    );
+    controlIndex = firstSpecifiedInteger(
+      native.controlIndex,
+      native.control,
+      native.controlIdx,
+    );
+    cellIndex = firstSpecifiedInteger(native.cellIndex, cellIndex);
+    cellParagraphIndex = firstSpecifiedInteger(
+      native.cellParagraphIndex,
+      native.cellParaIndex,
+      cellParagraphIndex,
+    );
+  }
+  if ([sectionIndex, paragraphIndex, controlIndex, cellIndex, cellParagraphIndex]
+    .some(value => value === null)) {
+    throw structuralError(
+      'HWPX_CELL_TARGET_INVALID',
+      'The HWPX cell target must resolve to native table and cell indices.',
+      { target },
+    );
+  }
+  return {
+    kind: 'cell',
+    sectionIndex,
+    paragraphIndex,
+    controlIndex,
+    cellIndex,
+    cellParagraphIndex,
+  };
+}
+
+function isCellStyleTarget(command) {
+  const target = command.target ?? command.location ?? {};
+  return target.tableId !== undefined
+    || target.cell !== undefined
+    || target.tableCell !== undefined
+    || target.cellIndex !== undefined
+    || target.native?.cellIndex !== undefined;
+}
+
+function inspectedCellParagraphLength(doc, context, target) {
+  if (typeof doc?.getCellParagraphLength === 'function') {
+    const length = nonNegativeInteger(doc.getCellParagraphLength(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+    ));
+    if (length !== null) return length;
+  }
+  const table = context?.before?.tables?.find(item =>
+    firstSpecifiedInteger(item?.native?.section, item?.section) === target.sectionIndex
+    && firstSpecifiedInteger(item?.native?.paragraph, item?.para) === target.paragraphIndex
+    && firstSpecifiedInteger(item?.native?.control, item?.control) === target.controlIndex);
+  const cell = table?.cells?.find(item =>
+    firstSpecifiedInteger(item?.native?.cellIndex, item?.cellIndex) === target.cellIndex);
+  const paragraph = cell?.paragraphs?.[target.cellParagraphIndex];
+  if (typeof paragraph?.text === 'string') return [...paragraph.text].length;
+  const length = firstSpecifiedInteger(paragraph?.length, paragraph?.textLength);
+  if (length !== null) return length;
+  throw structuralError(
+    'HWPX_RANGE_INSPECTION_REQUIRED',
+    'A verified cell paragraph length is required for character formatting.',
+    { target },
+  );
+}
+
+function resolveStyleRange(doc, command, context, target) {
+  const publicTarget = command.target ?? command.location ?? {};
+  const native = publicTarget.native ?? {};
+  const start = firstSpecifiedInteger(
+    publicTarget.offset,
+    publicTarget.charOffset,
+    native.offset,
+    native.charOffset,
+    0,
+  );
+  const length = firstSpecifiedInteger(publicTarget.length, native.length);
+  const paragraphLength = target.kind === 'cell'
+    ? inspectedCellParagraphLength(doc, context, target)
+    : inspectedParagraphLength(doc, context, target);
+  const end = length === null ? paragraphLength : start + length;
+  if (start === null || nonNegativeInteger(end) === null
+    || start > paragraphLength || end > paragraphLength || end <= start) {
+    throw structuralError(
+      'HWPX_INVALID_RANGE',
+      'The HWPX style range must be nonempty and stay inside the inspected paragraph.',
+      { start, end, paragraphLength },
+    );
+  }
+  return { start, end };
+}
+
+function applyExistingStyle(doc, command, context) {
+  const styleId = nonNegativeInteger(command.styleId);
+  if (styleId === null || styleId > 0xFF) {
+    throw structuralError(
+      'HWPX_STYLE_ID_INVALID',
+      'applyStyle requires a style ID between 0 and 255.',
+    );
+  }
+  if (isCellStyleTarget(command)) {
+    const target = resolveHwpxCellTarget(command, context);
+    const applyCellStyle = requireMethod(doc, 'applyCellStyle');
+    const native = parseNativeResult(applyCellStyle(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+      styleId,
+    ), 'applyCellStyle');
+    return structuralResult(command, native, target);
+  }
+  const target = resolveHwpxTextTarget(command, { offsetRequired: false });
+  const applyStyle = requireMethod(doc, 'applyStyle');
+  const native = parseNativeResult(
+    applyStyle(target.sectionIndex, target.paragraphIndex, styleId),
+    'applyStyle',
+  );
+  return structuralResult(command, native, publicParagraphTarget(
+    target.sectionIndex,
+    target.paragraphIndex,
+  ));
+}
+
+function applyRunStyle(doc, command, context) {
+  const cellTarget = isCellStyleTarget(command);
+  const target = cellTarget
+    ? resolveHwpxCellTarget(command, context)
+    : resolveHwpxTextTarget(command, { offsetRequired: false });
+  const methodName = cellTarget ? 'applyCharFormatInCell' : 'applyCharFormat';
+  const applyFormat = requireMethod(doc, methodName);
+  const range = resolveStyleRange(doc, command, context, target);
+  const style = normalizeCharacterStyle(doc, command.style);
+  const args = cellTarget
+    ? [
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+      range.start,
+      range.end,
+      JSON.stringify(style),
+    ]
+    : [
+      target.sectionIndex,
+      target.paragraphIndex,
+      range.start,
+      range.end,
+      JSON.stringify(style),
+    ];
+  const native = parseNativeResult(applyFormat(...args), methodName);
+  return structuralResult(command, native, cellTarget
+    ? target
+    : publicParagraphTarget(target.sectionIndex, target.paragraphIndex, range.end));
+}
+
+function applyParagraphStyle(doc, command, context) {
+  const cellTarget = isCellStyleTarget(command);
+  const target = cellTarget
+    ? resolveHwpxCellTarget(command, context)
+    : resolveHwpxTextTarget(command, { offsetRequired: false });
+  const methodName = cellTarget ? 'applyParaFormatInCell' : 'applyParaFormat';
+  const applyFormat = requireMethod(doc, methodName);
+  const style = normalizeParagraphStyle(command.style);
+  const args = cellTarget
+    ? [
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+      JSON.stringify(style),
+    ]
+    : [
+      target.sectionIndex,
+      target.paragraphIndex,
+      JSON.stringify(style),
+    ];
+  const native = parseNativeResult(applyFormat(...args), methodName);
+  return structuralResult(command, native, cellTarget
+    ? target
+    : publicParagraphTarget(target.sectionIndex, target.paragraphIndex));
+}
+
+const DOCUMENT_METADATA_FIELDS = [
+  'title',
+  'subject',
+  'author',
+  'keywords',
+  'description',
+];
+
+function applyDocumentMetadata(doc, command) {
+  const metadata = {};
+  for (const field of DOCUMENT_METADATA_FIELDS) {
+    if (command[field] !== undefined) {
+      if (typeof command[field] !== 'string') {
+        throw structuralError(
+          'HWPX_METADATA_INVALID',
+          `setDocumentMetadata ${field} must be a string.`,
+        );
+      }
+      metadata[field] = command[field];
+    }
+  }
+  if (Object.keys(metadata).length === 0) {
+    throw structuralError(
+      'HWPX_METADATA_INVALID',
+      'setDocumentMetadata requires at least one metadata field.',
+    );
+  }
+  const setDocumentMetadata = requireMethod(doc, 'setDocumentMetadata');
+  const native = parseNativeResult(
+    setDocumentMetadata(JSON.stringify(metadata)),
+    'setDocumentMetadata',
+    ['changed'],
+  );
+  return structuralResult(command, native, { kind: 'documentMetadata' });
+}
+
 function applyHwpxStructuralCommand(doc, command, context = {}) {
   switch (command?.op) {
     case 'insertText':
@@ -1044,6 +1583,16 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyHeaderFooter(doc, command);
     case 'insertFootnote':
       return applyInsertFootnote(doc, command, context);
+    case 'defineStyle':
+      return applyDefineStyle(doc, command);
+    case 'applyStyle':
+      return applyExistingStyle(doc, command, context);
+    case 'setRunStyle':
+      return applyRunStyle(doc, command, context);
+    case 'setParagraphStyle':
+      return applyParagraphStyle(doc, command, context);
+    case 'setDocumentMetadata':
+      return applyDocumentMetadata(doc, command);
     default:
       throw structuralError(
         'HWPX_STRUCTURAL_OP_UNSUPPORTED',

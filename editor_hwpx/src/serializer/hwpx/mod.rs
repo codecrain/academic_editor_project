@@ -25,7 +25,7 @@ pub mod writer;
 
 use std::collections::HashSet;
 
-use crate::model::document::Document;
+use crate::model::document::{Document, DocumentMetadata};
 
 use super::SerializeError;
 use content::BinDataEntry as ContentBinDataEntry;
@@ -38,6 +38,14 @@ use writer::HwpxZipWriter;
 /// `SerializeContext`가 1-pass 스캔으로 ID 풀을 구성하고, 각 writer가 동일 컨텍스트를
 /// 참조한다. 직렬화 종료 시 `assert_all_refs_resolved()`가 미등록 참조를 단언한다.
 pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
+    serialize_hwpx_with_metadata(doc, &DocumentMetadata::default())
+}
+
+/// Document IR과 공개 문서 메타데이터를 HWPX 패키지로 직렬화한다.
+pub fn serialize_hwpx_with_metadata(
+    doc: &Document,
+    metadata: &DocumentMetadata,
+) -> Result<Vec<u8>, SerializeError> {
     use static_assets::*;
 
     // 1-pass: ID 풀 구성
@@ -103,7 +111,7 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
             media_type: e.media_type.clone(),
         })
         .collect();
-    let content_hpf = content::write_content_hpf(&section_hrefs, &content_bin_entries)?;
+    let content_hpf = content::write_content_hpf(&section_hrefs, &content_bin_entries, metadata)?;
     z.write_deflated("Contents/content.hpf", &content_hpf)?;
 
     // 10. META-INF/container.xml

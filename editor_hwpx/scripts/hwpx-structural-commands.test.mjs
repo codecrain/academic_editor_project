@@ -376,7 +376,7 @@ test('table.create applies advertised width, height, cell text, and caption opti
     },
     getCellProperties: (...args) => {
       calls.push(['getCellProperties', ...args]);
-      return '{"width":2000,"height":282}';
+      return '{"width":1500,"height":282}';
     },
     resizeTableCells: (...args) => {
       calls.push(['resizeTableCells', ...args.slice(0, 3), JSON.parse(args[3])]);
@@ -410,7 +410,6 @@ test('table.create applies advertised width, height, cell text, and caption opti
     rowCount: 2,
     colCount: 2,
     treatAsChar: false,
-    colWidths: [2000, 2000],
   }]);
   assert.deepEqual(calls.slice(1, 5), [
     ['getCellProperties', 0, 2, 0, 0],
@@ -419,10 +418,10 @@ test('table.create applies advertised width, height, cell text, and caption opti
     ['getCellProperties', 0, 2, 0, 3],
   ]);
   assert.deepEqual(calls[5], ['resizeTableCells', 0, 2, 0, [
-    { cellIdx: 0, heightDelta: 718 },
-    { cellIdx: 1, heightDelta: 718 },
-    { cellIdx: 2, heightDelta: 718 },
-    { cellIdx: 3, heightDelta: 718 },
+    { cellIdx: 0, widthDelta: 500, heightDelta: 718 },
+    { cellIdx: 1, widthDelta: 500, heightDelta: 718 },
+    { cellIdx: 2, widthDelta: 500, heightDelta: 718 },
+    { cellIdx: 3, widthDelta: 500, heightDelta: 718 },
   ]]);
   assert.deepEqual(calls.slice(6, 9), [
     ['insertTextInCell', 0, 2, 0, 0, 0, 0, '가'],
@@ -771,4 +770,298 @@ test('image insertion rejects declared MIME that conflicts with the binary signa
     mimeType: 'image/jpeg',
   }), error => error.code === 'HWPX_IMAGE_FORMAT_UNSUPPORTED');
   assert.deepEqual(calls, []);
+
+  assert.throws(() => applyHwpxStructuralCommand({
+    insertParagraph: (...args) => calls.push(args),
+    insertPicture: (...args) => calls.push(args),
+  }, {
+    op: 'image.insertAfterParagraph',
+    target: { sectionIndex: 0, paragraphIndex: 0 },
+    bytes: pngHeader,
+    mimeType: 'application/pdf',
+  }), error => error.code === 'HWPX_IMAGE_FORMAT_UNSUPPORTED');
+  assert.deepEqual(calls, []);
+});
+
+test('defineStyle creates a style and applies advertised character and paragraph properties', () => {
+  const calls = [];
+  const doc = {
+    createStyle: (json) => {
+      calls.push(['createStyle', JSON.parse(json)]);
+      return 12;
+    },
+    updateStyleShapes: (styleId, charJson, paraJson) => {
+      calls.push([
+        'updateStyleShapes',
+        styleId,
+        JSON.parse(charJson),
+        JSON.parse(paraJson),
+      ]);
+      return true;
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'defineStyle',
+    name: '공공기관_강조',
+    kind: 'paragraph',
+    properties: {
+      fontSizePt: 12,
+      bold: true,
+      align: 'center',
+      spacingAfter: 300,
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['createStyle', {
+      name: '공공기관_강조',
+      englishName: '',
+      type: 0,
+      nextStyleId: 0,
+    }],
+    ['updateStyleShapes', 12, {
+      fontSize: 1200,
+      bold: true,
+    }, {
+      alignment: 'center',
+      spacingAfter: 300,
+    }],
+  ]);
+  assert.deepEqual(result.native, { styleId: 12, shapesUpdated: true });
+  assert.deepEqual(result.target, { kind: 'style', styleId: 12 });
+});
+
+test('applyStyle, setRunStyle, and setParagraphStyle call the body RHWP format APIs', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 10,
+    applyStyle: (...args) => {
+      calls.push(['applyStyle', ...args]);
+      return '{"ok":true}';
+    },
+    applyCharFormat: (...args) => {
+      calls.push(['applyCharFormat', ...args.slice(0, 4), JSON.parse(args[4])]);
+      return '{"ok":true}';
+    },
+    applyParaFormat: (...args) => {
+      calls.push(['applyParaFormat', ...args.slice(0, 2), JSON.parse(args[2])]);
+      return '{"ok":true}';
+    },
+  };
+  applyHwpxStructuralCommand(doc, {
+    op: 'applyStyle',
+    target: { sectionIndex: 0, paragraphIndex: 2 },
+    styleId: 12,
+  });
+  applyHwpxStructuralCommand(doc, {
+    op: 'setRunStyle',
+    target: { sectionIndex: 0, paragraphIndex: 2, offset: 2, length: 4 },
+    style: { bold: true, fontSizePt: 11, color: '#123456' },
+  });
+  applyHwpxStructuralCommand(doc, {
+    op: 'setParagraphStyle',
+    target: { sectionIndex: 0, paragraphIndex: 2 },
+    style: {
+      align: 'right',
+      lineSpacing: 180,
+      margins: { left: 300, right: 200 },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['applyStyle', 0, 2, 12],
+    ['applyCharFormat', 0, 2, 2, 6, {
+      bold: true,
+      fontSize: 1100,
+      textColor: '#123456',
+    }],
+    ['applyParaFormat', 0, 2, {
+      alignment: 'right',
+      lineSpacing: 180,
+      marginLeft: 300,
+      marginRight: 200,
+    }],
+  ]);
+});
+
+test('style adapters resolve inspected table cells to the RHWP cell format APIs', () => {
+  const calls = [];
+  const doc = {
+    getCellParagraphLength: () => 7,
+    applyCellStyle: (...args) => {
+      calls.push(['applyCellStyle', ...args]);
+      return '{"ok":true}';
+    },
+    applyCharFormatInCell: (...args) => {
+      calls.push(['applyCharFormatInCell', ...args.slice(0, 7), JSON.parse(args[7])]);
+      return '{"ok":true}';
+    },
+    applyParaFormatInCell: (...args) => {
+      calls.push(['applyParaFormatInCell', ...args.slice(0, 5), JSON.parse(args[5])]);
+      return '{"ok":true}';
+    },
+  };
+  const context = {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        native: { section: 1, paragraph: 3, control: 2 },
+        cells: [{
+          location: { tableId: 'tbl_0', cell: { number: 4 } },
+          native: {
+            section: 1,
+            paragraph: 3,
+            control: 2,
+            cellIndex: 4,
+          },
+        }],
+      }],
+    },
+  };
+  const target = { tableId: 'tbl_0', cell: { number: 4 } };
+  applyHwpxStructuralCommand(doc, {
+    op: 'applyStyle',
+    target,
+    styleId: 9,
+  }, context);
+  applyHwpxStructuralCommand(doc, {
+    op: 'setRunStyle',
+    target,
+    style: { italic: true },
+  }, context);
+  applyHwpxStructuralCommand(doc, {
+    op: 'setParagraphStyle',
+    target,
+    style: { align: 'center' },
+  }, context);
+
+  assert.deepEqual(calls, [
+    ['applyCellStyle', 1, 3, 2, 4, 0, 9],
+    ['applyCharFormatInCell', 1, 3, 2, 4, 0, 0, 7, { italic: true }],
+    ['applyParaFormatInCell', 1, 3, 2, 4, 0, { alignment: 'center' }],
+  ]);
+});
+
+test('style adapters treat direct cellIndex targets as table cells', () => {
+  const calls = [];
+  const doc = {
+    applyCellStyle: (...args) => {
+      calls.push(['applyCellStyle', ...args]);
+      return '{"ok":true}';
+    },
+  };
+  applyHwpxStructuralCommand(doc, {
+    op: 'applyStyle',
+    target: {
+      sectionIndex: 1,
+      paragraphIndex: 3,
+      controlIndex: 2,
+      cellIndex: 4,
+    },
+    styleId: 9,
+  });
+  assert.deepEqual(calls, [
+    ['applyCellStyle', 1, 3, 2, 4, 0, 9],
+  ]);
+});
+
+test('direct cell targets keep one alias precedence and honor cell paragraph aliases', () => {
+  const calls = [];
+  const doc = {
+    applyCellStyle: (...args) => {
+      calls.push(args);
+      return '{"ok":true}';
+    },
+  };
+  applyHwpxStructuralCommand(doc, {
+    op: 'applyStyle',
+    target: {
+      sectionIndex: 1,
+      paragraphIndex: 3,
+      controlIndex: 2,
+      cellIndex: 4,
+      cellParagraphIndex: 6,
+      native: {
+        sectionIndex: 10,
+        paragraphIndex: 30,
+        controlIndex: 20,
+        cellIndex: 5,
+        cellParagraphIndex: 7,
+      },
+    },
+    styleId: 9,
+  });
+  assert.deepEqual(calls, [
+    [1, 3, 2, 4, 6, 9],
+  ]);
+});
+
+test('setRunStyle validates the range before registering a font family', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 3,
+    findOrCreateFontId: (...args) => {
+      calls.push(['findOrCreateFontId', ...args]);
+      return 4;
+    },
+    applyCharFormat: (...args) => {
+      calls.push(['applyCharFormat', ...args]);
+      return '{"ok":true}';
+    },
+  };
+  assert.throws(() => applyHwpxStructuralCommand(doc, {
+    op: 'setRunStyle',
+    target: { sectionIndex: 0, paragraphIndex: 0, offset: 4 },
+    style: { fontFamily: 'New Font' },
+  }), error => error.code === 'HWPX_INVALID_RANGE');
+  assert.deepEqual(calls, []);
+});
+
+test('style IDs outside the HWP u8 model are rejected', () => {
+  assert.throws(() => applyHwpxStructuralCommand({
+    applyStyle: () => {
+      throw new Error('must not mutate');
+    },
+  }, {
+    op: 'applyStyle',
+    target: { sectionIndex: 0, paragraphIndex: 0 },
+    styleId: 256,
+  }), error => error.code === 'HWPX_STYLE_ID_INVALID');
+
+  const calls = [];
+  assert.throws(() => applyHwpxStructuralCommand({
+    createStyle: (...args) => calls.push(['createStyle', ...args]),
+    updateStyleShapes: (...args) => calls.push(['updateStyleShapes', ...args]),
+  }, {
+    op: 'defineStyle',
+    name: 'Invalid next style',
+    kind: 'paragraph',
+    nextStyleId: 256,
+    properties: { bold: true },
+  }), error => error.code === 'HWPX_STYLE_ID_INVALID');
+  assert.deepEqual(calls, []);
+});
+
+test('setDocumentMetadata passes all public fields to the native metadata API', () => {
+  const calls = [];
+  const metadata = {
+    title: '2026년 경영평가 보고서',
+    subject: '기관 경영실적',
+    author: '기획조정실',
+    keywords: '경영평가,공공기관',
+    description: '대외 제출용 최종본',
+  };
+  const doc = {
+    setDocumentMetadata: (json) => {
+      calls.push(JSON.parse(json));
+      return JSON.stringify({ ok: true, changed: 5, metadata });
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'setDocumentMetadata',
+    ...metadata,
+  });
+  assert.deepEqual(calls, [metadata]);
+  assert.equal(result.native.changed, 5);
+  assert.deepEqual(result.target, { kind: 'documentMetadata' });
 });

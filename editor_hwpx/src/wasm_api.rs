@@ -17,7 +17,7 @@ use web_sys::HtmlCanvasElement;
 use crate::document_core::{DocumentCore, DEFAULT_FALLBACK_FONT};
 use crate::error::HwpError;
 use crate::model::control::Control;
-use crate::model::document::{Document, Section};
+use crate::model::document::{Document, DocumentMetadata, Section};
 use crate::model::page::ColumnDef;
 use crate::model::paragraph::Paragraph;
 use crate::model::path::{path_from_flat, DocumentPath, PathSegment};
@@ -176,6 +176,7 @@ fn collect_external_image_references(document: &Document) -> Vec<ExternalImageRe
 #[wasm_bindgen]
 pub struct HwpDocument {
     core: DocumentCore,
+    metadata: DocumentMetadata,
 }
 
 impl std::ops::Deref for HwpDocument {
@@ -196,7 +197,16 @@ impl std::ops::DerefMut for HwpDocument {
 /// 테스트 및 CLI 환경에서 `HwpDocument::from_bytes()` 등을 직접 호출할 수 있도록 한다.
 impl HwpDocument {
     pub fn from_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
-        DocumentCore::from_bytes(data).map(|core| HwpDocument { core })
+        let metadata = if matches!(
+            crate::parser::detect_format(data),
+            crate::parser::FileFormat::Hwpx
+        ) {
+            crate::parser::hwpx::parse_hwpx_metadata(data)
+                .map_err(|e| HwpError::InvalidFile(e.to_string()))?
+        } else {
+            DocumentMetadata::default()
+        };
+        DocumentCore::from_bytes(data).map(|core| HwpDocument { core, metadata })
     }
 
     pub fn find_initial_column_def(paragraphs: &[Paragraph]) -> ColumnDef {
@@ -244,6 +254,78 @@ impl HwpDocument {
 
         1
     }
+
+    pub fn create_blank_document_native(&mut self) -> Result<String, HwpError> {
+        let result = self.core.create_blank_document_native()?;
+        self.metadata = DocumentMetadata::default();
+        Ok(result)
+    }
+
+    pub fn set_document_metadata_native(&mut self, json: &str) -> Result<String, HwpError> {
+        const FIELDS: [&str; 5] = ["title", "subject", "author", "keywords", "description"];
+        let value: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| HwpError::RenderError(format!("invalid metadata JSON: {e}")))?;
+        let object = value.as_object().ok_or_else(|| {
+            HwpError::RenderError("document metadata must be a JSON object".to_string())
+        })?;
+        if object.is_empty() {
+            return Err(HwpError::RenderError(
+                "document metadata requires at least one field".to_string(),
+            ));
+        }
+        if let Some(field) = object
+            .keys()
+            .find(|field| !FIELDS.contains(&field.as_str()))
+        {
+            return Err(HwpError::RenderError(format!(
+                "unsupported document metadata field: {field}"
+            )));
+        }
+
+        let mut changed = 0u32;
+        for field in FIELDS {
+            let Some(value) = object.get(field) else {
+                continue;
+            };
+            let value = value.as_str().ok_or_else(|| {
+                HwpError::RenderError(format!("document metadata {field} must be a string"))
+            })?;
+            let target = match field {
+                "title" => &mut self.metadata.title,
+                "subject" => &mut self.metadata.subject,
+                "author" => &mut self.metadata.author,
+                "keywords" => &mut self.metadata.keywords,
+                "description" => &mut self.metadata.description,
+                _ => unreachable!(),
+            };
+            if target != value {
+                *target = value.to_string();
+                changed += 1;
+            }
+        }
+
+        Ok(format!(
+            "{{\"ok\":true,\"changed\":{},\"metadata\":{}}}",
+            changed,
+            self.get_document_metadata_native()
+        ))
+    }
+
+    pub fn get_document_metadata_native(&self) -> String {
+        serde_json::json!({
+            "title": self.metadata.title,
+            "subject": self.metadata.subject,
+            "author": self.metadata.author,
+            "keywords": self.metadata.keywords,
+            "description": self.metadata.description,
+        })
+        .to_string()
+    }
+
+    pub fn export_hwpx_with_metadata_native(&self) -> Result<Vec<u8>, HwpError> {
+        crate::serializer::hwpx::serialize_hwpx_with_metadata(self.document(), &self.metadata)
+            .map_err(|e| HwpError::RenderError(e.to_string()))
+    }
 }
 
 #[wasm_bindgen]
@@ -251,9 +333,7 @@ impl HwpDocument {
     /// HWP 파일 바이트를 로드하여 문서 객체를 생성한다.
     #[wasm_bindgen(constructor)]
     pub fn new(data: &[u8]) -> Result<HwpDocument, JsValue> {
-        DocumentCore::from_bytes(data)
-            .map(|core| HwpDocument { core })
-            .map_err(|e| e.into())
+        HwpDocument::from_bytes(data).map_err(|e| e.into())
     }
 
     /// 빈 문서 생성 (테스트/미리보기용)
@@ -261,7 +341,10 @@ impl HwpDocument {
     pub fn create_empty() -> HwpDocument {
         let mut core = DocumentCore::new_empty();
         core.paginate();
-        HwpDocument { core }
+        HwpDocument {
+            core,
+            metadata: DocumentMetadata::default(),
+        }
     }
 
     /// 내장 템플릿에서 빈 문서를 생성한다.
@@ -271,6 +354,19 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = createBlankDocument)]
     pub fn create_blank_document(&mut self) -> Result<String, JsValue> {
         self.create_blank_document_native().map_err(|e| e.into())
+    }
+
+    /// HWPX 공개 문서 메타데이터를 부분 갱신한다.
+    #[wasm_bindgen(js_name = setDocumentMetadata)]
+    pub fn set_document_metadata(&mut self, json: &str) -> Result<String, JsValue> {
+        self.set_document_metadata_native(json)
+            .map_err(|e| e.into())
+    }
+
+    /// 현재 HWPX 공개 문서 메타데이터를 반환한다.
+    #[wasm_bindgen(js_name = getDocumentMetadata)]
+    pub fn get_document_metadata(&self) -> String {
+        self.get_document_metadata_native()
     }
 
     /// 문단부호(¶) 표시 여부를 설정한다.
@@ -4292,7 +4388,8 @@ impl HwpDocument {
     /// Document IR을 HWPX(ZIP+XML)로 직렬화하여 반환한다.
     #[wasm_bindgen(js_name = exportHwpx)]
     pub fn export_hwpx(&self) -> Result<Vec<u8>, JsValue> {
-        self.export_hwpx_native().map_err(|e| e.into())
+        self.export_hwpx_with_metadata_native()
+            .map_err(|e| e.into())
     }
 
     /// 어댑터 적용 + HWP 직렬화 + 자기 재로드 검증을 수행하고 결과를 JSON 으로 반환한다 (#178).
@@ -4750,10 +4847,18 @@ impl HwpDocument {
         use crate::document_core::helpers::{json_i32, json_str};
         use crate::model::style::Style;
 
+        if self.core.document.doc_info.styles.len() >= (u8::MAX as usize + 1) {
+            return -1;
+        }
         let name = json_str(json, "name").unwrap_or_default();
         let english_name = json_str(json, "englishName").unwrap_or_default();
-        let style_type = json_i32(json, "type").unwrap_or(0) as u8;
-        let next_style_id = json_i32(json, "nextStyleId").unwrap_or(0) as u8;
+        let style_type = json_i32(json, "type").unwrap_or(0);
+        let next_style_id = json_i32(json, "nextStyleId").unwrap_or(0);
+        if !(0..=1).contains(&style_type) || !(0..=u8::MAX as i32).contains(&next_style_id) {
+            return -1;
+        }
+        let style_type = style_type as u8;
+        let next_style_id = next_style_id as u8;
 
         // 기본 "바탕글" 스타일(ID 0)의 CharShape/ParaShape를 복사
         let base_style = self.core.document.doc_info.styles.first();

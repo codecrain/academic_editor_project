@@ -11,6 +11,67 @@ fn test_create_empty_document() {
 }
 
 #[test]
+fn document_metadata_roundtrips_through_exported_hwpx() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native().unwrap();
+    let result = doc
+        .set_document_metadata_native(
+            r#"{
+                "title":"2026년 안전 & 운영계획",
+                "subject":"공공기관 <확정본>",
+                "author":"데이터혁신처",
+                "keywords":"안전, 예산",
+                "description":"감사 대응용"
+            }"#,
+        )
+        .unwrap();
+    assert!(result.contains(r#""changed":5"#));
+
+    let bytes = doc.export_hwpx_with_metadata_native().unwrap();
+    let reloaded = HwpDocument::from_bytes(&bytes).unwrap();
+    let metadata = reloaded.get_document_metadata_native();
+    assert!(metadata.contains(r#""title":"2026년 안전 & 운영계획""#));
+    assert!(metadata.contains(r#""subject":"공공기관 <확정본>""#));
+    assert!(metadata.contains(r#""author":"데이터혁신처""#));
+    assert!(metadata.contains(r#""keywords":"안전, 예산""#));
+    assert!(metadata.contains(r#""description":"감사 대응용""#));
+}
+
+#[test]
+fn paragraph_shape_parser_preserves_named_style_border_spacing() {
+    let mods = crate::document_core::helpers::parse_para_shape_mods(
+        r#"{"alignment":"center","borderSpacing":[10,20,30,40]}"#,
+    );
+    assert_eq!(mods.border_spacing, Some([10, 20, 30, 40]));
+}
+
+#[test]
+fn style_creation_and_application_reject_ids_above_hwp_u8_storage() {
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native().unwrap();
+    let base_style = doc.document().doc_info.styles[0].clone();
+    let before = doc.document().doc_info.styles.len();
+    assert_eq!(
+        doc.create_style(r#"{"name":"invalid-next","type":0,"nextStyleId":256}"#),
+        -1
+    );
+    assert_eq!(doc.document().doc_info.styles.len(), before);
+
+    doc.document_mut()
+        .doc_info
+        .styles
+        .resize(256, base_style.clone());
+    let before = doc.document().doc_info.styles.len();
+    assert_eq!(doc.create_style(r#"{"name":"overflow","type":0}"#), -1);
+    assert_eq!(doc.document().doc_info.styles.len(), before);
+
+    doc.document_mut().doc_info.styles.push(base_style);
+    let result = doc.apply_style_native(0, 0, 256);
+    assert!(result.is_err());
+    assert_eq!(doc.document().sections[0].paragraphs[0].style_id, 0);
+}
+
+#[test]
 fn test_empty_document_info() {
     let doc = HwpDocument::create_empty();
     let info = doc.get_document_info();

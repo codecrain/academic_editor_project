@@ -579,6 +579,9 @@ pub(crate) fn parse_para_shape_mods(json: &str) -> crate::model::style::ParaShap
     if let Some(v) = json_i32(json, "koreanBreakUnit") {
         mods.korean_break_unit = Some(v as u8);
     }
+    if let Some(arr) = parse_json_i16_array(json, "borderSpacing", 4) {
+        mods.border_spacing = Some([arr[0], arr[1], arr[2], arr[3]]);
+    }
 
     mods
 }
