@@ -7,6 +7,8 @@ function objectSchema(properties, required = []) {
   };
 }
 
+const EDITOR_MCP_SCHEMA_FACTORY = Symbol.for('academic-editor.mcp-schema-factory');
+
 function createEditorMcpTools({
   format,
   commandCategories,
@@ -205,10 +207,18 @@ function createEditorMcpTools({
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
   ];
-  return Object.freeze(tools.map((tool) => Object.freeze(tool)));
+  return Object.freeze(tools.map((tool) => {
+    const generatedTool = { ...tool };
+    Object.defineProperty(generatedTool, EDITOR_MCP_SCHEMA_FACTORY, {
+      value: 'editor-common-v1',
+      enumerable: false,
+    });
+    return Object.freeze(generatedTool);
+  }));
 }
 
 export {
+  EDITOR_MCP_SCHEMA_FACTORY,
   createEditorMcpTools,
   objectSchema,
 };
