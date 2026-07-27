@@ -627,13 +627,15 @@ object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-The HWPX catalog has 32 canonical entries. Twenty-nine currently report
-`readiness=available`. `setDocumentMetadata`, `setHeaderFooter`, and
-`insertFootnote` remain canonical but report `readiness=unavailable`. No
+The HWPX catalog has 32 canonical entries. Twenty-seven currently report
+`readiness=available`. `table.insertCaption`, `setRunStyle`,
+`setDocumentMetadata`, `setHeaderFooter`, and `insertFootnote` remain canonical
+but report `readiness=unavailable`. No
 published `@rhwp/core` package through 0.8.2 exposes the required metadata
-set/get methods; on the pinned 0.7.15 artifact, header/footer content does not
-survive export/reopen and footnote insertion traps on the supported blank
-fixture. Ready structural commands report `execution=structural-adapter`; this
+set/get methods; on the pinned 0.7.15 artifact, table captions, run formatting,
+and header/footer content do not survive export/reopen, while footnote
+insertion traps on the supported blank fixture. Ready structural commands
+report `execution=structural-adapter`; this
 describes their execution path, not a missing implementation.
 `appendParagraph` instead reports `execution=preserve-package-adapter` so it
 can clone inspected paragraph and run style IDs exactly while still passing
@@ -794,7 +796,9 @@ Explicit DOCX-like table creation:
 
 HWPX `table.create` is ready through the structural adapter and requires an
 inspected paragraph `target`, `rows`, and `columns`; query the HWPX catalog for
-its format-specific optional width, height, cell text, and caption fields.
+its format-specific optional width, height, and cell text fields. Native
+caption creation is unavailable in the installed runtime, and `caption` is
+rejected before mutation.
 
 On success, the matching `results` item returns `tableId`, `target`, and exact `dimensions` (`rowCount`, `colCount`, `cellCount`). Use that returned `tableId` for all subsequent `target_map`, `target_inspect`, and cell-write calls; do not guess `tbl_0` or select an older table by position.
 
@@ -1387,9 +1391,10 @@ object.deleteTextBoxByText
 object.replaceTextBoxText
 ```
 
-`setDocumentMetadata`, `setHeaderFooter`, and `insertFootnote` are listed
-because they remain canonical contract entries, but their current `readiness`
-is `unavailable` and apply validation fails closed.
+`table.insertCaption`, `setRunStyle`, `setDocumentMetadata`,
+`setHeaderFooter`, and `insertFootnote` are listed because they remain
+canonical contract entries, but their current `readiness` is `unavailable`
+and apply validation fails closed.
 Tracked replacement is limited to one `hp:t` run and must be the only command
 in its atomic batch. The API does not yet list, accept, or reject tracked
 changes.

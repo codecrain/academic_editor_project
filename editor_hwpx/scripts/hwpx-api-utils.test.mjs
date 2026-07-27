@@ -656,7 +656,6 @@ test('HWPX API structural table creation survives qualification and reopen', asy
       width: 12_000,
       height: 6_000,
       cellTexts: ['A', 'B', 'C', 'D'],
-      caption: 'Actual table',
     },
     {
       commandId: 'actual-cell-style',
@@ -682,6 +681,68 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
 });
 
+test('HWPX API rejects table.insertCaption before revision when installed export cannot preserve it', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  session.commandsBatch([{
+    op: 'table.create',
+    target: { paragraph: { section: 0, number: 0 } },
+    rows: 1,
+    columns: 1,
+    cellTexts: ['A'],
+  }]);
+  const table = session.readJson().tables[0];
+  const beforeRevision = session.revision;
+  const beforeBytes = session.save().bytes;
+
+  assert.throws(() => session.commandsBatch([{
+    op: 'table.insertCaption',
+    target: table.cells[0].location,
+    text: 'CAP',
+  }]), /not ready in the installed runtime/);
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+});
+
+test('HWPX API rejects table.create caption before mutation when installed export cannot preserve it', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const beforeRevision = session.revision;
+
+  assert.throws(() => session.commandsBatch([{
+    op: 'table.create',
+    target: { paragraph: { section: 0, number: 0 } },
+    rows: 1,
+    columns: 1,
+    caption: 'CAP',
+  }]), /caption is not ready/);
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(Buffer.compare(session.save().bytes, input), 0);
+});
+
+test('HWPX API rejects setRunStyle before revision when installed export cannot preserve it', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  session.commandsBatch([{
+    op: 'insertText',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+    text: 'ABCDE',
+  }]);
+  const beforeRevision = session.revision;
+  const beforeBytes = session.save().bytes;
+
+  assert.throws(() => session.commandsBatch([{
+    op: 'setRunStyle',
+    target: { native: { section: 0, para: 0, offset: 0, length: 2 } },
+    style: { bold: true },
+  }]), /not ready in the installed runtime/);
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+});
+
 test('HWPX API appendParagraph clones inspected style and text through qualification and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
@@ -701,6 +762,35 @@ test('HWPX API appendParagraph clones inspected style and text through qualifica
   assert.equal(
     reopened.inspectTarget({ paragraph: { section: 0, number: 5 } }).currentText,
     '복제 서식 신규 문단',
+  );
+  assert.deepEqual(
+    reopened.paragraphStyleIds({ paragraph: { section: 0, number: 5 } }),
+    sourceStyleIds,
+  );
+});
+
+test('HWPX API appendParagraph clones inspected table-cell style IDs through qualification and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const sourceCell = session.readJson().tables
+    .flatMap(table => table.cells)
+    .find(cell => cell.paragraphs.length > 0);
+  assert.ok(sourceCell);
+  const sourceStyleIds = session.paragraphStyleIds(sourceCell.location);
+
+  const result = session.commandsBatch([{
+    op: 'appendParagraph',
+    target: { paragraph: { section: 0, number: 4 } },
+    styleSource: sourceCell.location,
+    text: '표 셀 서식 복제 문단',
+  }]);
+
+  assert.equal(result.qualification.ok, true);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(
+    reopened.inspectTarget({ paragraph: { section: 0, number: 5 } }).currentText,
+    '표 셀 서식 복제 문단',
   );
   assert.deepEqual(
     reopened.paragraphStyleIds({ paragraph: { section: 0, number: 5 } }),

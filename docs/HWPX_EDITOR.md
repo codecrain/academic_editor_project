@@ -30,10 +30,10 @@ share package mutation logic.
 | Area | DOCX | HWPX |
 | --- | --- | --- |
 | REST/MCP lifecycle | Open, bounded read, inspect, atomic apply, quality, render, checkpoint, finalize, artifact handoff, discard | Same lifecycle |
-| Canonical catalog | 29 operations | 32 operations (29 ready, 3 unavailable) |
+| Canonical catalog | 29 operations | 32 operations (27 ready, 5 unavailable) |
 | Existing text/table/style edit | Supported | Supported |
 | Existing image replacement/generation | Supported | Supported |
-| New table creation/caption | Supported | Supported through the structural adapter |
+| New table creation/caption | Supported | Table creation is ready; native captions remain unavailable |
 | Metadata/page setup/header/footer/footnote | Supported | Page setup is ready; metadata, header/footer, and footnote remain unavailable |
 | Render evidence | Baseline/current WebP | Baseline/current RHWP SVG |
 | PDF export | Supported through isolated UNO | Not implemented |
@@ -101,14 +101,16 @@ preserve-package commands use `execution=preserve-package`; native tracked
 replacement uses `tracked-package-transform`; the promoted structural
 commands use `structural-adapter`. `appendParagraph` uses the qualified
 `preserve-package-adapter` so inspected paragraph/run style IDs can be copied
-exactly instead of being approximated through format properties. Three
+exactly instead of being approximated through format properties. Five
 structural entries remain canonical
 with `readiness=unavailable`. Repository source implements
 `setDocumentMetadata`, while no published `@rhwp/core` artifact through 0.8.2
 exposes both metadata methods. The pinned published 0.7.15 artifact exposes
-the header/footer and footnote method names, but header/footer content does not
-survive export/reopen and footnote insertion traps on the supported
-blank-document fixture. Validation rejects all three operations before
+the relevant method names, but table captions and run formatting disappear
+during export/reopen, header/footer content does not survive export/reopen, and
+footnote insertion traps on the supported blank-document fixture. Validation
+rejects all five operations before mutation. `table.create` remains ready
+without its former caption option; passing `caption` is rejected before
 mutation.
 
 Query `editor_hwpx_command_catalog` or
@@ -146,6 +148,8 @@ These capabilities are not represented as supported:
   `unsupported_encrypted_hwpx` with an actionable message;
 - HWPX PDF export;
 - document metadata mutation with the currently published RHWP artifact;
+- native table-caption and run-format mutation with the pinned published RHWP
+  artifact;
 - header/footer and footnote mutation with the pinned published RHWP artifact;
 - native numbering-definition creation (list commands write visible list
   text while preserving paragraph style);

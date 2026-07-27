@@ -829,13 +829,16 @@ function applyInsertTableCaption(doc, command, context) {
     'insertTextInCell',
     ['charOffset'],
   );
-  return structuralResult(command, {
-    caption: captionNative,
-    text: textNative,
-  }, {
-    kind: 'tableCaption',
-    ...table,
-  });
+  return {
+    ...structuralResult(command, {
+      caption: captionNative,
+      text: textNative,
+    }, {
+      kind: 'tableCaption',
+      ...table,
+    }, []),
+    expectedCaptionText: command.text,
+  };
 }
 
 const IMAGE_MIME_TO_EXTENSION = new Map([
@@ -1707,9 +1710,13 @@ function applyRunStyle(doc, command, context) {
       JSON.stringify(style),
     ];
   const native = parseNativeResult(applyFormat(...args), methodName);
-  return structuralResult(command, native, cellTarget
-    ? target
-    : publicParagraphTarget(target.sectionIndex, target.paragraphIndex, range.end));
+  return {
+    ...structuralResult(command, native, cellTarget
+      ? target
+      : publicParagraphTarget(target.sectionIndex, target.paragraphIndex, range.end)),
+    expectedRunStyle: command.style,
+    expectedRunRange: range,
+  };
 }
 
 function applyParagraphStyle(doc, command, context) {

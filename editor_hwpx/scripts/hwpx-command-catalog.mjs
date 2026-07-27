@@ -220,7 +220,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Create a new HWPX table after an inspected body paragraph.',
     required: ['target', 'rows', 'columns'],
-    optional: ['width', 'height', 'cellTexts', 'caption'],
+    optional: ['width', 'height', 'cellTexts'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: [
@@ -237,7 +237,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       width: 'Optional table width in HWP units.',
       height: 'Optional table height in HWP units.',
       cellTexts: 'Optional row-major array of initial cell text.',
-      caption: 'Optional caption text.',
     },
     example: {
       op: 'table.create',
@@ -253,6 +252,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'text'],
     optional: ['position'],
     precondition: 'target_inspect',
+    readiness: 'unavailable',
     execution: 'structural-adapter',
     nativeMethods: ['setTableProperties', 'insertTextInCell'],
     enum: { position: ['before', 'after'] },
@@ -262,6 +262,9 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       target: { tableId: 'tbl_0', cell: { number: 0 } },
       text: '표 1. 평가 결과',
     },
+    notes: [
+      'The pinned published @rhwp/core@0.7.15 reports success but drops the caption during structural export and reopen.',
+    ],
   }),
   command({
     op: 'style.applyText',
@@ -325,11 +328,15 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'style'],
     aliases: ['style.setRunStyle'],
     precondition: 'target_inspect',
+    readiness: 'unavailable',
     execution: 'structural-adapter',
     nativeMethods: [
       'applyCharFormat',
       'applyCharFormatInCell',
       'findOrCreateFontId',
+    ],
+    notes: [
+      'The pinned published @rhwp/core@0.7.15 reports success but loses the requested run formatting during structural export and reopen.',
     ],
     fields: { target: locationField, style: 'Character format such as bold, italic, font size, color, and font family.' },
     example: { op: 'setRunStyle', target: { paragraph: { section: 0, number: 1 } }, style: { bold: true, fontSizePt: 12 } },
@@ -471,7 +478,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Create a named HWPX paragraph or character style.',
     required: ['name', 'kind', 'properties'],
     execution: 'structural-adapter',
-    nativeMethods: ['createStyle', 'updateStyleShapes'],
+    nativeMethods: ['createStyle', 'updateStyleShapes', 'findOrCreateFontId'],
     enum: { kind: ['paragraph', 'character'] },
     fields: {
       name: 'Unique style name.',
@@ -773,6 +780,11 @@ function validateHwpxCommands(commands) {
           throw new Error(`table.writeCells cells[${cellIndex}] requires a text string; an empty string explicitly clears the cell.`);
         }
       });
+    }
+    if (entry.op === 'table.create' && value.caption !== undefined) {
+      throw new Error(
+        'table.create caption is not ready in the installed runtime; create the table without caption.',
+      );
     }
     if (entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering') {
       if (!Array.isArray(value.items) || value.items.length === 0

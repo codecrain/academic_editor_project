@@ -518,7 +518,7 @@ test('table.insertCaption rejects an existing native caption before mutation', (
   assert.deepEqual(calls, []);
 });
 
-test('table.create applies advertised width, height, cell text, and caption options', () => {
+test('table.create lower-level adapter exercises width, height, cell text, and unpromoted caption path', () => {
   const calls = [];
   const doc = {
     getParagraphLength: () => 2,

@@ -1106,6 +1106,37 @@ function verifyStructuralTarget(session, target, result = null) {
         );
       }
     }
+    if (result?.expectedRunStyle && result?.expectedRunRange) {
+      const expected = result.expectedRunStyle;
+      const range = result.expectedRunRange;
+      const offsets = [...new Set([range.start, Math.max(range.start, range.end - 1)])];
+      const aliases = {
+        fontSizePt: ['fontSize', value => Number(value) * 100],
+      };
+      for (const offset of offsets) {
+        const properties = tryJson(() => session.doc.getCharPropertiesAt(
+          target.sectionIndex,
+          target.paragraphIndex,
+          offset,
+        ));
+        for (const [field, expectedValue] of Object.entries(expected)) {
+          const [actualField, transform] = aliases[field] ?? [field, value => value];
+          if (!properties || properties[actualField] !== transform(expectedValue)) {
+            throw structuralBatchError(
+              'HWPX_CREATED_TARGET_MISMATCH',
+              'Structural run formatting did not survive reopening exactly.',
+              {
+                target,
+                offset,
+                field,
+                expected: transform(expectedValue),
+                actual: properties?.[actualField],
+              },
+            );
+          }
+        }
+      }
+    }
     return;
   }
   if (target.kind === 'table' || target.kind === 'tableCaption') {
@@ -1119,6 +1150,58 @@ function verifyStructuralTarget(session, target, result = null) {
         'A structural table target was not found after reopening the candidate.',
         { target },
       );
+    }
+    if (target.kind === 'tableCaption') {
+      const properties = tryJson(() => session.doc.getTableProperties(
+        target.sectionIndex,
+        target.paragraphIndex,
+        target.controlIndex,
+      ));
+      if (!properties || properties.hasCaption !== true) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISSING',
+          'A structural table caption did not survive reopening the candidate.',
+          { target, properties },
+        );
+      }
+      const paragraphs = [];
+      try {
+        const paragraphCount = session.doc.getCellParagraphCount(
+          target.sectionIndex,
+          target.paragraphIndex,
+          target.controlIndex,
+          65534,
+        );
+        for (let paragraphIndex = 0; paragraphIndex < paragraphCount; paragraphIndex += 1) {
+          const length = session.doc.getCellParagraphLength(
+            target.sectionIndex,
+            target.paragraphIndex,
+            target.controlIndex,
+            65534,
+            paragraphIndex,
+          );
+          paragraphs.push(session.doc.getTextInCell(
+            target.sectionIndex,
+            target.paragraphIndex,
+            target.controlIndex,
+            65534,
+            paragraphIndex,
+            0,
+            length,
+          ));
+        }
+      } catch {
+        paragraphs.length = 0;
+      }
+      const captionText = paragraphs.join('\n');
+      if (result?.expectedCaptionText !== undefined
+        && captionText !== result.expectedCaptionText) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural table caption text did not survive reopening exactly.',
+          { target, expectedCaptionText: result.expectedCaptionText, captionText },
+        );
+      }
     }
     return;
   }

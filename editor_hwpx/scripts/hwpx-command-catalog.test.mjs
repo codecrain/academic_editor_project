@@ -83,6 +83,8 @@ test('HWPX command catalog separates readiness from execution for structural ope
   assert.equal(tracked.execution, 'tracked-package-transform');
   const unavailable = new Set([
     'setDocumentMetadata',
+    'table.insertCaption',
+    'setRunStyle',
     'setHeaderFooter',
     'insertFootnote',
   ]);
@@ -111,7 +113,12 @@ test('HWPX command catalog separates readiness from execution for structural ope
     op: 'setDocumentMetadata',
     title: '공공기관 업무보고',
   }]), /not ready in the installed runtime/);
-  for (const op of ['setHeaderFooter', 'insertFootnote']) {
+  for (const op of [
+    'table.insertCaption',
+    'setRunStyle',
+    'setHeaderFooter',
+    'insertFootnote',
+  ]) {
     const entry = getHwpxCommandCatalog({ op }).commands[0];
     assert.equal(entry.readiness, 'unavailable', op);
     assert.equal(entry.execution, 'structural-adapter', op);
@@ -121,7 +128,14 @@ test('HWPX command catalog separates readiness from execution for structural ope
 
 test('HWPX promoted contracts expose optional fields and enforced enums', () => {
   const createTable = getHwpxCommandCatalog({ op: 'table.create' }).commands[0];
-  assert.deepEqual(createTable.optional, ['width', 'height', 'cellTexts', 'caption']);
+  assert.deepEqual(createTable.optional, ['width', 'height', 'cellTexts']);
+  assert.throws(() => validateHwpxCommands([{
+    op: 'table.create',
+    target: { paragraph: { section: 0, number: 0 } },
+    rows: 1,
+    columns: 1,
+    caption: 'not ready',
+  }]), /caption is not ready/);
 
   const pageSetup = getHwpxCommandCatalog({ op: 'setPageSetup' }).commands[0];
   assert.deepEqual(pageSetup.enum.orientation, ['portrait', 'landscape']);

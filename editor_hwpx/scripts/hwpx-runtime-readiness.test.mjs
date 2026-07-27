@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -15,6 +21,7 @@ function artifactFixture(root, {
   name = '@rhwp/core',
   version = 'test',
   methods = [],
+  jsMethods = methods,
   marker = 'source',
 } = {}) {
   mkdirSync(root, { recursive: true });
@@ -23,7 +30,10 @@ function artifactFixture(root, {
     path.join(root, 'rhwp.d.ts'),
     `export class HwpDocument {\n${methods.map(method => `  ${method}(...args: unknown[]): unknown;`).join('\n')}\n}\n`,
   );
-  writeFileSync(path.join(root, 'rhwp.js'), `// ${marker}\n`);
+  writeFileSync(
+    path.join(root, 'rhwp.js'),
+    `// ${marker}\nexport class HwpDocument {\n${jsMethods.map(method => `  ${method}(...args) { return args; }`).join('\n')}\n}\n`,
+  );
   writeFileSync(path.join(root, 'rhwp_bg.wasm'), Buffer.from(marker));
   writeFileSync(path.join(root, 'rhwp_bg.wasm.d.ts'), `// ${marker}\n`);
 }
@@ -38,6 +48,44 @@ test('runtime readiness rejects an incomplete artifact with artifact, operation,
       && error.message.includes('@rhwp/core@0.7.15')
       && error.message.includes('deleteRange')
       && error.message.includes('deleteRange'),
+  );
+});
+
+test('runtime readiness rejects methods declared only in typings, not the executable wrapper', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-js-surface-'));
+  artifactFixture(root, {
+    version: 'declarations-only',
+    methods: [
+      'insertText',
+      'deleteRange',
+      'createTableEx',
+      'getCellProperties',
+      'resizeTableCells',
+      'insertTextInCell',
+      'setTableProperties',
+      'insertParagraph',
+      'insertPicture',
+      'setPageDef',
+      'createStyle',
+      'updateStyleShapes',
+      'applyStyle',
+      'applyCellStyle',
+      'applyCharFormat',
+      'applyCharFormatInCell',
+      'applyParaFormat',
+      'applyParaFormatInCell',
+      'findOrCreateFontId',
+    ],
+    jsMethods: [],
+  });
+
+  assert.throws(
+    () => validateCoreArtifact(root),
+    error => error.code === 'HWPX_CORE_METHOD_UNAVAILABLE'
+      && error.message.includes('@rhwp/core@declarations-only')
+      && error.message.includes('insertText')
+      && error.message.includes('JavaScript wrapper')
+      && error.details?.surface === 'javascript-wrapper',
   );
 });
 
@@ -152,6 +200,53 @@ test('failed staging copy leaves an existing destination byte-for-byte unchanged
   }), /simulated staging copy failure/);
   for (const [fileName, bytes] of before) {
     assert.deepEqual(readFileSync(path.join(destination, fileName)), bytes);
+  }
+});
+
+test('backup cleanup failure returns committed success with an explicit warning', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-cleanup-warning-'));
+  const source = path.join(root, 'source');
+  const destination = path.join(root, 'destination');
+  const methods = [
+    'insertText',
+    'insertParagraph',
+    'deleteRange',
+    'createTableEx',
+    'getCellProperties',
+    'resizeTableCells',
+    'insertTextInCell',
+    'setTableProperties',
+    'insertPicture',
+    'setPageDef',
+    'createStyle',
+    'updateStyleShapes',
+    'applyStyle',
+    'applyCellStyle',
+    'applyCharFormat',
+    'applyCharFormatInCell',
+    'applyParaFormat',
+    'applyParaFormatInCell',
+    'findOrCreateFontId',
+  ];
+  artifactFixture(source, { methods, marker: 'new-committed' });
+  artifactFixture(destination, { methods: ['existingMethod'], marker: 'old-backup' });
+
+  const result = materializeCoreArtifact(source, destination, {
+    removeBackup: target => {
+      assert.match(path.basename(target), /^\.destination\.backup-/);
+      throw new Error('simulated backup cleanup failure');
+    },
+  });
+
+  assert.equal(result.committed, true);
+  assert.equal(result.cleanupWarnings.length, 1);
+  assert.match(result.cleanupWarnings[0].message, /simulated backup cleanup failure/);
+  assert.equal(
+    readFileSync(path.join(destination, 'rhwp.js'), 'utf8').includes('new-committed'),
+    true,
+  );
+  for (const warning of result.cleanupWarnings) {
+    if (warning.backupPath) rmSync(warning.backupPath, { recursive: true, force: true });
   }
 });
 

@@ -41,9 +41,9 @@ function readArtifactIdentity(artifactRoot) {
   return `${String(pkg.name || path.basename(artifactRoot))}@${String(pkg.version || 'unknown')}`;
 }
 
-function declaredDocumentMethods(typeDeclarations) {
+function documentMethodsFromClass(source) {
   const methods = new Set();
-  const classMatch = String(typeDeclarations).match(
+  const classMatch = String(source).match(
     /export\s+class\s+HwpDocument\s*\{([\s\S]*?)^\}/m,
   );
   if (!classMatch) return methods;
@@ -51,6 +51,14 @@ function declaredDocumentMethods(typeDeclarations) {
     methods.add(match[1]);
   }
   return methods;
+}
+
+function declaredDocumentMethods(typeDeclarations) {
+  return documentMethodsFromClass(typeDeclarations);
+}
+
+function executableDocumentMethods(javaScriptWrapper) {
+  return documentMethodsFromClass(javaScriptWrapper);
 }
 
 function readyNativeRequirements(catalog = HWPX_COMMAND_CATALOG) {
@@ -72,28 +80,44 @@ function validateCoreArtifact(artifactRoot, options = {}) {
       );
     }
   }
-  const methods = declaredDocumentMethods(
+  const declaredMethods = declaredDocumentMethods(
     readFileSync(path.join(resolvedRoot, 'rhwp.d.ts'), 'utf8'),
   );
+  const executableMethods = executableDocumentMethods(
+    readFileSync(path.join(resolvedRoot, 'rhwp.js'), 'utf8'),
+  );
   for (const requirement of readyNativeRequirements(options.catalog)) {
-    if (!methods.has(requirement.method)) {
+    const missingSurface = !declaredMethods.has(requirement.method)
+      ? { label: 'TypeScript declarations', code: 'typescript-declarations' }
+      : !executableMethods.has(requirement.method)
+        ? { label: 'JavaScript wrapper', code: 'javascript-wrapper' }
+        : null;
+    if (missingSurface) {
       throw readinessError(
         'HWPX_CORE_METHOD_UNAVAILABLE',
-        `${artifact} cannot execute ${requirement.op}: HwpDocument.${requirement.method} is unavailable.`,
+        `${artifact} cannot execute ${requirement.op}: HwpDocument.${requirement.method} is unavailable on the ${missingSurface.label} surface.`,
         {
           artifact,
           artifactRoot: resolvedRoot,
           operation: requirement.op,
           method: requirement.method,
+          surface: missingSurface.code,
         },
       );
     }
   }
+  const methods = [...declaredMethods]
+    .filter(method => executableMethods.has(method))
+    .sort();
   return {
     ok: true,
     artifact,
     artifactRoot: resolvedRoot,
-    methods: [...methods].sort(),
+    methods,
+    surfaces: {
+      typescriptDeclarations: [...declaredMethods].sort(),
+      javascriptWrapper: [...executableMethods].sort(),
+    },
     requirements: readyNativeRequirements(options.catalog),
   };
 }
@@ -107,7 +131,10 @@ function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
   const staging = path.join(parent, `.${path.basename(destination)}.staging-${suffix}`);
   const backup = path.join(parent, `.${path.basename(destination)}.backup-${suffix}`);
   let destinationMoved = false;
+  let committed = false;
   const copyArtifact = options.copyArtifact ?? cpSync;
+  const removeBackup = options.removeBackup ?? rmSync;
+  const cleanupWarnings = [];
 
   mkdirSync(parent, { recursive: true });
   try {
@@ -118,24 +145,36 @@ function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
       destinationMoved = true;
     }
     renameSync(staging, destination);
-    if (destinationMoved) rmSync(backup, { recursive: true, force: true });
+    committed = true;
   } catch (cause) {
     rmSync(staging, { recursive: true, force: true });
-    if (destinationMoved && !existsSync(destination) && existsSync(backup)) {
+    if (destinationMoved && !committed && !existsSync(destination) && existsSync(backup)) {
       renameSync(backup, destination);
     }
     throw cause;
-  } finally {
-    if (existsSync(backup) && existsSync(destination)) {
-      rmSync(backup, { recursive: true, force: true });
+  }
+  if (destinationMoved) {
+    try {
+      removeBackup(backup, { recursive: true, force: true });
+    } catch (cause) {
+      cleanupWarnings.push({
+        code: 'HWPX_CORE_BACKUP_CLEANUP_FAILED',
+        message: cause.message,
+        backupPath: backup,
+      });
     }
   }
-  return readiness;
+  return {
+    ...readiness,
+    committed: true,
+    cleanupWarnings,
+  };
 }
 
 export {
   CORE_ARTIFACT_FILES,
   declaredDocumentMethods,
+  executableDocumentMethods,
   materializeCoreArtifact,
   readyNativeRequirements,
   validateCoreArtifact,

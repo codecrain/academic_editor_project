@@ -691,11 +691,6 @@ const hwpxCommandCases = [
     },
   },
   {
-    name: 'setRunStyle',
-    run: (doc) => doc.applyCharFormat(0, 0, 0, 2, JSON.stringify({ bold: true, textColor: '#ff0000' })),
-    assertDoc: (doc) => assert.match(doc.getTextRange(0, 0, 0, doc.getParagraphLength(0, 0)), /Hello/),
-  },
-  {
     name: 'setParagraphStyle',
     run: (doc) => doc.applyParaFormat(0, 0, JSON.stringify({ alignment: 'center', lineSpacing: 120 })),
     assertDoc: (doc) => {
