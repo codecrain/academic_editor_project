@@ -115,6 +115,7 @@ test('native startup and sh.start deployment both gate runtime launch on academi
 test('font installer publishes a completed manifest only after every required fc-match assertion', () => {
   const installer = readProjectFile('editor_docx/scripts/install-academic-fonts.sh');
 
+  assert.match(installer, /chown _apt:root "\$WORK_DIR\/packages"/);
   const installCompleteIndex = installer.indexOf("printf 'install_complete=yes");
   for (const family of [
     'Times New Roman',

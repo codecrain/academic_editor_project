@@ -130,3 +130,37 @@ test('MCP enforces bounded pagination arguments before gateway execution', async
   assert.equal(valid.result.isError, false);
   assert.equal(calls.length, 1);
 });
+
+test('MCP advertises HWPX parity tools with the HWPX command enum', async () => {
+  const listed = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/list',
+    params: {},
+  }, {
+    executeTool: async () => ({ ok: true }),
+  });
+  const tools = new Map(listed.result.tools.map((tool) => [tool.name, tool]));
+  for (const name of [
+    'editor_hwpx_open',
+    'editor_hwpx_read_json',
+    'editor_hwpx_target_map',
+    'editor_hwpx_target_inspect',
+    'editor_hwpx_object_inventory',
+    'editor_hwpx_command_catalog',
+    'editor_hwpx_apply',
+    'editor_hwpx_render_pages',
+    'editor_hwpx_quality_check',
+    'editor_hwpx_save_source',
+    'editor_hwpx_save_checkpoint',
+    'editor_hwpx_artifact_read',
+    'editor_hwpx_artifact_delete',
+  ]) {
+    assert.ok(tools.has(name), `${name} must be advertised`);
+  }
+  assert.equal(tools.has('editor_hwpx_export_pdf'), false);
+  const opEnum = tools.get('editor_hwpx_apply').inputSchema.properties.commands.items.properties.op.enum;
+  assert.ok(opEnum.includes('text.replaceParagraph'));
+  assert.ok(opEnum.includes('object.replaceTextBoxText'));
+  assert.ok(opEnum.includes('setDocumentMetadata'));
+});

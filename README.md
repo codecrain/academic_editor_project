@@ -20,6 +20,13 @@ the open-source tree.
 - Public debranding patch files applied before compilation.
 - Runtime start/status/stop scripts for native pm2 and Docker fallback.
 - License and compliance documentation.
+- Unified DOCX/HWPX REST and MCP editing contracts.
+- A versioned 100-case public-sector HWPX acceptance suite.
+
+Current documentation starts at [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
+The complete transport contract is [API.md](API.md), and the reproducible HWPX
+acceptance corpus is under
+[evaluation/hwpx-public-sector-v1](evaluation/hwpx-public-sector-v1).
 
 The private service repository owns the WOPI host, authentication, storage,
 database, project/report UI, and deployment secrets.
@@ -60,24 +67,26 @@ only those editor runtimes. Local dev defaults to these stable subpaths:
 
 ## MCP Endpoint
 
-The editor gateway also exposes a stateless Streamable HTTP MCP endpoint at
-`/mcp`. It implements `initialize`, `ping`, `tools/list`, and `tools/call` for
-the DOCX open/read/target/inspect/apply/quality/finalize workflow. Finalization
-returns an opaque `artifactId`; an authenticated application server retrieves
-the bytes with `editor_docx_artifact_read` only after user approval. The model
-and browser never receive a server-local artifact path. Successfully applied
-artifacts are deleted immediately; abandoned artifacts expire after
+The editor gateway exposes a stateless Streamable HTTP MCP endpoint at `/mcp`.
+It implements `initialize`, `ping`, `tools/list`, and `tools/call` for both
+DOCX and HWPX open/read/target/inspect/apply/quality/render/finalize workflows.
+Finalization returns an opaque `artifactId`; an authenticated application
+server retrieves bytes with the matching `editor_docx_artifact_read` or
+`editor_hwpx_artifact_read` only after user approval. The model and browser
+never receive a server-local artifact path. Successfully applied artifacts are
+deleted immediately; abandoned artifacts expire after
 `EDITOR_MCP_ARTIFACT_TTL_MS` (24 hours by default).
 
-Agents must call `editor_docx_discard(documentId)` when an edit is cancelled or
-cannot be finalized. Discard closes the isolated session and clears its MCP
+Agents must call the matching `editor_docx_discard(documentId)` or
+`editor_hwpx_discard(documentId)` when an edit is cancelled or cannot be
+finalized. Discard closes the isolated session and clears its MCP
 inspection/inventory/quality/lock state without creating an artifact; repeated
 calls complete safely with `deleted=false`.
 
-Large papers are read through bounded projections. `editor_docx_read_json`
+Large papers are read through bounded projections. Each format's `read_json`
 defaults to one compact `summary` item and can page `blocks` or `tables` with
 `nextCursor`; text and table-cell previews have hard caps.
-`editor_docx_target_map` pages exactly one `paragraph` or `cell` stream and
+Each format's `target_map` pages exactly one `paragraph` or `cell` stream and
 returns one `targets` array (no duplicated `editableTargets`/`locations`
 aliases). Cursors are integrity-protected and fixed to the current document
 revision and query. After any apply, an old cursor fails with `stale_cursor` and

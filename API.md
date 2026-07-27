@@ -7,8 +7,8 @@ Audience: an LLM agent with no prior project context.
 The production agent integration uses the Streamable HTTP endpoint `POST /mcp`
 with JSON-RPC 2.0. Call `tools/list` to discover the compact schemas instead of
 placing this full API document in every model context. The MCP broker delegates
-to the same `/v1/docx` implementation; it does not duplicate document editing
-logic.
+to the same `/v1/docx` and `/v1/hwpx` implementations; it does not duplicate
+document editing logic.
 
 DOCX MCP tools:
 
@@ -25,29 +25,50 @@ DOCX MCP tools:
 - `editor_docx_quality_check`
 - `editor_docx_export_pdf`
 - `editor_docx_save_source`
+- `editor_docx_save_checkpoint`
 - `editor_docx_artifact_read` (application-side binary handoff)
 - `editor_docx_artifact_delete` (delete a handed-off DOCX/PDF artifact)
 
-`editor_docx_command_catalog` is the machine-readable source of truth for all
-26 public DOCX commands and their accepted aliases. Agents should query it by
-category or operation before the first apply. The broker validates every apply
-against that catalog before the document session can mutate.
+HWPX MCP tools:
+
+- `editor_hwpx_open`
+- `editor_hwpx_discard`
+- `editor_hwpx_read_json`
+- `editor_hwpx_target_map`
+- `editor_hwpx_target_find`
+- `editor_hwpx_target_inspect`
+- `editor_hwpx_object_inventory`
+- `editor_hwpx_command_catalog`
+- `editor_hwpx_apply`
+- `editor_hwpx_render_pages`
+- `editor_hwpx_quality_check`
+- `editor_hwpx_save_source`
+- `editor_hwpx_save_checkpoint`
+- `editor_hwpx_artifact_read`
+- `editor_hwpx_artifact_delete`
+
+`editor_docx_command_catalog` and `editor_hwpx_command_catalog` are the
+machine-readable sources of truth. They currently expose 29 DOCX commands and
+17 HWPX commands plus accepted aliases. Agents should query the applicable
+catalog by category or operation before the first apply. The broker validates
+every apply against that catalog before the document session can mutate.
 
 The broker enforces exact revisions, command-specific inspection or object
-inventory preconditions, and a clean quality check before finalization or PDF
-export. Information-only findings do not block; warnings and errors do.
+inventory preconditions, and a clean quality check before finalization or
+DOCX PDF export. Information-only findings do not block; warnings and errors
+do.
 Every `tools/call` argument object is validated against the schema returned by
-`tools/list` before the tool executes. In particular, `editor_docx_open`
+`tools/list` before the tool executes. In particular, each format's `open`
 requires top-level `filename` plus exactly one of `bytesBase64` or `bytesRef`;
 the nested REST shape `{source:{...}}` is invalid for MCP and never opens a
 sample or fallback document.
 `save_source` returns `artifactId`, package
 SHA-256, and visible-text SHA-256. It never exposes the server-local path.
-If work is cancelled or cannot pass quality checks, call `editor_docx_discard`
-with the open `documentId`. It removes the isolated session and its inspection,
-inventory, quality, and lock state without saving or creating an artifact. The
-call is idempotent: an already-closed session still returns `status=completed`
-with `deleted=false`.
+If work is cancelled or cannot pass quality checks, call the matching
+`editor_docx_discard` or `editor_hwpx_discard` with the open `documentId`. It
+removes the isolated session and its inspection, inventory, quality, and lock
+state without saving or creating an artifact. The call is idempotent: an
+already-closed session still returns `status=completed` with `deleted=false`.
 
 ### Bounded MCP reads
 
@@ -57,7 +78,7 @@ projections instead:
 
 ```json
 {
-  "name": "editor_docx_read_json",
+  "name": "editor_hwpx_read_json",
   "arguments": {
     "documentId": "doc_...",
     "view": "blocks",
@@ -123,7 +144,8 @@ a cursor after a revision change. The gateway budgets the structured page near
 9 KiB so the MCP response containing both text and structured content remains
 near or below 24 KiB at item boundaries.
 
-The direct `/v1/docx/.../documents/read-json` and `/target/map` routes keep
+The direct `/v1/docx/...` and `/v1/hwpx/...` `documents/read-json` and
+`target/map` routes keep
 their legacy unpaged response for trusted non-MCP callers. New agent code must
 use the bounded MCP tools; the internal bounded projection marker is not a
 public REST contract.
@@ -175,8 +197,9 @@ For every edit:
 open -> read-json -> command-catalog -> target-map/find -> inspect -> apply -> quality/check -> render/compare -> save/export
 ```
 
-On cancellation or unrecoverable failure, replace `save/export` with
-`editor_docx_discard` so the isolated server session is released immediately.
+On cancellation or unrecoverable failure, replace `save/export` with the
+matching format's `discard` tool so the isolated server session is released
+immediately.
 
 Rules:
 - Never write before `read-json`.
@@ -201,17 +224,21 @@ POST /v1/{format}/documents/{id}/target/map
 POST /v1/{format}/documents/{id}/target/find
 POST /v1/{format}/documents/{id}/target/inspect
 POST /v1/{format}/documents/{id}/object/inventory
+POST /v1/{format}/documents/{id}/commands/catalog
 POST /v1/{format}/documents/{id}/commands/apply
 POST /v1/{format}/documents/{id}/quality/check
 POST /v1/{format}/documents/{id}/quality/render-compare
 POST /v1/{format}/documents/{id}/pages/render-page
 POST /v1/{format}/documents/{id}/pages/render-all
 POST /v1/{format}/documents/{id}/documents/save-source
+POST /v1/{format}/documents/{id}/documents/save-checkpoint
+POST /v1/{format}/documents/{id}/documents/discard
 POST /v1/docx/documents/{id}/documents/export-pdf
 ```
 
 Known local bridge gaps:
-- HWPX page rendering through the local bridge returns RHWP SVG payloads. The production API must convert this to WebP `quality=20`, max bounding box `1700x1700`, white background, stripped metadata.
+- HWPX page rendering returns RHWP SVG payloads. WebP rasterization is not
+  part of the current HWPX API.
 - HWPX PDF export is not implemented. DOCX PDF export is implemented through the isolated Collabora UNO renderer.
 
 Route aliases accepted by the local bridge:
@@ -564,7 +591,6 @@ list.applyNumbering
 layout.fitText
 image.replace
 image.generateAndReplace
-object.deleteTextBoxByText
 ```
 
 DOCX-only local commands:
@@ -590,9 +616,11 @@ image.insertAfterParagraph
 setCellText
 ```
 
-HWPX-only local command:
+HWPX-only local commands:
 
 ```text
+text.insertAfterParagraph
+object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
@@ -1128,8 +1156,22 @@ Current local bridge response for HWPX:
 ```json
 {
   "renderer": "rhwp-svg",
-  "page": { "page": 1, "format": "svg", "nonBlank": true, "svg": "<svg>...</svg>" },
-  "pages": [{ "page": 1, "format": "webp", "mimeType": "image/webp", "sha256": "64hex", "byteLength": 12345, "bytesBase64": "..." }]
+  "page": {
+    "page": 1,
+    "format": "svg",
+    "mimeType": "image/svg+xml",
+    "nonBlank": true,
+    "svg": "<svg>...</svg>"
+  },
+  "pages": [
+    {
+      "page": 1,
+      "format": "svg",
+      "mimeType": "image/svg+xml",
+      "nonBlank": true,
+      "svg": "<svg>...</svg>"
+    }
+  ]
 }
 ```
 
@@ -1185,11 +1227,17 @@ DOCX save validation:
 - Internal reopen is not enough.
 - For deliverables, call page rendering and inspect the actual WebP output before save.
 
+HWPX save validation:
+- Reopen the saved bytes through `/v1/hwpx`.
+- Compare page, table, image, picture, XML-entry, and binary-entry invariants.
+- Render requested baseline/current pages as SVG and report that this does not
+  prove Hancom Office pixel parity.
+
 ## PDF Export
 
 Implemented DOCX API:
 
-`POST /v1/{format}/documents/{id}/documents/export-pdf`
+`POST /v1/docx/documents/{id}/documents/export-pdf`
 
 ```json
 { "filename": "edited.pdf" }
@@ -1395,6 +1443,12 @@ HWPX sample authoring:
 ```powershell
 npm.cmd run hwpx:fill:esg
 npm.cmd run hwpx:author:sample
+```
+
+HWPX public-sector acceptance:
+
+```powershell
+npm.cmd run test:hwpx-evaluation
 ```
 
 Known acceptable HWPX warning:

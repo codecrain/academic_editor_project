@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { deflateRawSync, deflateSync, inflateRawSync } from 'node:zlib';
+import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +18,19 @@ import {
   stableStringify as coreStableStringify,
   wrapLine as coreWrapLine,
 } from '../../editor_common/document-api-core.mjs';
-import { validateHwpxCommands } from './hwpx-command-catalog.mjs';
+import {
+  classifyHwpxCommands,
+  overlayPreservedEntries,
+  qualifyHwpxCandidate,
+} from './hwpx-package-policy.mjs';
+import {
+  resolveHwpxCommand,
+  validateHwpxCommands,
+} from './hwpx-command-catalog.mjs';
+import { applyHwpxStructuralCommand } from './hwpx-structural-commands.mjs';
+import { crc32, createZip, readZip } from './hwpx-zip.mjs';
+
+export { createZip, readZip } from './hwpx-zip.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -47,26 +59,6 @@ function tryJson(fn) {
   } catch {
     return null;
   }
-}
-
-function crc32(buffer) {
-  const table = crc32.table ??= (() => {
-    const values = new Uint32Array(256);
-    for (let i = 0; i < 256; i += 1) {
-      let c = i;
-      for (let j = 0; j < 8; j += 1) {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-      }
-      values[i] = c >>> 0;
-    }
-    return values;
-  })();
-
-  let crc = 0xffffffff;
-  for (const byte of buffer) {
-    crc = table[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
 }
 
 function pngChunk(type, data = Buffer.alloc(0)) {
@@ -163,106 +155,6 @@ function generatePngBytes(options = {}) {
     pngChunk('IDAT', deflateSync(scanlines)),
     pngChunk('IEND'),
   ]);
-}
-
-export function readZip(bufferLike) {
-  const buffer = Buffer.from(bufferLike);
-  let eocdOffset = -1;
-  for (let i = buffer.length - 22; i >= 0; i -= 1) {
-    if (buffer.readUInt32LE(i) === 0x06054b50) {
-      eocdOffset = i;
-      break;
-    }
-  }
-  assert.notEqual(eocdOffset, -1, 'zip end of central directory not found');
-
-  const entryCount = buffer.readUInt16LE(eocdOffset + 10);
-  let cursor = buffer.readUInt32LE(eocdOffset + 16);
-  const entries = new Map();
-
-  for (let i = 0; i < entryCount; i += 1) {
-    assert.equal(buffer.readUInt32LE(cursor), 0x02014b50, 'central directory header');
-    const method = buffer.readUInt16LE(cursor + 10);
-    const compressedSize = buffer.readUInt32LE(cursor + 20);
-    const fileNameLength = buffer.readUInt16LE(cursor + 28);
-    const extraLength = buffer.readUInt16LE(cursor + 30);
-    const commentLength = buffer.readUInt16LE(cursor + 32);
-    const localHeaderOffset = buffer.readUInt32LE(cursor + 42);
-    const name = buffer.subarray(cursor + 46, cursor + 46 + fileNameLength).toString('utf8');
-
-    assert.equal(buffer.readUInt32LE(localHeaderOffset), 0x04034b50, 'local file header');
-    const localNameLength = buffer.readUInt16LE(localHeaderOffset + 26);
-    const localExtraLength = buffer.readUInt16LE(localHeaderOffset + 28);
-    const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength;
-    const compressed = buffer.subarray(dataOffset, dataOffset + compressedSize);
-    entries.set(name, method === 0 ? Buffer.from(compressed) : inflateRawSync(compressed));
-
-    cursor += 46 + fileNameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-export function createZip(entries) {
-  const localParts = [];
-  const centralParts = [];
-  let localOffset = 0;
-
-  for (const [name, rawData] of entries) {
-    const fileName = Buffer.from(name, 'utf8');
-    const data = Buffer.isBuffer(rawData) ? rawData : Buffer.from(rawData);
-    const compressed = name === 'mimetype' ? data : deflateRawSync(data);
-    const method = name === 'mimetype' ? 0 : 8;
-    const checksum = crc32(data);
-
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(method, 8);
-    local.writeUInt32LE(0, 10);
-    local.writeUInt32LE(checksum, 14);
-    local.writeUInt32LE(compressed.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(fileName.length, 26);
-    local.writeUInt16LE(0, 28);
-    localParts.push(local, fileName, compressed);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt32LE(0, 12);
-    central.writeUInt32LE(checksum, 16);
-    central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(fileName.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
-    central.writeUInt32LE(localOffset, 42);
-    centralParts.push(central, fileName);
-
-    localOffset += local.length + fileName.length + compressed.length;
-  }
-
-  const centralStart = localOffset;
-  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(entries.length, 8);
-  end.writeUInt16LE(entries.length, 10);
-  end.writeUInt32LE(centralSize, 12);
-  end.writeUInt32LE(centralStart, 16);
-  end.writeUInt16LE(0, 20);
-
-  return Buffer.concat([...localParts, ...centralParts, end]);
 }
 
 function escapeXmlText(text) {
@@ -1133,6 +1025,99 @@ function assertSupportedHwpxPackage(inputBytes) {
   }
 }
 
+function structuralBatchError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.details = details;
+  return error;
+}
+
+function verifyStructuralTarget(session, target) {
+  if (!target || typeof target !== 'object') return;
+  if (target.kind === 'paragraph') {
+    const sectionCount = session.doc.getSectionCount();
+    if (target.sectionIndex >= sectionCount
+      || target.paragraphIndex >= session.doc.getParagraphCount(target.sectionIndex)) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural paragraph target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'table' || target.kind === 'tableCaption') {
+    const table = discoverTables(session.doc).find(item =>
+      item.section === target.sectionIndex
+      && item.para === target.paragraphIndex
+      && item.control === target.controlIndex);
+    if (!table) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural table target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'image') {
+    const properties = tryJson(() => session.doc.getPictureProperties(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+    ));
+    if (!properties) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural image target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+  }
+}
+
+function verifyStructuralCommit(session, results) {
+  const pageCount = session.doc.pageCount();
+  if (!Number.isInteger(pageCount) || pageCount < 1) {
+    throw structuralBatchError(
+      'HWPX_REOPEN_VALIDATION_FAILED',
+      'The structural candidate reopened without a valid page.',
+      { pageCount },
+    );
+  }
+  const svg = session.doc.renderPageSvg(0);
+  if (typeof svg !== 'string' || !svg.includes('<svg') || svg.length < 100) {
+    throw structuralBatchError(
+      'HWPX_RENDER_VALIDATION_FAILED',
+      'The structural candidate did not render a nonblank SVG page.',
+      { pageCount, svgLength: typeof svg === 'string' ? svg.length : null },
+    );
+  }
+  for (const result of results) {
+    verifyStructuralTarget(session, result.target);
+    for (const target of result.createdTargets ?? []) {
+      verifyStructuralTarget(session, target);
+    }
+  }
+}
+
+function materializeStructuralTrial(session) {
+  if (typeof session.doc.reflowLinesegs === 'function') {
+    session.doc.reflowLinesegs();
+  }
+  const candidateBytes = Buffer.from(session.doc.exportHwpx());
+  const qualification = qualifyHwpxCandidate(session.inputBytes, candidateBytes);
+  const committedBytes = overlayPreservedEntries(
+    session.inputBytes,
+    candidateBytes,
+    qualification,
+  );
+  const reopened = new HwpxApiSession(committedBytes, {
+    saveMode: 'preserve-package',
+  });
+  return { reopened, qualification };
+}
+
 export class HwpxApiSession {
   constructor(inputBytes, options = {}) {
     this.inputBytes = Buffer.from(inputBytes);
@@ -1593,6 +1578,10 @@ export class HwpxApiSession {
 
   commandsBatch(ops) {
     validateHwpxCommands(ops);
+    const classification = classifyHwpxCommands(ops);
+    if (classification.mode === 'structural-export') {
+      return this.commandsStructuralBatch(ops, classification);
+    }
     const trial = new HwpxApiSession(this.inputBytes, { saveMode: this.saveMode });
     const trialResult = trial.commandsBatchUnsafe(ops);
     const committed = trial.save();
@@ -1606,6 +1595,81 @@ export class HwpxApiSession {
     this.textBoxPatches = [];
     this.revision += 1;
     return { revision: this.revision, results: trialResult.results };
+  }
+
+  commandsStructuralBatch(ops, classification = classifyHwpxCommands(ops)) {
+    const normalizedOps = ops.flatMap((op, index) => this.normalizeCommand(op, index));
+    let working = new HwpxApiSession(this.inputBytes, {
+      saveMode: 'preserve-package',
+    });
+    let structuralDirty = false;
+    const results = [];
+    const qualifications = [];
+
+    const flushStructural = () => {
+      if (!structuralDirty) return;
+      const materialized = materializeStructuralTrial(working);
+      qualifications.push(materialized.qualification);
+      working = materialized.reopened;
+      structuralDirty = false;
+    };
+
+    for (const op of normalizedOps) {
+      if (classifyHwpxCommands([op]).mode === 'structural-export') {
+        const entry = resolveHwpxCommand(op);
+        const structuralOp = {
+          ...op,
+          op: entry?.normalizeAs ?? entry?.op ?? op.op,
+        };
+        const result = applyHwpxStructuralCommand(working.doc, structuralOp, {
+          before: working.exportJson(),
+        });
+        results.push({ ...result, opId: op.opId });
+        structuralDirty = true;
+        continue;
+      }
+
+      flushStructural();
+      const patchResult = working.commandsBatchUnsafe([op]);
+      results.push(...patchResult.results);
+      const saved = working.save();
+      working = new HwpxApiSession(saved.bytes, {
+        saveMode: 'preserve-package',
+      });
+    }
+    flushStructural();
+
+    verifyStructuralCommit(working, results);
+    const validation = working.validationReport(working.doc);
+    const qualification = {
+      ok: qualifications.length > 0
+        && qualifications.every(item => item.ok === true),
+      stages: qualifications,
+      changedEntries: [...new Set(
+        qualifications.flatMap(item => item.changedEntries ?? []),
+      )],
+      createdEntries: [...new Set(
+        qualifications.flatMap(item => item.createdEntries ?? []),
+      )],
+      copiedEntries: qualifications.flatMap(item => item.copiedEntries ?? []),
+    };
+
+    this.inputBytes = Buffer.from(working.inputBytes);
+    this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
+    this.cellPatches = [];
+    this.paragraphPatches = [];
+    this.paragraphInsertPatches = [];
+    this.packagePatches = [];
+    this.shapePatches = [];
+    this.textBoxPatches = [];
+    this.revision += 1;
+    return {
+      revision: this.revision,
+      results,
+      classification,
+      qualification,
+      validation,
+    };
   }
 
   commandsBatchUnsafe(ops) {

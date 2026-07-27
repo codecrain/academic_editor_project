@@ -90,6 +90,35 @@ class ManifestTests(unittest.TestCase):
 
 
 class RuntimeLifecycleTests(unittest.TestCase):
+    def test_office_process_is_hidden_and_detached_for_the_platform(self) -> None:
+        options = MODULE.office_process_options()
+        self.assertIs(options["stdin"], MODULE.subprocess.DEVNULL)
+        self.assertIs(options["stdout"], MODULE.subprocess.DEVNULL)
+        self.assertIs(options["stderr"], MODULE.subprocess.DEVNULL)
+        if MODULE.os.name == "nt":
+            self.assertEqual(
+                options["creationflags"],
+                getattr(MODULE.subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.assertIn("startupinfo", options)
+            self.assertNotIn("start_new_session", options)
+        else:
+            self.assertTrue(options["start_new_session"])
+
+    def test_windows_resolution_prefers_soffice_exe_over_console_launcher(self) -> None:
+        if MODULE.os.name != "nt":
+            self.skipTest("Windows executable selection contract")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            console_launcher = root / "soffice.com"
+            gui_executable = root / "soffice.exe"
+            console_launcher.write_bytes(b"console")
+            gui_executable.write_bytes(b"gui")
+            self.assertEqual(
+                MODULE.resolve_soffice_executable(str(console_launcher)),
+                gui_executable.resolve(),
+            )
+
     def test_enter_cleans_up_when_start_fails(self) -> None:
         runtime = MODULE.OfficeRuntime(Path("soffice"), 1.0, 1.0)
         cleanup_calls: list[bool] = []

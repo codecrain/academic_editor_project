@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
-import { createZip, readZip } from './hwpx-api-utils.mjs';
 import { resolveHwpxCommand } from './hwpx-command-catalog.mjs';
+import { createZip, readZip } from './hwpx-zip.mjs';
 
 export const STRUCTURAL_EXPORT_OPS = new Set([
   'insertText',
@@ -176,9 +176,16 @@ function isSafeOpaqueOverlay(name) {
 function isMutableStructuralEntry(name) {
   return /^Contents\/(?:header|section\d+|masterpage\d+)\.xml$/i.test(name)
     || name === 'Contents/content.hpf'
+    || name === 'version.xml'
     || name === 'settings.xml'
     || name === 'Preview/PrvText.txt'
     || name === 'Preview/PrvImage.png';
+}
+
+function canonicalMediaType(value) {
+  const mediaType = String(value ?? '').trim().toLowerCase();
+  if (mediaType === 'image/jpg') return 'image/jpeg';
+  return mediaType;
 }
 
 export function classifyHwpxCommands(commands) {
@@ -341,7 +348,8 @@ export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
   for (const [href, sourceItem] of Object.entries(source.manifestItems)) {
     const candidateItem = candidate.manifestItems[href];
     if (candidateItem
-      && candidateItem.mediaType !== sourceItem.mediaType) {
+      && canonicalMediaType(candidateItem.mediaType)
+        !== canonicalMediaType(sourceItem.mediaType)) {
       mediaDrift.push({
         href,
         source: sourceItem.mediaType,

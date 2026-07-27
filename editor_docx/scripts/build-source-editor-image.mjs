@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -14,6 +15,8 @@ const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
+const DEFAULT_ENGINE_LANGUAGES =
+  'ar bg ca cs cy da de el en-US en-GB eo es eu fi fr ga gl he hr hu hy id is it ja kk ko lo nb nl oc pl pt pt-BR ro ru sk sl sq sv tr uk vi zh-CN zh-TW';
 const DOCUMENT_FONT_PACKAGES = [
   'fonts-noto',
   'fonts-noto-cjk',
@@ -82,6 +85,8 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   assertSafeBuildDir(contextDir);
   const checkoutDir = path.join(contextDir, 'official-online');
   const buildContextDir = path.join(contextDir, 'from-source-gh-action');
+  const legacySourceDir = path.join(checkoutDir, 'docker', 'from-source-gh-action');
+  const currentSourceDir = path.join(checkoutDir, 'docker', 'from-source');
 
   rmSync(contextDir, { recursive: true, force: true });
   mkdirSync(contextDir, { recursive: true });
@@ -100,15 +105,29 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
   run('git', ['-C', checkoutDir, 'sparse-checkout', 'init', '--no-cone']);
   writeFileSync(
     path.join(checkoutDir, '.git', 'info', 'sparse-checkout'),
-    'docker/from-source-gh-action/*\n',
+    'docker/from-source-gh-action/*\ndocker/from-source/*\n',
   );
   run('git', ['-C', checkoutDir, 'read-tree', '-mu', 'HEAD']);
 
-  cpSync(
-    path.join(checkoutDir, 'docker', 'from-source-gh-action'),
-    buildContextDir,
-    { recursive: true },
-  );
+  const usesLegacyLayout = existsSync(legacySourceDir);
+  const sourceDir = usesLegacyLayout
+    ? legacySourceDir
+    : existsSync(currentSourceDir)
+      ? currentSourceDir
+      : null;
+  if (sourceDir == null) {
+    throw new Error(
+      'The upstream repository contains neither docker/from-source-gh-action nor docker/from-source.',
+    );
+  }
+  cpSync(sourceDir, buildContextDir, { recursive: true });
+  if (!usesLegacyLayout) {
+    const alpineDockerfile = path.join(buildContextDir, 'Alpine');
+    if (!existsSync(alpineDockerfile)) {
+      throw new Error('The current upstream docker/from-source layout is missing its Alpine Dockerfile.');
+    }
+    cpSync(alpineDockerfile, path.join(buildContextDir, 'Dockerfile'));
+  }
 
   cpSync(
     path.join(repoRoot, 'branding', 'debrand-online.sh'),
@@ -118,7 +137,28 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
 
   const dockerfilePath = path.join(buildContextDir, 'Dockerfile');
   let dockerfile = readUtf8Lf(dockerfilePath);
+  if (!usesLegacyLayout) {
+    dockerfile = dockerfile
+      .replace(
+        'ENV COLLABORA_ONLINE_BRANCH=main',
+        'ARG COLLABORA_ONLINE_REPO=https://gerrit.collaboraoffice.com/online\n' +
+          'ENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}\n' +
+          'ARG COLLABORA_ONLINE_BRANCH=main\n' +
+          'ENV COLLABORA_ONLINE_BRANCH=${COLLABORA_ONLINE_BRANCH}',
+      )
+      .replace(
+        'ENV ONLINE_EXTRA_BUILD_OPTIONS=--enable-experimental',
+        'ARG ONLINE_EXTRA_BUILD_OPTIONS=--enable-experimental\n' +
+          'ENV ONLINE_EXTRA_BUILD_OPTIONS=${ONLINE_EXTRA_BUILD_OPTIONS}\n' +
+          'ARG ENGINE_LANGUAGES\n' +
+          'ENV ENGINE_LANGUAGES=${ENGINE_LANGUAGES}',
+      );
+  }
   dockerfile = dockerfile
+    .replace(
+      'ARG ENGINE_ASSETS=\nENV ENGINE_ASSETS=${ENGINE_ASSETS}',
+      'ARG ENGINE_ASSETS=\nENV ENGINE_ASSETS=${ENGINE_ASSETS}\nARG ENGINE_LANGUAGES\nENV ENGINE_LANGUAGES=${ENGINE_LANGUAGES}',
+    )
     .replace(
       'RUN chmod +x /start-collabora-online.sh',
       "RUN sed -i 's/\\r$//' /start-collabora-online.sh && chmod +x /start-collabora-online.sh",
@@ -137,34 +177,60 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
     )
     .replace(
       /^ENV COLLABORA_ONLINE_REPO=.*$/m,
-      'ARG COLLABORA_ONLINE_REPO=https://gerrit.collaboraoffice.com/online\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
+      usesLegacyLayout
+        ? 'ARG COLLABORA_ONLINE_REPO=https://gerrit.collaboraoffice.com/online\nENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}'
+        : 'ENV COLLABORA_ONLINE_REPO=${COLLABORA_ONLINE_REPO}',
     )
     .replace(
       /^ENV COLLABORA_ONLINE_BRANCH=.*$/m,
-      'ARG COLLABORA_ONLINE_BRANCH=main\nENV COLLABORA_ONLINE_BRANCH=${COLLABORA_ONLINE_BRANCH}',
+      usesLegacyLayout
+        ? 'ARG COLLABORA_ONLINE_BRANCH=main\nENV COLLABORA_ONLINE_BRANCH=${COLLABORA_ONLINE_BRANCH}'
+        : 'ENV COLLABORA_ONLINE_BRANCH=${COLLABORA_ONLINE_BRANCH}',
     )
     .replace(
       /^ENV ONLINE_EXTRA_BUILD_OPTIONS=.*$/m,
-      'ARG ONLINE_EXTRA_BUILD_OPTIONS=--enable-experimental\nENV ONLINE_EXTRA_BUILD_OPTIONS=${ONLINE_EXTRA_BUILD_OPTIONS}',
+      usesLegacyLayout
+        ? 'ARG ONLINE_EXTRA_BUILD_OPTIONS=--enable-experimental\nENV ONLINE_EXTRA_BUILD_OPTIONS=${ONLINE_EXTRA_BUILD_OPTIONS}'
+        : 'ENV ONLINE_EXTRA_BUILD_OPTIONS=${ONLINE_EXTRA_BUILD_OPTIONS}',
     );
   writeUtf8Lf(dockerfilePath, dockerfile);
 
-  const buildScriptPath = path.join(buildContextDir, 'build.sh');
-  let buildScript = readUtf8Lf(buildScriptPath);
-  buildScript = buildScript.replace(
-    /make -j \$\(nproc\)(\r?\n\s+)make install/,
-    'make -j $(nproc) DEFAULT_TARGET=static_release$1make install DEFAULT_TARGET=static_release',
+  const buildScriptPath = path.join(
+    buildContextDir,
+    usesLegacyLayout ? 'build.sh' : 'build-alpine.sh',
   );
+  let buildScript = readUtf8Lf(buildScriptPath);
+  if (usesLegacyLayout) {
+    buildScript = buildScript.replace(
+      /make -j \$\(nproc\)(\r?\n\s+)make install/,
+      'make -j $(nproc) DEFAULT_TARGET=static_release$1make install DEFAULT_TARGET=static_release',
+    );
+  }
   buildScript = buildScript.replace(
-    /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
+    /((?:\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1|git clone --depth=1 --branch "\$COLLABORA_ONLINE_BRANCH" "\$COLLABORA_ONLINE_REPO" online \|\| exit 1)\r?\n)/,
     `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
       `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
   );
-  if (!buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) {
+  buildScript = buildScript.replace(
+    /(\.\/autogen\.sh --with-distro=CPLinux-LOKit [^)\r\n]*?--disable-symbols)(?:\s+--with-lang=(?:"[^"]*"|[^\s)]+))?(\s*\))/,
+    '$1 --with-lang="$ENGINE_LANGUAGES"$2',
+  );
+  buildScript = buildScript.replace(
+    /(\r?\n# copy stuff\r?\n)/,
+    '\n' +
+      'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
+      '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
+      '  exit 1\n' +
+      '}\n$1',
+  );
+  if (usesLegacyLayout && !buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) {
     throw new Error('Failed to switch POCO source build to the static_release target.');
   }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the generated source build script.');
+  }
+  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"') || !buildScript.includes('Langpack-ko.xcd')) {
+    throw new Error('Failed to enforce the multilingual engine build contract.');
   }
   writeUtf8Lf(buildScriptPath, buildScript);
 
@@ -178,6 +244,7 @@ function main() {
   const sourceRepo = readEnv('EDITOR_SOURCE_REPO', DEFAULT_SOURCE_REPO);
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
+  const engineLanguages = readEnv('EDITOR_ENGINE_LANGUAGES', DEFAULT_ENGINE_LANGUAGES);
   const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
   const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const noCache = readEnv('EDITOR_DOCKER_NO_CACHE', 'false') === 'true';
@@ -210,6 +277,8 @@ function main() {
     image,
     '--build-arg',
     `ENGINE_ASSETS=${engineAssets}`,
+    '--build-arg',
+    `ENGINE_LANGUAGES=${engineLanguages}`,
     '--build-arg',
     `COLLABORA_ONLINE_REPO=${sourceRepo}`,
     '--build-arg',

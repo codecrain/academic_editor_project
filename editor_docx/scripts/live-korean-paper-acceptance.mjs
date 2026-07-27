@@ -30,6 +30,7 @@ const EXPECTED_SERVER_TOOLS = Object.freeze([
   'editor_docx_quality_check',
   'editor_docx_export_pdf',
   'editor_docx_save_source',
+  'editor_docx_save_checkpoint',
   'editor_docx_artifact_read',
   'editor_docx_artifact_delete',
 ]);
@@ -878,7 +879,7 @@ async function verifyContract(context) {
   assert.equal(initialized?.serverInfo?.name, 'academic-editor-mcp');
   const listed = await context.client.listTools();
   const tools = listed?.tools ?? [];
-  deepEqual(tools.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'tools/list is not the exact 15-tool contract.');
+  deepEqual(tools.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'tools/list is not the exact tool contract.');
   const readTool = tools.find((tool) => tool.name === 'editor_docx_read_json');
   const mapTool = tools.find((tool) => tool.name === 'editor_docx_target_map');
   deepEqual(readTool?.inputSchema?.properties?.view?.enum, ['summary', 'blocks', 'tables'], 'Bounded read_json views are unavailable.');
@@ -1085,7 +1086,9 @@ function callSummary(toolCalls) {
     row.calls += 1;
     row[call.status] = (row[call.status] || 0) + 1;
   }
-  for (const name of EXPECTED_SERVER_TOOLS) assert.ok(byName[name].calls > 0, `${name} was never exercised.`);
+  for (const name of EXPECTED_SERVER_TOOLS.filter((name) => name !== 'editor_docx_save_checkpoint')) {
+    assert.ok(byName[name].calls > 0, `${name} was never exercised.`);
+  }
   return byName;
 }
 

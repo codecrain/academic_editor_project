@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -114,7 +114,7 @@ test('DOCX session satisfies the shared document API contract', () => {
   assertCommonSessionContract(new DocxApiSession(docxBytes));
 });
 
-test('HWPX session satisfies the shared document API contract', { skip: !existsSync('output/hwpx-review/01-esg-original.hwpx') }, async () => {
+test('HWPX session satisfies the shared document API contract', async () => {
   await initHwpxRuntime();
-  assertCommonSessionContract(new HwpxApiSession(readFileSync('output/hwpx-review/01-esg-original.hwpx')));
+  assertCommonSessionContract(new HwpxApiSession(readFileSync('editor_hwpx/samples/api-fixtures/esg-original.hwpx')));
 });

@@ -13,6 +13,8 @@ const DEFAULT_DOCKER_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
+const DEFAULT_ENGINE_LANGUAGES =
+  'ar bg ca cs cy da de el en-US en-GB eo es eu fi fr ga gl he hr hu hy id is it ja kk ko lo nb nl oc pl pt pt-BR ro ru sk sl sq sv tr uk vi zh-CN zh-TW';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -98,6 +100,18 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
       `bash "$SRCDIR/debrand-online.sh" "$BUILDDIR/online" || exit 1\n`,
   );
   buildScript = buildScript.replace(
+    /(\.\/autogen\.sh --with-distro=CPLinux-LOKit [^)\r\n]*?--disable-symbols)(\s*\))/,
+    '$1 --with-lang="$ENGINE_LANGUAGES"$2',
+  );
+  buildScript = buildScript.replace(
+    /(fi;\r?\n\r?\n)(mkdir -p "\$INSTDIR"\/opt\/)/,
+    '$1' +
+      'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
+      '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
+      '  exit 1\n' +
+      '}\n\n$2',
+  );
+  buildScript = buildScript.replace(
     /git clone --depth=1 --branch \$COLLABORA_ONLINE_BRANCH "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
     'git clone --depth=1 --filter=blob:none --branch $COLLABORA_ONLINE_BRANCH "$COLLABORA_ONLINE_REPO" online || exit 1',
   );
@@ -106,6 +120,9 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
+  }
+  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"') || !buildScript.includes('Langpack-ko.xcd')) {
+    throw new Error('Failed to enforce the multilingual engine build contract.');
   }
   writeUtf8Lf(buildScriptPath, buildScript);
 
@@ -123,6 +140,7 @@ function main() {
   const sourceRepo = readEnv('EDITOR_SOURCE_REPO', DEFAULT_SOURCE_REPO);
   const sourceRef = readEnv('EDITOR_SOURCE_REF', DEFAULT_SOURCE_REF);
   const extraBuildOptions = readEnv('EDITOR_SOURCE_BUILD_OPTIONS', '--enable-experimental');
+  const engineLanguages = readEnv('EDITOR_ENGINE_LANGUAGES', DEFAULT_ENGINE_LANGUAGES);
   const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
   const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const prepareOnly = readEnv('EDITOR_NATIVE_PREPARE_ONLY', 'false') === 'true';
@@ -146,6 +164,7 @@ function main() {
       COLLABORA_ONLINE_BRANCH: sourceRef,
       ONLINE_EXTRA_BUILD_OPTIONS: extraBuildOptions,
       ENGINE_ASSETS: engineAssets,
+      ENGINE_LANGUAGES: engineLanguages,
     },
   });
   console.log(`[editor] native build output: ${path.join(buildContextDir, 'instdir')}`);

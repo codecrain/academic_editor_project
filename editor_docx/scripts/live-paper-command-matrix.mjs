@@ -32,6 +32,7 @@ const EXPECTED_SERVER_TOOLS = Object.freeze([
   'editor_docx_quality_check',
   'editor_docx_export_pdf',
   'editor_docx_save_source',
+  'editor_docx_save_checkpoint',
   'editor_docx_artifact_read',
   'editor_docx_artifact_delete',
 ]);
@@ -1727,7 +1728,7 @@ async function verifyContract(context) {
   const listed = await context.client.listTools();
   const tools = listed?.tools ?? [];
   const names = tools.map((tool) => tool.name);
-  deepEqual(names, EXPECTED_SERVER_TOOLS, 'MCP tools/list differs from the exact 15-tool contract.');
+  deepEqual(names, EXPECTED_SERVER_TOOLS, 'MCP tools/list differs from the exact tool contract.');
   deepEqual(tools, EDITOR_MCP_TOOLS, 'MCP tools/list schemas, descriptions, or annotations differ from the local contract.');
   const applyTool = tools.find((tool) => tool.name === 'editor_docx_apply');
   const applyEnum = applyTool?.inputSchema?.properties?.commands?.items?.properties?.op?.enum;
@@ -2119,8 +2120,8 @@ async function runBoundedContractSelfTest() {
 }
 
 async function runSelfTest(args = {}) {
-  assert.equal(EDITOR_MCP_TOOLS.length, 15);
-  deepEqual(EDITOR_MCP_TOOLS.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'Local MCP tool definitions drifted from the expected 15-tool contract.');
+  assert.equal(EDITOR_MCP_TOOLS.length, EXPECTED_SERVER_TOOLS.length);
+  deepEqual(EDITOR_MCP_TOOLS.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'Local MCP tool definitions drifted from the expected tool contract.');
   assert.equal(DOCX_COMMAND_CATALOG.length, 28);
   assert.equal(DOCX_COMMAND_OPS.length, 28);
   assert.equal(new Set(DOCX_COMMAND_OPS).size, 28);

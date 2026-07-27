@@ -18,9 +18,16 @@ import {
   stableDocxTargetKey,
   validateDocxCommands,
 } from './docx-command-catalog.mjs';
-import { EditorDocumentStore } from './editor-document-store.mjs';
+import { DEFAULT_EDITOR_TOKEN_TTL_MS, EditorDocumentStore } from './editor-document-store.mjs';
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
 import { HwpxApiSession, initHwpxRuntime } from '../../editor_hwpx/scripts/hwpx-api-utils.mjs';
+import {
+  commandsNeedPrecondition as hwpxCommandsNeedPrecondition,
+  getHwpxCommandCatalog,
+  requiredInspectionTargets as requiredHwpxInspectionTargets,
+  stableHwpxTargetKey,
+  validateHwpxCommands,
+} from '../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -635,7 +642,7 @@ function mcpArtifactDirectory() {
   return outDir;
 }
 
-const MCP_ARTIFACT_EXTENSIONS = new Set(['docx', 'pdf']);
+const MCP_ARTIFACT_EXTENSIONS = new Set(['docx', 'hwpx', 'pdf']);
 
 function mcpArtifactPath(artifactId, extension = 'docx') {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(artifactId || ''))) {
@@ -659,7 +666,9 @@ async function resolveMcpArtifact(artifactId) {
           filePath,
           mimeType: extension === 'pdf'
             ? 'application/pdf'
-            : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            : extension === 'hwpx'
+              ? 'application/vnd.hancom.hwpx'
+              : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         };
       }
     } catch (error) {
@@ -676,7 +685,7 @@ async function pruneExpiredMcpArtifacts(config) {
   const cutoff = Date.now() - ttlMs;
   const names = await readdir(mcpArtifactDirectory());
   await Promise.all(names
-    .filter((name) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:docx|pdf)$/i.test(name))
+    .filter((name) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:docx|hwpx|pdf)$/i.test(name))
     .map(async (name) => {
       const filePath = path.join(mcpArtifactDirectory(), name);
       try {
@@ -829,7 +838,12 @@ function projectTable(table, textPreviewChars, cellPreviewLimit) {
 function projectDocumentSummary(json) {
   const tables = json.tables ?? [];
   const objectGraph = json.objectGraph ?? {};
-  const warnings = (json.warnings ?? []).slice(0, 5).map((warning) => ({
+  const rawWarnings = Array.isArray(json.warnings)
+    ? json.warnings
+    : json.warnings
+      ? [json.warnings]
+      : [];
+  const warnings = rawWarnings.slice(0, 5).map((warning) => ({
     code: warning?.code,
     severity: warning?.severity,
     message: String(warning?.message ?? '').slice(0, 160),
@@ -851,9 +865,9 @@ function projectDocumentSummary(json) {
       xmlFiles: objectGraph.xmlFiles?.length ?? 0,
       binaryFiles: objectGraph.binaryFiles?.length ?? 0,
     },
-    warningCount: json.warnings?.length ?? 0,
+    warningCount: rawWarnings.length,
     warnings,
-    warningsTruncated: warnings.length < (json.warnings?.length ?? 0),
+    warningsTruncated: warnings.length < rawWarnings.length,
   };
 }
 
@@ -1145,7 +1159,20 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     fmt,
     revision: session.revision,
     pageCount: json.pageCount ?? pageCountFromSession(session),
-    capabilities: ['json', 'targetMap', 'targetInspect', 'objectInventory', 'commandCatalog', 'commands', 'save', 'quality', 'renderPage', 'renderAll', 'renderCompare', 'exportPdf'],
+    capabilities: [
+      'json',
+      'targetMap',
+      'targetInspect',
+      'objectInventory',
+      'commandCatalog',
+      'commands',
+      'save',
+      'quality',
+      'renderPage',
+      'renderAll',
+      'renderCompare',
+      ...(fmt === 'docx' ? ['exportPdf'] : []),
+    ],
     ...(issued ? {
       liveEditorSession: {
         documentId: id,
@@ -1177,8 +1204,19 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   const body = await readJsonBody(req);
   const { session } = record;
 
+  if (actionPath === 'documents/discard' || actionPath === 'discard') {
+    const deleted = discardApiSessionState(state, id);
+    sendJson(res, 200, {
+      ok: true,
+      documentId: id,
+      deleted,
+      sessionClosed: true,
+      artifactCreated: false,
+    });
+    return true;
+  }
   if (actionPath === 'documents/read-json' || actionPath === 'export' && body.type === 'json') {
-    if (fmt === 'docx' && body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
+    if (body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
       sendJson(res, 200, boundedDocxReadPage(state, id, session, body));
       return true;
     }
@@ -1186,7 +1224,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'target/map' || actionPath === 'targets/map') {
-    if (fmt === 'docx' && body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
+    if (body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
       sendJson(res, 200, boundedDocxTargetMapPage(state, id, session, body));
       return true;
     }
@@ -1214,6 +1252,13 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   }
   if (actionPath === 'object/inventory' || actionPath === 'objects/inventory') {
     sendJson(res, 200, session.objectInventory());
+    return true;
+  }
+  if (actionPath === 'commands/catalog') {
+    const catalog = fmt === 'hwpx'
+      ? getHwpxCommandCatalog({ category: body.category, op: body.op })
+      : getDocxCommandCatalog({ category: body.category, op: body.op });
+    sendJson(res, 200, catalog);
     return true;
   }
   if (actionPath === 'commands/apply' || actionPath === 'commands/batch') {
@@ -1296,11 +1341,22 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     }
     const pageCount = pageCountFromSession(session);
     const pages = normalizePageRange(body, pageCount);
+    const baselineSession = new HwpxApiSession(record.sourceBytes);
     sendJson(res, 200, {
       ok: quality.ok,
-      pages: renderHwpxSvgPages(session, pages),
+      revision: session.revision,
+      baseline: {
+        revision: 1,
+        pageCount: pageCountFromSession(baselineSession),
+        pages: renderHwpxSvgPages(baselineSession, pages),
+      },
+      current: {
+        revision: session.revision,
+        pageCount,
+        pages: renderHwpxSvgPages(session, pages),
+      },
       quality,
-      warnings: [],
+      visualComparisonRequired: true,
     });
     return true;
   }
@@ -1466,6 +1522,23 @@ function getHeader(req, name) {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function getWopiUserModifiedState(req) {
+  const value =
+    getHeader(req, 'x-cool-wopi-ismodifiedbyuser') ??
+    getHeader(req, 'x-lool-wopi-ismodifiedbyuser');
+  if (value == null) {
+    return null;
+  }
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true') {
+    return true;
+  }
+  if (normalized === 'false') {
+    return false;
+  }
+  return null;
+}
+
 function currentDocumentLock(config, documentId) {
   const current = config.documentLocks?.get(documentId);
   if (current && current.expiresAt <= Date.now()) {
@@ -1529,6 +1602,14 @@ async function handleStoredDocxWopi(req, res, config, documentId) {
     }
     try {
       const body = await readRequestBody(req, config.documentStore.maxFileSize + 1);
+      if (getWopiUserModifiedState(req) === false) {
+        res.writeHead(200, {
+          'X-WOPI-ItemVersion': metadata.version,
+          'Cache-Control': 'no-store',
+        });
+        res.end();
+        return true;
+      }
       const updated = await config.documentStore.write(documentId, body);
       res.writeHead(200, { 'X-WOPI-ItemVersion': updated.version, 'Cache-Control': 'no-store' });
       res.end();
@@ -1685,6 +1766,11 @@ async function handleDocxWopi(req, res, config, state) {
     }
 
     const body = await readRequestBody(req);
+    if (getWopiUserModifiedState(req) === false) {
+      res.writeHead(200, { 'X-WOPI-ItemVersion': String(state.version) });
+      res.end();
+      return true;
+    }
     await writeFile(filePath, body);
     state.version += 1;
     res.writeHead(200, { 'X-WOPI-ItemVersion': String(state.version) });
@@ -1976,18 +2062,26 @@ function qualityHasNoIssues(quality) {
 }
 
 async function executeEditorMcpTool(req, config, state, name, args = {}) {
-  if (name === 'editor_docx_command_catalog') {
-    const catalog = getDocxCommandCatalog({ category: args.category, op: args.op });
+  const fmt = name.startsWith('editor_hwpx_') ? 'hwpx' : 'docx';
+  const toolPrefix = `editor_${fmt}`;
+  const catalogForFormat = fmt === 'hwpx' ? getHwpxCommandCatalog : getDocxCommandCatalog;
+  const validateCommandsForFormat = fmt === 'hwpx' ? validateHwpxCommands : validateDocxCommands;
+  const commandsNeedPreconditionForFormat = fmt === 'hwpx' ? hwpxCommandsNeedPrecondition : commandsNeedPrecondition;
+  const requiredInspectionTargetsForFormat = fmt === 'hwpx' ? requiredHwpxInspectionTargets : requiredInspectionTargets;
+  const stableTargetKeyForFormat = fmt === 'hwpx' ? stableHwpxTargetKey : stableDocxTargetKey;
+
+  if (name === `${toolPrefix}_command_catalog`) {
+    const catalog = catalogForFormat({ category: args.category, op: args.op });
     if ((args.category || args.op) && catalog.commandCount === 0) {
-      throw new Error(`No DOCX commands matched category=${String(args.category || '')} op=${String(args.op || '')}.`);
+      throw new Error(`No ${fmt.toUpperCase()} commands matched category=${String(args.category || '')} op=${String(args.op || '')}.`);
     }
     return catalog;
   }
-  if (name === 'editor_docx_open') {
+  if (name === `${toolPrefix}_open`) {
     if (args.bytesRef && !config.mcpAllowBytesRef && !isLoopbackHost(config.host)) {
       throw new Error('bytesRef is disabled for externally bound MCP servers. Use trusted application-side bytesBase64 input.');
     }
-    return postLocalEditorApi(req, config, '/v1/docx/documents/open', {
+    return postLocalEditorApi(req, config, `/v1/${fmt}/documents/open`, {
       filename: args.filename,
       source: {
         ...(args.bytesBase64 ? { bytesBase64: args.bytesBase64 } : {}),
@@ -1996,19 +2090,22 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     });
   }
 
-  if (name === 'editor_docx_artifact_read' || name === 'editor_docx_artifact_delete') {
+  if (name === `${toolPrefix}_artifact_read` || name === `${toolPrefix}_artifact_delete`) {
     const artifactId = String(args.artifactId || '').trim();
     const expectedSha256 = String(args.expectedSha256 || '').trim().toLowerCase();
     if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
       throw new Error('expectedSha256 must be a lowercase SHA-256 digest.');
     }
     const artifact = await resolveMcpArtifact(artifactId);
+    if (artifact.extension !== fmt && !(fmt === 'docx' && artifact.extension === 'pdf')) {
+      throw new Error(`artifact_format_mismatch: expected ${fmt}, found ${artifact.extension}.`);
+    }
     const bytes = await readFile(artifact.filePath);
     const actualSha256 = sha256(bytes);
     if (actualSha256 !== expectedSha256) {
-      throw new Error('artifact_hash_mismatch: finalized DOCX artifact did not match the expected hash.');
+      throw new Error(`artifact_hash_mismatch: finalized ${fmt.toUpperCase()} artifact did not match the expected hash.`);
     }
-    if (name === 'editor_docx_artifact_delete') {
+    if (name === `${toolPrefix}_artifact_delete`) {
       await unlink(artifact.filePath);
       return { artifactId, sha256: actualSha256, mimeType: artifact.mimeType, deleted: true };
     }
@@ -2028,7 +2125,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
   }
 
   return withMcpDocumentLock(state, documentId, async () => {
-    if (name === 'editor_docx_discard') {
+    if (name === `${toolPrefix}_discard`) {
       const deleted = discardApiSessionState(state, documentId, { clearLock: false });
       return {
         ok: true,
@@ -2040,8 +2137,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       };
     }
 
-    const prefix = `/v1/docx/documents/${encodeURIComponent(documentId)}`;
-    if (name === 'editor_docx_read_json') {
+    const prefix = `/v1/${fmt}/documents/${encodeURIComponent(documentId)}`;
+    if (name === `${toolPrefix}_read_json`) {
       return postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         ...(args.view !== undefined ? { view: args.view } : {}),
@@ -2051,7 +2148,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         ...(args.cellPreviewLimit !== undefined ? { cellPreviewLimit: args.cellPreviewLimit } : {}),
       });
     }
-    if (name === 'editor_docx_target_map') {
+    if (name === `${toolPrefix}_target_map`) {
       return postLocalEditorApi(req, config, `${prefix}/target/map`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         ...(args.kind !== undefined ? { kind: args.kind } : {}),
@@ -2060,10 +2157,10 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         ...(args.tableId !== undefined ? { tableId: args.tableId } : {}),
       });
     }
-    if (name === 'editor_docx_target_find') {
+    if (name === `${toolPrefix}_target_find`) {
       return postLocalEditorApi(req, config, `${prefix}/target/find`, { query: args.query, match: args.match || {} });
     }
-    if (name === 'editor_docx_object_inventory') {
+    if (name === `${toolPrefix}_object_inventory`) {
       const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         view: 'summary',
@@ -2073,7 +2170,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       state.mcpInventoryRevisions.set(documentId, Number(structure.revision));
       return { revision: structure.revision, ...inventory };
     }
-    if (name === 'editor_docx_target_inspect') {
+    if (name === `${toolPrefix}_target_inspect`) {
       const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         view: 'summary',
@@ -2082,7 +2179,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       if (Number(inspected.revision) !== Number(structure.revision)) {
         throw new Error('stale_revision: document changed while targets were being inspected. Re-read and inspect again.');
       }
-      const inspectedTargetKeys = inspected.targets.map((target) => stableDocxTargetKey(target.location));
+      const inspectedTargetKeys = inspected.targets.map((target) => stableTargetKeyForFormat(target.location));
       if (inspectedTargetKeys.some((key) => !key)) {
         throw new Error('target_inspect returned a target without a stable paragraph or table-cell location.');
       }
@@ -2108,11 +2205,11 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     const baseRevision = Number(args.baseRevision);
     assertCurrentRevision(structure, baseRevision);
 
-    if (name === 'editor_docx_apply') {
-      const commandEntries = validateDocxCommands(args.commands);
-      if (commandsNeedPrecondition(commandEntries, 'target_inspect')) {
+    if (name === `${toolPrefix}_apply`) {
+      const commandEntries = validateCommandsForFormat(args.commands);
+      if (commandsNeedPreconditionForFormat(commandEntries, 'target_inspect')) {
         const inspection = state.mcpInspectionRevisions?.get(documentId);
-        const requiredTargets = requiredInspectionTargets(args.commands, commandEntries);
+        const requiredTargets = requiredInspectionTargetsForFormat(args.commands, commandEntries);
         const inspectedKeys = inspection?.revision === baseRevision ? new Set(inspection.targetKeys ?? []) : new Set();
         const missingTargets = requiredTargets.filter((target) => !inspectedKeys.has(target.key));
         if (inspection?.revision !== baseRevision || missingTargets.length) {
@@ -2122,7 +2219,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
           throw new Error(`inspection_required: inspect every exact target and style source at the current revision before applying commands.${detail}`);
         }
       }
-      if (commandsNeedPrecondition(commandEntries, 'object_inventory') && state.mcpInventoryRevisions?.get(documentId) !== baseRevision) {
+      if (commandsNeedPreconditionForFormat(commandEntries, 'object_inventory') && state.mcpInventoryRevisions?.get(documentId) !== baseRevision) {
         throw new Error('object_inventory_required: inspect current document objects before applying image commands.');
       }
       const applied = await postLocalEditorApi(req, config, `${prefix}/commands/apply`, { commands: args.commands });
@@ -2131,7 +2228,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       state.mcpQualityRevisions?.delete(documentId);
       return applied;
     }
-    if (name === 'editor_docx_render_pages') {
+    if (name === `${toolPrefix}_render_pages`) {
       const pages = Array.isArray(args.pages) && args.pages.length ? args.pages.map(Number) : [1];
       if (pages.length > 12 || pages.some((page) => !Number.isInteger(page) || page < 1) || new Set(pages).size !== pages.length) {
         throw new Error('pages must contain 1-12 unique positive integers.');
@@ -2141,7 +2238,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       }
       return postLocalEditorApi(req, config, `${prefix}/pages/render-all`, { pages });
     }
-    if (name === 'editor_docx_quality_check') {
+    if (name === `${toolPrefix}_quality_check`) {
       const quality = await postLocalEditorApi(req, config, `${prefix}/quality/check`, {});
       state.mcpQualityRevisions ??= new Map();
       if (qualityHasNoIssues(quality)) {
@@ -2174,7 +2271,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         throw error;
       }
     }
-    if (name === 'editor_docx_save_source') {
+    if (name === `${toolPrefix}_save_source`) {
       if (state.mcpQualityRevisions?.get(documentId) !== baseRevision) {
         throw new Error('quality_check_required: run a clean quality check at the current revision before saving.');
       }
@@ -2182,11 +2279,28 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       const artifactId = randomUUID();
       const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
         filename: args.filename,
-        outputPath: mcpArtifactPath(artifactId),
+        outputPath: mcpArtifactPath(artifactId, fmt),
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
       discardApiSessionState(state, documentId, { clearLock: false });
       return { ...publicResult, artifactId, sessionClosed: true };
+    }
+    if (name === `${toolPrefix}_save_checkpoint`) {
+      await pruneExpiredMcpArtifacts(config);
+      const artifactId = randomUUID();
+      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+        filename: args.filename,
+        outputPath: mcpArtifactPath(artifactId, fmt),
+      });
+      const { bytesRef: _serverLocalPath, ...publicResult } = saved;
+      discardApiSessionState(state, documentId, { clearLock: false });
+      return {
+        ...publicResult,
+        artifactId,
+        sessionClosed: true,
+        checkpoint: true,
+        verified: false,
+      };
     }
     throw new Error(`Unsupported editor MCP tool: ${name}`);
   });
@@ -2421,7 +2535,10 @@ function buildConfigFromEnv() {
       'EDITOR_GATEWAY_TOKEN_SECRET',
       isLoopbackHost(host) ? 'local-development-editor-token-secret-change-me' : '',
     ),
-    documentTokenTtlMs: parsePositiveInteger(readEnv('EDITOR_GATEWAY_TOKEN_TTL_MS', '3600000'), 3600000),
+    documentTokenTtlMs: parsePositiveInteger(
+      readEnv('EDITOR_GATEWAY_TOKEN_TTL_MS', String(DEFAULT_EDITOR_TOKEN_TTL_MS)),
+      DEFAULT_EDITOR_TOKEN_TTL_MS,
+    ),
     documentMaxFileSize: parsePositiveInteger(readEnv('EDITOR_DOCUMENT_MAX_FILE_SIZE', String(50 * 1024 * 1024)), 50 * 1024 * 1024),
     documentMaxCount: parsePositiveInteger(readEnv('EDITOR_DOCUMENT_MAX_COUNT', '1000'), 1000),
   };

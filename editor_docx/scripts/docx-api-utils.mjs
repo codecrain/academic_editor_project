@@ -1151,6 +1151,10 @@ export class DocxApiSession {
     this.revision = 1;
     this.dirtyDocument = false;
     this.dirtyPackage = false;
+    const trackedIds = [...this.documentXml.matchAll(/<w:(?:ins|del)\b[^>]*\bw:id="(\d+)"/g)]
+      .map((match) => Number(match[1]))
+      .filter(Number.isFinite);
+    this.nextTrackedChangeId = trackedIds.length ? Math.max(...trackedIds) + 1 : 1;
   }
 
   readJson() {
@@ -1388,6 +1392,18 @@ export class DocxApiSession {
       return [{ ...command, opId, op: 'text.replace', target: command.target ?? command.range ?? location, text: commandText(command) }];
     }
 
+    if (catalogOp === 'text.replaceTracked') {
+      return [{
+        ...command,
+        opId,
+        op: 'text.replaceTracked',
+        target: command.target ?? command.range ?? location,
+        text: commandText(command),
+        author: String(command.author ?? 'Tlooto DocsAgent').trim() || 'Tlooto DocsAgent',
+        date: command.date,
+      }];
+    }
+
     if (catalogOp === 'insertText') {
       return [{ ...command, opId, op: 'text.insert', target: command.target ?? location, text: commandText(command) }];
     }
@@ -1579,11 +1595,13 @@ export class DocxApiSession {
         if (operation.styleSource) {
           inspect(operation.styleSource, `${operation.op}.styleSource`);
         }
-      } else if (operation.op === 'text.replace' || operation.op === 'text.insert' || operation.op === 'text.delete'
+      } else if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked'
+        || operation.op === 'text.insert' || operation.op === 'text.delete'
         || operation.op === 'style.setRunStyle' || operation.op === 'style.setParagraphStyle'
         || operation.op === 'insertFootnote') {
         const target = inspect(operation.target, `${operation.op}.target`);
-        if (operation.op === 'text.replace' || operation.op === 'text.insert' || operation.op === 'text.delete') {
+        if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked'
+          || operation.op === 'text.insert' || operation.op === 'text.delete') {
           const range = operation.target?.range;
           const native = operation.target?.native;
           const startOffset = Number(native?.offset ?? native?.startOffset ?? range?.start?.offset ?? 0);
@@ -1598,6 +1616,16 @@ export class DocxApiSession {
           assert.ok(Number.isInteger(startOffset) && Number.isInteger(endOffset)
             && startOffset >= 0 && endOffset >= startOffset && endOffset <= target.currentText.length,
           `${operation.op}.target range is outside the existing paragraph`);
+          if (operation.op === 'text.replaceTracked') {
+            assert.ok(!String(operation.text ?? '').includes('\n'),
+              'text.replaceTracked replacement text must stay inside one paragraph');
+            assert.ok(String(operation.author ?? '').length <= 255,
+              'text.replaceTracked author must not exceed 255 characters');
+            if (operation.date != null) {
+              assert.ok(Number.isFinite(Date.parse(String(operation.date))),
+                'text.replaceTracked date must be ISO-8601 compatible');
+            }
+          }
         }
       } else if (operation.op === 'paragraph.applyNamedStyle') {
         inspect(operation.target, 'applyStyle.target');
@@ -1676,6 +1704,10 @@ export class DocxApiSession {
         const target = this.inspectTarget(op.location);
         this.replaceParagraphXml(op.location, op.text, { templateParagraphXml: template, segments: op.segments });
         results.push({ opId: op.opId, ok: true, target: target.id, action: 'text.replaceParagraph' });
+        mutated = true;
+      } else if (op.op === 'text.replaceTracked') {
+        this.replaceTrackedTextRange(op);
+        results.push({ opId: op.opId, ok: true, action: op.op, tracked: true });
         mutated = true;
       } else if (op.op === 'text.replace' || op.op === 'text.insert' || op.op === 'text.delete') {
         this.replaceTextRange(op);
@@ -1849,6 +1881,107 @@ export class DocxApiSession {
       ? `${paragraph.text.slice(0, startOffset)}${paragraph.text.slice(endOffset)}`
       : `${paragraph.text.slice(0, startOffset)}${op.text}${paragraph.text.slice(endOffset)}`;
     this.replaceParagraphXml({ paragraph: { number: paragraphIndex } }, replacementText, { templateParagraphXml: paragraph.xml });
+  }
+
+  replaceTrackedTextRange(op) {
+    const target = op.target ?? {};
+    const range = target.range ?? target;
+    const native = target.native ?? range.native;
+    const nodeId = range?.start?.nodeId ?? target.nodeId;
+    const paragraphIndex = native
+      ? Number(native.para ?? native.paragraph ?? native.number)
+      : Number(String(nodeId).replace(/^p_/, ''));
+    assert.ok(Number.isFinite(paragraphIndex),
+      'text.replaceTracked requires target.range.start.nodeId or target.native.para');
+    const paragraph = this.paragraphFromLocation({ paragraph: { number: paragraphIndex } });
+    const startOffset = Number(native?.offset ?? range?.start?.offset ?? 0);
+    const nativeEnd = Number.isFinite(Number(native?.length)) ? startOffset + Number(native.length) : undefined;
+    const endOffset = nativeEnd ?? range?.end?.offset ?? paragraph.text.length;
+    const deletedText = paragraph.text.slice(startOffset, endOffset);
+    const insertedText = String(op.text ?? '');
+    assert.notEqual(deletedText, insertedText, 'text.replaceTracked requires an actual text change');
+    assert.ok(!insertedText.includes('\n'),
+      'text.replaceTracked replacement text must stay inside one paragraph');
+
+    const author = escapeXmlAttr(String(op.author ?? 'Tlooto DocsAgent').trim() || 'Tlooto DocsAgent');
+    const parsedDate = op.date == null ? new Date() : new Date(String(op.date));
+    assert.ok(Number.isFinite(parsedDate.getTime()), 'text.replaceTracked date must be ISO-8601 compatible');
+    const date = escapeXmlAttr(parsedDate.toISOString());
+    const templateRuns = paragraphRunsFromXml(paragraph.xml);
+    const visibleTemplateRun = templateRuns.find((run) => run.textLength > 0) ?? templateRuns[0];
+    const rPrXml = visibleTemplateRun?.rPrXml ?? tagXml(paragraph.xml, 'rPr');
+    const pPrXml = tagXml(paragraph.xml, 'pPr');
+    const beforeText = paragraph.text.slice(0, startOffset);
+    const afterText = paragraph.text.slice(endOffset);
+    const revisionId = this.nextTrackedChangeId;
+    this.nextTrackedChangeId += 2;
+    const deletedPreserve = /^\s|\s$/.test(deletedText) ? ' xml:space="preserve"' : '';
+    const deletionXml = deletedText
+      ? `<w:del w:id="${revisionId}" w:author="${author}" w:date="${date}"><w:r>${rPrXml}<w:delText${deletedPreserve}>${escapeXmlText(deletedText)}</w:delText></w:r></w:del>`
+      : '';
+    const insertionXml = insertedText
+      ? `<w:ins w:id="${revisionId + 1}" w:author="${author}" w:date="${date}">${textRunXml(insertedText, rPrXml)}</w:ins>`
+      : '';
+    const paragraphOpen = paragraph.xml.match(/^<w:p\b[^>]*>/)?.[0] ?? '<w:p>';
+    const replacement = `${paragraphOpen}${pPrXml}${textRunXml(beforeText, rPrXml)}${deletionXml}${insertionXml}${textRunXml(afterText, rPrXml)}</w:p>`;
+    this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${replacement}${this.documentXml.slice(paragraph.end)}`;
+    this.ensureTrackedChangesEnabled();
+    this.dirtyDocument = true;
+  }
+
+  ensureTrackedChangesEnabled() {
+    const settingsName = 'word/settings.xml';
+    const existingSettings = this.entries.get(settingsName)?.toString('utf8');
+    const settingsXml = existingSettings
+      ? (
+        /<w:trackRevisions\b/.test(existingSettings)
+          ? existingSettings
+          : /<w:settings\b[^>]*\/>/.test(existingSettings)
+            ? existingSettings.replace(/<w:settings\b([^>]*)\/>/, '<w:settings$1><w:trackRevisions/></w:settings>')
+            : existingSettings.replace(/<w:settings\b[^>]*>/, (match) => `${match}<w:trackRevisions/>`)
+      )
+      : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="${WORD_NS}"><w:trackRevisions/></w:settings>`;
+    this.entries.set(settingsName, Buffer.from(settingsXml, 'utf8'));
+
+    const contentTypesName = '[Content_Types].xml';
+    const contentTypes = this.entries.get(contentTypesName)?.toString('utf8') ?? defaultContentTypesXml();
+    if (!contentTypes.includes('PartName="/word/settings.xml"')) {
+      this.entries.set(
+        contentTypesName,
+        Buffer.from(
+          contentTypes.replace(
+            '</Types>',
+            '<Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>',
+          ),
+          'utf8',
+        ),
+      );
+    }
+
+    const relsName = 'word/_rels/document.xml.rels';
+    const rels = this.entries.get(relsName)?.toString('utf8') ?? defaultDocumentRelsXml();
+    if (!rels.includes(`${OFFICE_REL_NS}/settings`)) {
+      const existingRelationshipIds = new Set(
+        [...rels.matchAll(/\bId="([^"]+)"/g)].map((match) => match[1]),
+      );
+      let settingsRelationshipId = 'rIdTlootoSettings';
+      let suffix = 1;
+      while (existingRelationshipIds.has(settingsRelationshipId)) {
+        settingsRelationshipId = `rIdTlootoSettings${suffix}`;
+        suffix += 1;
+      }
+      this.entries.set(
+        relsName,
+        Buffer.from(
+          rels.replace(
+            '</Relationships>',
+            `<Relationship Id="${settingsRelationshipId}" Type="${OFFICE_REL_NS}/settings" Target="settings.xml"/></Relationships>`,
+          ),
+          'utf8',
+        ),
+      );
+    }
+    this.dirtyPackage = true;
   }
 
   replaceCellXml(location, text, options = {}) {

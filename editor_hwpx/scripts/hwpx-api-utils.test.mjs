@@ -523,6 +523,126 @@ test('HWPX API command batches are atomic when a later target is invalid', async
   assert.equal(Buffer.compare(session.save().bytes, input), 0);
 });
 
+test('HWPX API structural batches roll back every prior mutation when a later target fails', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const beforeRevision = session.revision;
+  const beforeBytes = session.save().bytes;
+  const beforeText = session.inspectTarget({
+    paragraph: { section: 0, number: 0 },
+  }).currentText;
+
+  assert.throws(() => session.commandsBatch([
+    {
+      op: 'insertText',
+      target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+      text: 'MUST-NOT-COMMIT',
+    },
+    {
+      op: 'insertFootnote',
+      target: { native: { section: 99, para: 0, offset: 0, length: 0 } },
+      text: 'invalid target',
+    },
+  ]));
+
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(
+    session.inspectTarget({ paragraph: { section: 0, number: 0 } }).currentText,
+    beforeText,
+  );
+  assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+});
+
+test('HWPX API structural batches qualify, reopen, and commit exactly once', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const beforeRevision = session.revision;
+  const marker = 'STRUCTURAL-ATOMIC-2026';
+
+  const result = session.commandsBatch([
+    {
+      commandId: 'canonicalized-insert',
+      op: 'text.insert',
+      target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+      text: marker,
+    },
+    {
+      op: 'setDocumentMetadata',
+      title: '2026 public-sector atomic validation',
+      author: 'HWPX API',
+    },
+  ]);
+
+  assert.equal(result.revision, beforeRevision + 1);
+  assert.equal(session.revision, beforeRevision + 1);
+  assert.equal(result.results.length, 2);
+  assert.equal(result.results[0].opId, 'canonicalized-insert');
+  assert.equal(result.results[0].op, 'insertText');
+  assert.equal(result.qualification.ok, true);
+  assert.ok(result.validation.pageCount >= 1);
+
+  const saved = session.save();
+  assert.equal(saved.revision, session.revision);
+  const reopened = new HwpxApiSession(saved.bytes);
+  assert.ok(
+    reopened.inspectTarget({ paragraph: { section: 0, number: 0 } }).currentText
+      .includes(marker),
+  );
+  assert.deepEqual(JSON.parse(reopened.doc.getDocumentMetadata()), {
+    author: 'HWPX API',
+    description: '',
+    keywords: '',
+    subject: '',
+    title: '2026 public-sector atomic validation',
+  });
+});
+
+test('HWPX API mixed batches preserve command order across patch and structural stages', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+
+  const result = session.commandsBatch([
+    {
+      op: 'text.insertAfterParagraph',
+      location: { paragraph: { section: 0, number: 0 } },
+      text: 'legacy-inserted',
+    },
+    {
+      op: 'insertText',
+      target: { native: { section: 0, para: 1, offset: 0, length: 0 } },
+      text: 'native-',
+    },
+    {
+      op: 'text.replaceParagraph',
+      location: { paragraph: { section: 0, number: 0 } },
+      text: 'patch-safe-root',
+    },
+    {
+      op: 'setDocumentMetadata',
+      title: 'mixed-stage-order',
+    },
+  ]);
+
+  assert.equal(result.results.length, 4);
+  assert.ok(result.qualification.stages.length >= 2);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(
+    reopened.inspectTarget({ paragraph: { section: 0, number: 0 } }).currentText,
+    'patch-safe-root',
+  );
+  assert.equal(
+    reopened.inspectTarget({ paragraph: { section: 0, number: 1 } }).currentText,
+    'native-legacy-inserted',
+  );
+  assert.equal(
+    JSON.parse(reopened.doc.getDocumentMetadata()).title,
+    'mixed-stage-order',
+  );
+});
+
 test('HWPX API text.replace survives preserve-package save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/test-image.hwpx');

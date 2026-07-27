@@ -8,13 +8,14 @@ import {
   resolveDocxCommand,
   validateDocxCommands,
 } from './docx-command-catalog.mjs';
-import { DocxApiSession, createDocxBytes } from './docx-api-utils.mjs';
+import { DocxApiSession, createDocxBytes, getZipText } from './docx-api-utils.mjs';
 import { EDITOR_MCP_TOOLS } from './editor-mcp.mjs';
 
 const EXECUTABLE_OPS = new Set([
   'table.writeCell',
   'text.replaceParagraph',
   'text.replace',
+  'text.replaceTracked',
   'text.insert',
   'text.delete',
   'paragraph.append',
@@ -38,7 +39,7 @@ const EXECUTABLE_OPS = new Set([
 ]);
 
 test('DOCX command catalog is the complete unique public contract', () => {
-  assert.equal(DOCX_COMMAND_CATALOG.length, 28);
+  assert.equal(DOCX_COMMAND_CATALOG.length, 29);
   assert.equal(new Set(DOCX_COMMAND_OPS).size, DOCX_COMMAND_OPS.length);
   assert.deepEqual(getDocxCommandCatalog().commands, DOCX_COMMAND_CATALOG);
 
@@ -126,6 +127,11 @@ test('catalog validation rejects semantically empty collections, invalid dimensi
 
 test('catalog validation distinguishes intentional clearing from semantically empty control input', () => {
   assert.doesNotThrow(() => validateDocxCommands([{
+    op: 'text.replaceTracked',
+    target: { native: { section: 0, para: 0, offset: 0, length: 4 } },
+    text: '',
+  }]));
+  assert.doesNotThrow(() => validateDocxCommands([{
     op: 'text.replaceParagraph',
     location: { paragraph: { number: 1 } },
     text: '',
@@ -147,4 +153,29 @@ test('catalog validation distinguishes intentional clearing from semantically em
     target: { nodeId: 'p_1' },
     text: '',
   }]), /text/);
+});
+
+test('tracked replacement emits native Word revisions and enables revision tracking', () => {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Risk is low.'] }));
+  session.apply([{
+    op: 'text.replaceTracked',
+    target: { native: { section: 0, para: 0, offset: 8, length: 3 } },
+    text: 'material',
+    author: 'Tlooto DocsAgent',
+    date: '2026-07-26T00:00:00.000Z',
+  }]);
+  const saved = session.save().bytes;
+  const documentXml = getZipText(saved, 'word/document.xml');
+  const settingsXml = getZipText(saved, 'word/settings.xml');
+  const relationshipsXml = getZipText(saved, 'word/_rels/document.xml.rels');
+  const contentTypesXml = getZipText(saved, '[Content_Types].xml');
+
+  assert.match(documentXml, /<w:del\b[^>]*w:author="Tlooto DocsAgent"/);
+  assert.match(documentXml, /<w:delText>low<\/w:delText>/);
+  assert.match(documentXml, /<w:ins\b[^>]*w:author="Tlooto DocsAgent"/);
+  assert.match(documentXml, /<w:t>material<\/w:t>/);
+  assert.match(settingsXml, /<w:trackRevisions\/>/);
+  assert.match(relationshipsXml, /officeDocument\/2006\/relationships\/settings/);
+  assert.match(contentTypesXml, /PartName="\/word\/settings.xml"/);
+  assert.equal(new DocxApiSession(saved).readJson().blocks[0].text, 'Risk is material.');
 });

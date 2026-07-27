@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createDocxBytes, getDocumentXml } from './docx-api-utils.mjs';
-import { EditorDocumentStore } from './editor-document-store.mjs';
+import { DEFAULT_EDITOR_TOKEN_TTL_MS, EditorDocumentStore } from './editor-document-store.mjs';
 
 async function createStore() {
   const root = await mkdtemp(path.join(os.tmpdir(), 'academic-editor-store-'));
@@ -42,6 +42,26 @@ test('editor token is signed, expires, and is bound to one document', async () =
     assert.equal(store.verifyToken(issued.token, first.documentId).canWrite, true);
     assert.throws(() => store.verifyToken(issued.token, second.documentId), /Invalid or expired/);
     assert.throws(() => store.verifyToken(`${issued.token}x`, first.documentId), /Invalid editor token/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('default editor token covers a full work session instead of expiring after one hour', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'academic-editor-store-default-ttl-'));
+  const store = new EditorDocumentStore({
+    root,
+    tokenSecret: 'test-token-secret-with-at-least-32-characters',
+    maxDocuments: 10,
+  });
+  await store.init();
+  try {
+    const document = await store.createBlank({ title: 'Long editing session' });
+    const beforeIssue = Date.now();
+    const issued = store.issueToken(document.documentId);
+    assert.equal(DEFAULT_EDITOR_TOKEN_TTL_MS, 12 * 60 * 60 * 1000);
+    assert.ok(issued.expiresAt >= beforeIssue + DEFAULT_EDITOR_TOKEN_TTL_MS);
+    assert.ok(issued.expiresAt <= Date.now() + DEFAULT_EDITOR_TOKEN_TTL_MS);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

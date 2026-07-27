@@ -20,6 +20,10 @@ if [ -z "$COLLABORA_ONLINE_BRANCH" ]; then
 fi;
 echo "Building branch '$COLLABORA_ONLINE_BRANCH' from '$COLLABORA_ONLINE_REPO'"
 
+if [ -z "$COLLABORA_ENGINE_LANGUAGES" ]; then
+  COLLABORA_ENGINE_LANGUAGES="ar bg ca cs cy da de el en-US en-GB eo es eu fi fr ga gl he hr hu hy id is it ja kk ko lo nb nl oc pl pt pt-BR ro ru sk sl sq sv tr uk vi zh-CN zh-TW"
+fi
+
 if [ -z "$ENGINE_BUILD_TARGET" ]; then
   ENGINE_BUILD_TARGET=""
 fi;
@@ -47,7 +51,7 @@ git clone --depth=1 --branch "$COLLABORA_ONLINE_BRANCH" "$COLLABORA_ONLINE_REPO"
 ##### engine #####
 
 # Build engine from source -- prebuilt assets are glibc and don't work on musl.
-( cd online/engine && ./autogen.sh --with-distro=CPLinux-LOKit --without-package-format --disable-symbols --with-lang=en-US ) || exit 1
+( cd online/engine && ./autogen.sh --with-distro=CPLinux-LOKit --without-package-format --disable-symbols --with-lang="$COLLABORA_ENGINE_LANGUAGES" ) || exit 1
 ( cd online/engine && make $ENGINE_BUILD_TARGET ) || exit 1
 
 # copy stuff

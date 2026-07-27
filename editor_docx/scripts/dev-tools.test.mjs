@@ -74,6 +74,29 @@ test('source and native builds apply the public debranding patch before compilat
   }
 });
 
+test('source and native builds require multilingual engines with Korean language resources', () => {
+  const sourceBuild = readProjectFile('editor_docx/scripts/build-source-editor-image.mjs');
+  const nativeBuild = readProjectFile('editor_docx/scripts/build-native-editor.mjs');
+  const alpineBuild = readProjectFile('editor_docx/docker/from-source/build-alpine.sh');
+  for (const script of [sourceBuild, nativeBuild, alpineBuild]) {
+    assert.match(script, /ENGINE_LANGUAGES/);
+    assert.match(script, /\bko\b/);
+    assert.doesNotMatch(script, /--with-lang=en-US(?:\s|["'])/);
+  }
+  for (const script of [sourceBuild, nativeBuild]) {
+    assert.match(script, /Langpack-ko\.xcd/);
+  }
+});
+
+test('source image preparation supports both legacy and current upstream docker layouts', () => {
+  const sourceBuild = readProjectFile('editor_docx/scripts/build-source-editor-image.mjs');
+  assert.match(sourceBuild, /docker', 'from-source-gh-action'/);
+  assert.match(sourceBuild, /docker', 'from-source'/);
+  assert.match(sourceBuild, /const usesLegacyLayout = existsSync\(legacySourceDir\)/);
+  assert.match(sourceBuild, /cpSync\(alpineDockerfile, path\.join\(buildContextDir, 'Dockerfile'\)\)/);
+  assert.match(sourceBuild, /usesLegacyLayout\s*\?\s*'build\.sh'\s*:\s*'build-alpine\.sh'/);
+});
+
 test('dev check cleans up only runtimes created by the check', () => {
   const devCheck = readProjectFile('editor_docx/scripts/dev-check.mjs');
   assert.match(devCheck, /snapshotRuntime\(\)/);

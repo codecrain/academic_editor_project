@@ -2,6 +2,10 @@ import {
   DOCX_COMMAND_CATEGORIES,
   DOCX_COMMAND_OPS,
 } from './docx-command-catalog.mjs';
+import {
+  HWPX_COMMAND_CATEGORIES,
+  HWPX_COMMAND_OPS,
+} from '../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -25,7 +29,7 @@ const baseRevisionProperty = {
   description: 'Exact revision returned by the preceding read or write. Stale revisions are rejected.',
 };
 
-const EDITOR_MCP_TOOLS = Object.freeze([
+const DOCX_MCP_TOOLS = Object.freeze([
   {
     name: 'editor_docx_open',
     description: 'Open a DOCX in an isolated editor session. Application code should supply bytes; never ask a user or model to reproduce binary content.',
@@ -173,6 +177,16 @@ const EDITOR_MCP_TOOLS = Object.freeze([
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
+    name: 'editor_docx_save_checkpoint',
+    description: 'Save the exact current DOCX revision as an unverified recovery artifact and close the session. This intentionally bypasses final quality acceptance and must never be presented as a verified result.',
+    inputSchema: objectSchema({
+      documentId: documentIdProperty,
+      baseRevision: baseRevisionProperty,
+      filename: { type: 'string', minLength: 1 },
+    }, ['documentId', 'baseRevision', 'filename']),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
     name: 'editor_docx_artifact_read',
     description: 'Read a finalized DOCX artifact by opaque ID. Intended for the authenticated application server after user approval.',
     inputSchema: objectSchema({
@@ -191,6 +205,24 @@ const EDITOR_MCP_TOOLS = Object.freeze([
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
 ]);
+
+const HWPX_MCP_TOOLS = Object.freeze(DOCX_MCP_TOOLS
+  .filter((tool) => tool.name !== 'editor_docx_export_pdf')
+  .map((tool) => {
+    const cloned = JSON.parse(JSON.stringify(tool)
+      .replaceAll('editor_docx', 'editor_hwpx')
+      .replaceAll('DOCX', 'HWPX')
+      .replaceAll('docx', 'hwpx'));
+    if (cloned.name === 'editor_hwpx_command_catalog') {
+      cloned.inputSchema.properties.category.enum = [...HWPX_COMMAND_CATEGORIES, null];
+    }
+    if (cloned.name === 'editor_hwpx_apply') {
+      cloned.inputSchema.properties.commands.items.properties.op.enum = [...HWPX_COMMAND_OPS];
+    }
+    return Object.freeze(cloned);
+  }));
+
+const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS]);
 
 const toolByName = new Map(EDITOR_MCP_TOOLS.map((tool) => [tool.name, tool]));
 

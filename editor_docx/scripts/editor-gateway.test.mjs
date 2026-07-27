@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import http from 'node:http';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -227,8 +227,24 @@ test('gateway exposes a stateless MCP tools/list and guarded DOCX candidate work
       'editor_docx_quality_check',
       'editor_docx_export_pdf',
       'editor_docx_save_source',
+      'editor_docx_save_checkpoint',
       'editor_docx_artifact_read',
       'editor_docx_artifact_delete',
+      'editor_hwpx_open',
+      'editor_hwpx_discard',
+      'editor_hwpx_read_json',
+      'editor_hwpx_target_map',
+      'editor_hwpx_target_find',
+      'editor_hwpx_target_inspect',
+      'editor_hwpx_object_inventory',
+      'editor_hwpx_command_catalog',
+      'editor_hwpx_apply',
+      'editor_hwpx_render_pages',
+      'editor_hwpx_quality_check',
+      'editor_hwpx_save_source',
+      'editor_hwpx_save_checkpoint',
+      'editor_hwpx_artifact_read',
+      'editor_hwpx_artifact_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');
     assert.deepEqual(discardTool.inputSchema.required, ['documentId']);
@@ -260,6 +276,43 @@ test('gateway exposes a stateless MCP tools/list and guarded DOCX candidate work
     assert.equal(malformedDirectPayload.ok, false);
     assert.match(malformedDirectPayload.message, /exactly one/);
     assert.equal(malformedDirectPayload.documentId, undefined);
+
+    const checkpointOpen = await mcp(206, 'tools/call', {
+      name: 'editor_docx_open',
+      arguments: {
+        filename: 'mcp-checkpoint.docx',
+        bytesBase64: createDocxBytes({ paragraphs: ['Unverified recovery state'] }).toString('base64'),
+      },
+    });
+    const checkpointDocument = checkpointOpen.result.structuredContent;
+    const checkpointSave = await mcp(207, 'tools/call', {
+      name: 'editor_docx_save_checkpoint',
+      arguments: {
+        documentId: checkpointDocument.documentId,
+        baseRevision: checkpointDocument.revision,
+        filename: 'mcp-checkpoint-output.docx',
+      },
+    });
+    assert.equal(checkpointSave.result.isError, false);
+    assert.equal(checkpointSave.result.structuredContent.checkpoint, true);
+    assert.equal(checkpointSave.result.structuredContent.verified, false);
+    assert.equal(checkpointSave.result.structuredContent.sessionClosed, true);
+    const checkpointRead = await mcp(208, 'tools/call', {
+      name: 'editor_docx_artifact_read',
+      arguments: {
+        artifactId: checkpointSave.result.structuredContent.artifactId,
+        expectedSha256: checkpointSave.result.structuredContent.sha256,
+      },
+    });
+    assert.equal(checkpointRead.result.isError, false);
+    const checkpointDelete = await mcp(209, 'tools/call', {
+      name: 'editor_docx_artifact_delete',
+      arguments: {
+        artifactId: checkpointSave.result.structuredContent.artifactId,
+        expectedSha256: checkpointSave.result.structuredContent.sha256,
+      },
+    });
+    assert.equal(checkpointDelete.result.structuredContent.deleted, true);
 
     const exactOpenCall = await mcp(300, 'tools/call', {
       name: 'editor_docx_open',
@@ -1426,17 +1479,37 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     wopiUrl.searchParams.set('access_token', firstSession.formParameters.access_token);
     const info = await fetch(wopiUrl);
     assert.equal(info.status, 200);
-    assert.equal((await info.json()).BaseFileName, 'First.docx');
+    const infoPayload = await info.json();
+    assert.equal(infoPayload.BaseFileName, 'First.docx');
     const lock = await fetch(wopiUrl, {
       method: 'POST',
       headers: { 'X-WOPI-Override': 'LOCK', 'X-WOPI-Lock': 'lock-first' },
     });
     assert.equal(lock.status, 200);
+    const unmodifiedSave = await fetch(`${wopiUrl.origin}${wopiUrl.pathname}/contents${wopiUrl.search}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'X-WOPI-Lock': 'lock-first',
+        'X-COOL-WOPI-IsModifiedByUser': 'false',
+      },
+      body: createDocxBytes({ paragraphs: ['engine normalization must not replace alpha'] }),
+    });
+    assert.equal(unmodifiedSave.status, 200);
+    assert.equal(unmodifiedSave.headers.get('x-wopi-itemversion'), infoPayload.Version);
+    const preservedDownload = await fetch(`${gatewayOrigin}/api/documents/${first.documentId}/download`, { headers: apiHeaders });
+    const preservedDocumentXml = getDocumentXml(Buffer.from(await preservedDownload.arrayBuffer()));
+    assert.match(preservedDocumentXml, /alpha/);
+    assert.doesNotMatch(
+      preservedDocumentXml,
+      /engine normalization must not replace alpha/,
+    );
     const save = await fetch(`${wopiUrl.origin}${wopiUrl.pathname}/contents${wopiUrl.search}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         'X-WOPI-Lock': 'lock-first',
+        'X-COOL-WOPI-IsModifiedByUser': 'true',
       },
       body: createDocxBytes({ paragraphs: ['changed first'] }),
     });
@@ -1631,6 +1704,139 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(saved.ok, true);
     assert.match(saved.sha256, /^[a-f0-9]{64}$/);
   } finally {
+    await close(server);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read, and delete workflow', async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-hwpx-mcp-'));
+  const server = createGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1',
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    docxRuntimeOrigin: 'http://127.0.0.1:9980',
+    hwpxRuntimeOrigin: '',
+    hwpxStaticRoot: '',
+    wopiBaseUrl: 'http://127.0.0.1',
+    sampleDocxPath: path.join(tempRoot, 'sample.docx'),
+    enableSampleDocx: true,
+  });
+  const address = await listen(server);
+  assert.equal(typeof address, 'object');
+  const origin = `http://127.0.0.1:${address.port}`;
+  const sourceBytes = await readFile(path.resolve('editor_hwpx/samples/hwpx/ref/ref_text.hwpx'));
+
+  async function mcp(id, name, argumentsValue) {
+    const response = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id,
+        method: 'tools/call',
+        params: { name, arguments: argumentsValue },
+      }),
+    });
+    assert.equal(response.status, 200);
+    return response.json();
+  }
+
+  let artifact;
+  try {
+    const catalog = await mcp(1, 'editor_hwpx_command_catalog', { op: 'text.replaceParagraph' });
+    assert.equal(catalog.result.isError, false);
+    assert.equal(catalog.result.structuredContent.commands[0].op, 'text.replaceParagraph');
+
+    const openedCall = await mcp(2, 'editor_hwpx_open', {
+      filename: 'ref_text.hwpx',
+      bytesBase64: sourceBytes.toString('base64'),
+    });
+    assert.equal(openedCall.result.isError, false, JSON.stringify(openedCall.result.structuredContent));
+    const opened = openedCall.result.structuredContent;
+
+    const structureCall = await mcp(3, 'editor_hwpx_read_json', {
+      documentId: opened.documentId,
+      view: 'blocks',
+      limit: 20,
+    });
+    assert.equal(structureCall.result.isError, false);
+    const firstBlock = structureCall.result.structuredContent.items.find((item) => item.textLength > 0);
+    assert.ok(firstBlock);
+
+    const inspectCall = await mcp(4, 'editor_hwpx_target_inspect', {
+      documentId: opened.documentId,
+      locations: [firstBlock.location],
+    });
+    assert.equal(inspectCall.result.isError, false, JSON.stringify(inspectCall.result.structuredContent));
+
+    const applyCall = await mcp(5, 'editor_hwpx_apply', {
+      documentId: opened.documentId,
+      baseRevision: opened.revision,
+      commands: [{
+        op: 'text.replaceParagraph',
+        location: firstBlock.location,
+        text: 'HWPX MCP 원자적 수정 검증',
+      }],
+    });
+    assert.equal(applyCall.result.isError, false, JSON.stringify(applyCall.result.structuredContent));
+    const revision = applyCall.result.structuredContent.revision;
+
+    const qualityCall = await mcp(6, 'editor_hwpx_quality_check', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+    });
+    assert.equal(qualityCall.result.isError, false);
+    assert.equal(qualityCall.result.structuredContent.ok, true);
+
+    const renderCall = await mcp(7, 'editor_hwpx_render_pages', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      pages: [1],
+      includeBaseline: true,
+    });
+    assert.equal(renderCall.result.isError, false);
+    assert.equal(renderCall.result.structuredContent.baseline.pages[0].nonBlank, true);
+    assert.equal(renderCall.result.structuredContent.current.pages[0].nonBlank, true);
+
+    const saveCall = await mcp(8, 'editor_hwpx_save_source', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      filename: 'hwpx-mcp-output.hwpx',
+    });
+    assert.equal(saveCall.result.isError, false, JSON.stringify(saveCall.result.structuredContent));
+    artifact = saveCall.result.structuredContent;
+
+    const readCall = await mcp(9, 'editor_hwpx_artifact_read', {
+      artifactId: artifact.artifactId,
+      expectedSha256: artifact.sha256,
+    });
+    assert.equal(readCall.result.isError, false);
+    assert.equal(readCall.result.structuredContent.mimeType, 'application/vnd.hancom.hwpx');
+    assert.equal(
+      Buffer.from(readCall.result.structuredContent.bytesBase64, 'base64').subarray(0, 2).toString('hex'),
+      '504b',
+    );
+
+    const deleteCall = await mcp(10, 'editor_hwpx_artifact_delete', {
+      artifactId: artifact.artifactId,
+      expectedSha256: artifact.sha256,
+    });
+    assert.equal(deleteCall.result.isError, false);
+    assert.equal(deleteCall.result.structuredContent.deleted, true);
+    artifact = null;
+  } finally {
+    if (artifact) {
+      await mcp(11, 'editor_hwpx_artifact_delete', {
+        artifactId: artifact.artifactId,
+        expectedSha256: artifact.sha256,
+      }).catch(() => undefined);
+    }
     await close(server);
     await rm(tempRoot, { recursive: true, force: true });
   }

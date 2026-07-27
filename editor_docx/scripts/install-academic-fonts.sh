@@ -60,6 +60,8 @@ OPEN_FONT_PACKAGES=(
 )
 
 mkdir -p "$WORK_DIR/packages" "$WORK_DIR/extracted" "$WORK_DIR/corefonts" "$FONT_ROOT"
+chmod 0755 "$WORK_DIR"
+chown _apt:root "$WORK_DIR/packages"
 rm -f "$FONT_ROOT/INSTALL-MANIFEST.txt" "$MANIFEST_TMP"
 : > "$WORK_DIR/package-versions.txt"
 : > "$WORK_DIR/font-matches.txt"

@@ -179,6 +179,21 @@ test('qualification rejects required entry loss, media-type drift, and undeclare
     error => error.code === 'HWPX_PACKAGE_MEDIA_TYPE_CHANGED',
   );
 
+  const jpgAliasSource = packageBytes([
+    ['BinData/image1.jpg', Buffer.from('same-jpeg')],
+  ], [
+    { id: 'image1', href: 'BinData/image1.jpg', mediaType: 'image/jpg' },
+  ]);
+  const jpegAliasCandidate = packageBytes([
+    ['BinData/image1.jpg', Buffer.from('same-jpeg')],
+  ], [
+    { id: 'image1', href: 'BinData/image1.jpg', mediaType: 'image/jpeg' },
+  ]);
+  assert.equal(
+    qualifyHwpxCandidate(jpgAliasSource, jpegAliasCandidate).ok,
+    true,
+  );
+
   const collision = packageBytes([
     ['BinData/image1.png', Buffer.from('old')],
     ['Custom/audit.bin', Buffer.from('candidate-different')],
@@ -189,6 +204,14 @@ test('qualification rejects required entry loss, media-type drift, and undeclare
     () => qualifyHwpxCandidate(source, collision),
     error => error.code === 'HWPX_PACKAGE_ENTRY_COLLISION',
   );
+
+  const generatedEntries = readZip(packageBytes());
+  generatedEntries.set('version.xml', Buffer.from('<version target-application="RHWP"/>'));
+  const generated = qualifyHwpxCandidate(
+    packageBytes(),
+    createZip([...generatedEntries]),
+  );
+  assert.ok(generated.changedEntries.includes('version.xml'));
 });
 
 test('qualification rejects manifest relationship loss and dangling manifest entries', () => {

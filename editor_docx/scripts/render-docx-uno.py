@@ -32,6 +32,34 @@ DEFAULT_OPERATION_TIMEOUT = 180.0
 DEFAULT_SHUTDOWN_TIMEOUT = 10.0
 
 
+def resolve_soffice_executable(value: str) -> Path:
+    """Resolve a real executable and avoid Windows console launchers."""
+    supplied = Path(value).expanduser()
+    located = supplied if supplied.is_file() else Path(shutil.which(value) or supplied)
+    if os.name == "nt" and located.suffix.lower() in {"", ".com", ".cmd", ".bat"}:
+        executable = located.with_name("soffice.exe")
+        if executable.is_file():
+            located = executable
+    return located.resolve()
+
+
+def office_process_options() -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        startup_info = subprocess.STARTUPINFO()
+        startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup_info.wShowWindow = subprocess.SW_HIDE
+        options["startupinfo"] = startup_info
+        options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    else:
+        options["start_new_session"] = True
+    return options
+
+
 class RenderDocxError(RuntimeError):
     """Base error with a stable machine-readable code."""
 
@@ -394,13 +422,7 @@ class OfficeRuntime:
             f"--accept=pipe,name={self.pipe_name};urp;StarOffice.ComponentContext",
         ]
         try:
-            self.process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            self.process = subprocess.Popen(command, **office_process_options())
         except OSError as error:
             raise OfficeStartError(f"failed to start Collabora: {error}") from error
 
@@ -680,7 +702,7 @@ def publish_artifacts(
 def render_docx(arguments: argparse.Namespace) -> dict[str, Any]:
     source = Path(arguments.source).expanduser().resolve()
     output_dir = Path(arguments.output_dir).expanduser().resolve()
-    soffice = Path(arguments.soffice).expanduser().resolve()
+    soffice = resolve_soffice_executable(arguments.soffice)
     validate_paths(source, output_dir, soffice)
     output_dir.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=".docx-uno-staging-", dir=output_dir))

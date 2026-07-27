@@ -7,6 +7,7 @@ import { createDocxBytes, readZip } from './docx-api-utils.mjs';
 
 const DOCUMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const LIVE_DOCUMENT_ID_PATTERN = /^doc_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export const DEFAULT_EDITOR_TOKEN_TTL_MS = 12 * 60 * 60 * 1000;
 
 function encodeBase64Url(value) {
   return Buffer.from(value).toString('base64url');
@@ -39,7 +40,7 @@ export class EditorDocumentStore {
   constructor(options) {
     this.root = path.resolve(options.root);
     this.tokenSecret = String(options.tokenSecret || '');
-    this.tokenTtlMs = Number(options.tokenTtlMs || 60 * 60 * 1000);
+    this.tokenTtlMs = Number(options.tokenTtlMs || DEFAULT_EDITOR_TOKEN_TTL_MS);
     this.maxFileSize = Number(options.maxFileSize || 50 * 1024 * 1024);
     this.maxDocuments = Number(options.maxDocuments || 1000);
     if (this.tokenSecret.length < 32) {

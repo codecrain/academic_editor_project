@@ -48,6 +48,27 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, text: '2026' },
   }),
   command({
+    op: 'text.replaceTracked', category: 'text', precondition: 'target_inspect',
+    description: 'Replace an inspected text range with native Word deletion and insertion revisions.',
+    required: ['target', 'text'], aliases: ['replaceTextTracked'],
+    fields: {
+      target: targetField,
+      text: 'Replacement text. Use an empty string for a tracked deletion.',
+      author: 'Optional review author shown by Word. Defaults to Tlooto DocsAgent.',
+      date: 'Optional ISO-8601 revision timestamp. Defaults to the server time.',
+    },
+    example: {
+      op: 'text.replaceTracked',
+      target: { native: { section: 0, para: 1, offset: 0, length: 4 } },
+      text: '2026',
+      author: 'Tlooto DocsAgent',
+    },
+    notes: [
+      'Produces true OOXML tracked changes rather than red direct formatting.',
+      'The target must remain inside one inspected paragraph and replacement text cannot contain a newline.',
+    ],
+  }),
+  command({
     op: 'insertText', category: 'text', precondition: 'target_inspect',
     normalizeAs: 'text.insert',
     description: 'Insert text at an inspected DOCX range start.', required: ['target', 'text'], aliases: ['text.insert'],
@@ -301,6 +322,7 @@ function commandFieldValue(commandValue, field) {
 const EMPTY_TEXT_CLEARING_OPS = new Set([
   'text.replaceParagraph',
   'text.replace',
+  'text.replaceTracked',
   'appendParagraph',
   'table.writeCell',
   'table.writeRichCell',
@@ -429,7 +451,8 @@ function commandInspectionTargets(command, entry, commandIndex = 0) {
     || entry.op === 'image.insertAfterParagraph') {
     add(command.location ?? command.target, 'location');
     addOptional(command.styleSource, 'styleSource');
-  } else if (entry.op === 'text.replace' || entry.op === 'insertText' || entry.op === 'deleteRange'
+  } else if (entry.op === 'text.replace' || entry.op === 'text.replaceTracked'
+    || entry.op === 'insertText' || entry.op === 'deleteRange'
     || entry.op === 'applyStyle' || entry.op === 'setRunStyle' || entry.op === 'setParagraphStyle'
     || entry.op === 'insertFootnote') {
     add(command.target ?? command.location, 'target');
