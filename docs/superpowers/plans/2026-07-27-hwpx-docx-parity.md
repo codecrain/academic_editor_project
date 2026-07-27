@@ -1,5 +1,11 @@
 # HWPX DOCX 동급화 Implementation Plan
 
+> 역사적 실행 계획입니다. 최초의 250건/v2 제안과 테스트 우선 작업 항목을
+> 보존하지만 현재 제품 계약은 아닙니다. 승인·구현된 평가 코퍼스는
+> `evaluation/hwpx-public-sector-v1`의 100건(편집 90, 생성 10)입니다.
+> 현재 동작은 `docs/DOCUMENTATION_INDEX.md`, `API.md`, 실행 가능한 카탈로그와
+> 테스트만을 기준으로 판단합니다.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** HWPX 편집기의 구조 편집, REST/MCP, PDF, 문서화와 실제 한컴오피스 검수를 DOCX 제품 수준으로 승격한다.

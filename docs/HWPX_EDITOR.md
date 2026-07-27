@@ -1,73 +1,76 @@
-# HWPX editor: current architecture and capability
+# HWPX editor: architecture, capability, and safety
 
-## Scope
+## Product boundary
 
-The HWPX editor supports deterministic API-only edits of ordinary,
-unencrypted HWPX packages. It uses RHWP for document analysis and SVG rendering
-and a preserve-package writer for final output. Browser automation is not part
-of the editing contract.
+HWPX has two deliberately separate entry points:
 
-The implementation is intentionally split:
+- Studio is the interactive RHWP/WASM editor.
+- REST/MCP is the deterministic automation path. Its default
+  `preserve-package` writer patches the original HWPX ZIP and is the required
+  path for complex public-sector documents.
 
-- `editor_hwpx/scripts/hwpx-api-utils.mjs` owns HWPX parsing, stable targets,
-  command execution, preservation, quality checks, SVG rendering data, and
-  reopen validation.
-- `editor_hwpx/scripts/hwpx-command-catalog.mjs` owns the machine-readable
-  public command contract.
-- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs` statically verifies that the
-  installed RHWP artifact declares every native method required by a ready
-  command in `rhwp.d.ts` and exposes the matching method on the executable
-  `rhwp.js` wrapper before Studio materializes that artifact. This check does
-  not initialize WASM, introspect live WASM exports, or prove command
-  semantics.
-- `editor_docx/scripts/editor-gateway.mjs` exposes `/v1/hwpx`.
-- `editor_docx/scripts/editor-mcp.mjs` exposes the `editor_hwpx_*` MCP tools.
-- `evaluation/hwpx-public-sector-v1` owns high-difficulty acceptance data and
-  the API-only runner.
+DOCX and HWPX share transport conventions, bounded projections, artifact
+handling, and the small MCP schema factory. They do not share package mutation,
+rendering, runtime, or editor code.
 
-DOCX and HWPX share transport conventions and bounded projections. They do not
-share package mutation logic.
+Key HWPX modules:
+
+- `editor_hwpx/scripts/hwpx-api-utils.mjs`: parsing, stable targets, atomic
+  commands, package preservation, quality, SVG render data, reopen validation.
+- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: machine-readable operation
+  contract.
+- `editor_hwpx/scripts/hwpx-mcp-tools.mjs`: HWPX-owned MCP schemas.
+- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs`: installed RHWP declaration,
+  executable-wrapper, and artifact materialization gates.
+- `editor_hwpx/scripts/hwpx-native-pdf.mjs`: isolated native PDF runner.
+- `editor_hwpx/rhwp-studio/src/core/hwpx-save-integrity.ts`: Studio save-loss
+  guard.
+- `editor_docx/scripts/editor-gateway.mjs`: shared HTTP transport dispatch;
+  format behavior remains in each format's modules.
 
 ## DOCX comparison
 
 | Area | DOCX | HWPX |
 | --- | --- | --- |
-| REST/MCP lifecycle | Open, bounded read, inspect, atomic apply, quality, render, checkpoint, finalize, artifact handoff, discard | Same lifecycle |
-| Canonical catalog | 29 operations | 32 operations (27 ready, 5 unavailable) |
+| REST/MCP lifecycle | Open, bounded read, inspect, atomic apply, quality, render, checkpoint/finalize, PDF, artifact handoff, discard | Same lifecycle |
+| Canonical catalog | 29 operations | 32 operations (27 available, 5 unavailable) |
 | Existing text/table/style edit | Supported | Supported |
 | Existing image replacement/generation | Supported | Supported |
-| New table creation/caption | Supported | Table creation is ready; native captions remain unavailable |
-| Metadata/page setup/header/footer/footnote | Supported | Page setup is ready; metadata, header/footer, and footnote remain unavailable |
+| New table/caption | Supported | Table creation ready; native caption unavailable |
+| Metadata/page setup/header/footer/footnote | Supported | Page setup ready; metadata, header/footer, footnote unavailable |
 | Render evidence | Baseline/current WebP | Baseline/current RHWP SVG |
-| PDF export | Supported through isolated UNO | Not implemented |
-| Encrypted/distribution input | Not applicable to OOXML contract | Explicitly rejected |
+| PDF export | Isolated UNO | Isolated source-built RHWP CLI |
+| Complex-format safety | OOXML-specific checks | Preserve-package writer plus critical-control loss gate |
+| Encrypted/distribution input | Outside this contract | Explicitly rejected |
 
-HWPX now has a wider authoring surface, but it does not have full DOCX
-renderer/export parity. The command counts and limits above are current
-contract facts, not roadmap promises.
+The HWPX rendering surface remains SVG rather than DOCX WebP, and five
+canonical structural operations remain unavailable. These are explicit
+contract limits, not hidden partial support.
 
 ## Preservation and transaction model
 
-An `apply` request is atomic:
+An API `apply` request is atomic:
 
-1. Validate every command against the HWPX catalog.
-2. Execute the whole batch in an isolated trial session.
-3. Serialize and reopen the trial package.
-4. Commit the resulting bytes to the live session once.
+1. Validate every command against the catalog.
+2. Verify all required targets and style sources were inspected.
+3. Execute the whole batch in an isolated trial session.
+4. Serialize and reopen the trial package.
+5. Compare package, relationship, object, and operation postconditions.
+6. Commit once and advance the revision once.
 
-If any command or reopen step fails, no earlier command is committed and the
-revision does not advance. Successful batches advance the revision exactly
-once.
+Failure at any gate commits nothing. The default writer changes only addressed
+section XML, image entries, shapes, or text boxes. No-op saves return the exact
+original bytes, including opaque and binary entries.
 
-The default `preserve-package` writer starts from the original ZIP and changes
-only addressed section XML, image entries, or shape/text-box content. It
-preserves unrelated package entries and reopens the saved bytes before
-finalization. No-op saves return the original bytes.
+Studio uses the native RHWP serializer for interactivity. Real testing against
+an 11-page education-ministry HWPX showed that an unguarded round trip could
+reduce pictures from 9 to 1 and remove a container and shape comments. Studio
+therefore compares source and candidate control counts before every HWPX save
+and blocks unsafe output. It does not silently downgrade to a corrupt file.
 
-## Stable targets
+## Stable targets and command catalog
 
-Use exact targets obtained from `target_map`, `target_find`, or
-`target_inspect`:
+Use locations returned by `target_map`, `target_find`, or `target_inspect`:
 
 ```json
 {"paragraph":{"section":0,"number":31}}
@@ -77,13 +80,7 @@ Use exact targets obtained from `target_map`, `target_find`, or
 {"tableId":"tbl_12","cell":{"number":21,"row":6,"column":1}}
 ```
 
-`tableId` plus cell `number` is the stable cell identity within one revision.
-Row and column are useful assertions, not substitutes for inspection. Cursors
-are revision-bound; enumerate targets again after a successful apply.
-
-## Public command catalog
-
-The current catalog exposes 32 canonical operations:
+The catalog has 32 canonical operations:
 
 - Text: `text.replaceParagraph`, `text.insertAfterParagraph`, `text.replace`,
   `text.replaceTracked`, `insertText`, `deleteRange`, `appendParagraph`
@@ -95,78 +92,60 @@ The current catalog exposes 32 canonical operations:
 - Layout: `layout.fitText`
 - Images: `image.replace`, `image.insertAfterParagraph`,
   `image.generateAndReplace`
-- Package and structure: `setDocumentMetadata`, `defineStyle`, `setPageSetup`,
+- Package/structure: `setDocumentMetadata`, `defineStyle`, `setPageSetup`,
   `setHeaderFooter`, `insertFootnote`
 - Objects: `object.deleteTextBoxByText`, `object.replaceTextBoxText`
 
-Each entry reports `readiness` independently from `execution`. Ready
-preserve-package commands use `execution=preserve-package`; native tracked
-replacement uses `tracked-package-transform`; the promoted structural
-commands use `structural-adapter`. `appendParagraph` uses the qualified
-`preserve-package-adapter` so inspected paragraph/run style IDs can be copied
-exactly instead of being approximated through format properties. Five
-structural entries remain canonical
-with `readiness=unavailable`. Repository source implements
-`setDocumentMetadata`, while no published `@rhwp/core` artifact through 0.8.2
-exposes both metadata methods. The pinned published 0.7.15 artifact exposes
-the relevant method names, but table captions and run formatting disappear
-during export/reopen, header/footer content does not survive export/reopen, and
-footnote insertion traps on the supported blank-document fixture. Validation
-rejects all five operations before mutation. `table.create` remains ready
-without its former caption option; passing `caption` is rejected before
-mutation.
+Twenty-seven report `readiness=available`. The five unavailable operations are
+`table.insertCaption`, `setDocumentMetadata`, `setRunStyle`,
+`setHeaderFooter`, and `insertFootnote`. The gateway rejects them before
+mutation. Query `editor_hwpx_command_catalog` or the REST catalog at runtime;
+do not infer support from a declaration or lower-level experiment.
 
-The static declaration/wrapper check is only the first readiness gate. A
-command is included in the current 27-ready set only when installed-artifact
-tests also exercise its applicable command path and require package
-qualification, export, reopen, and operation-specific postconditions. Method
-presence in `rhwp.d.ts` or `rhwp.js` alone never promotes a command.
+## Rendering and PDF
 
-Query `editor_hwpx_command_catalog` or
-`POST /v1/hwpx/documents/{documentId}/commands/catalog` before applying a new
-operation. The response includes aliases, required fields, preconditions,
-inspection targets, and an example.
+HWPX page rendering returns nonblank RHWP SVG plus structural evidence. It is
+not a claim of pixel identity with Hancom Office.
 
-## Quality and rendering evidence
+HWPX PDF export uses `editor_hwpx/docker/pdf/Dockerfile` and
+`editor_hwpx/scripts/hwpx-native-pdf.mjs`. Each request gets a unique container
+and temporary directory. The runner supports `pages="all"` only, imposes a
+timeout and output limit, validates JSON and `%PDF-`, computes SHA-256, and
+cleans only its owned container and directory.
 
-Acceptance requires more than a successful save:
+Build the local image:
 
-- saved bytes have a package SHA-256;
-- the saved HWPX reopens through the same public API;
-- page, section, table, image, picture, XML, and binary-entry invariants pass;
-- requested baseline and current pages render as nonblank SVG;
-- exact target text and cloned paragraph/character style IDs survive reopen;
-- no quality issue has `severity=error`.
+```powershell
+docker build -t academic-rhwp-pdf:latest -f editor_hwpx/docker/pdf/Dockerfile .
+```
 
-The renderer returns SVG evidence. It is not proof of pixel identity in Hancom
-Office, so workflows requiring Hancom-specific typography still need a human
-or Hancom rendering acceptance step.
+Then call REST `/v1/hwpx/documents/{id}/documents/export-pdf` or MCP
+`editor_hwpx_export_pdf`.
 
-The deterministic Node suites exercise catalog validation, package policy,
-structural adapters, tracked-change markup/probing, reopen checks, and API
-utilities. Passing them is not Hancom interoperability evidence. In
-particular, tracked replacement is currently limited to one `hp:t` run and a
-single-command atomic batch; listing, accepting, and rejecting revisions are
-not public commands.
+## Acceptance evidence
+
+Deterministic verification includes:
+
+- 121 HWPX API/catalog/package/readiness/Studio-safety tests;
+- REST and MCP workflow checks;
+- a 100-case public-sector corpus: 90 complex edits and 10 generations;
+- question length, heterogeneous-source, attachment hash/signature,
+  privacy, exact binary identity, reopen, object, render, and cleanup gates;
+- actual Studio load/edit/save-loss blocking on the 11-page source;
+- actual Hancom 2024 open, resave, and PDF export of API-produced HWPX;
+- actual native Docker PDF export and cleanup.
+
+Run commands are listed in `API.md` and the evaluation README. Generated
+evidence and caches are not committed.
 
 ## Explicit limits
 
-These capabilities are not represented as supported:
-
-- encrypted/distribution HWPX editing; the loader returns
-  `unsupported_encrypted_hwpx` with an actionable message;
-- HWPX PDF export;
-- document metadata mutation with the currently published RHWP artifact;
-- native table-caption and run-format mutation with the pinned published RHWP
-  artifact;
-- header/footer and footnote mutation with the pinned published RHWP artifact;
-- native numbering-definition creation (list commands write visible list
-  text while preserving paragraph style);
-- cross-run or table-cell tracked replacement, tracked-change listing, and
-  tracked-change accept/reject;
-- semantic chart-data editing (replace an existing image entry instead);
-- guaranteed pixel parity with Hancom Office;
-- direct mutation of legacy binary HWP. HWP files may be reference inputs, but
-  the editable output contract here is HWPX.
-
-Never claim one of these from the existence of a lower-level RHWP experiment.
+- Encrypted/distribution HWPX returns `unsupported_encrypted_hwpx`.
+- The five unavailable catalog operations above are rejected before mutation.
+- Native numbering-definition creation is unavailable; list commands write
+  visible list text while preserving paragraph style.
+- Tracked replacement is limited to one `hp:t` run and a single-command batch;
+  listing, accepting, and rejecting revisions are not public commands.
+- Semantic chart-data editing is unavailable; replace an existing image.
+- HWPX render evidence does not guarantee Hancom pixel parity.
+- Legacy binary HWP may be a reference input, but this contract writes HWPX.

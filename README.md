@@ -67,9 +67,12 @@ only those editor runtimes. Local dev defaults to these stable subpaths:
 
 ## MCP Endpoint
 
-The editor gateway exposes a stateless Streamable HTTP MCP endpoint at `/mcp`.
+The editor gateway exposes a Streamable HTTP MCP endpoint at `/mcp`. Transport
+requests are stateless, while each opened document is an isolated,
+revision-bound server session that must be finalized or discarded.
 It implements `initialize`, `ping`, `tools/list`, and `tools/call` for both
-DOCX and HWPX open/read/target/inspect/apply/quality/render/finalize workflows.
+DOCX and HWPX open/read/target/inspect/apply/quality/render/PDF/finalize
+workflows.
 Finalization returns an opaque `artifactId`; an authenticated application
 server retrieves bytes with the matching `editor_docx_artifact_read` or
 `editor_hwpx_artifact_read` only after user approval. The model and browser

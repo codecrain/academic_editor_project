@@ -11,7 +11,8 @@ experiments or historical internals; they are not the product API contract.
 - [`HWPX_EDITOR.md`](HWPX_EDITOR.md): HWPX architecture, preservation rules,
   capability matrix, and known limits.
 - [`HWPX_MCP_API.md`](HWPX_MCP_API.md): concise HWPX agent workflow, tool list,
-  request examples, finalization, and failure behavior.
+  request examples, PDF export, Studio safety boundary, finalization, and
+  failure behavior.
 - [`../evaluation/hwpx-public-sector-v1/README.md`](../evaluation/hwpx-public-sector-v1/README.md):
   acceptance-corpus entry point.
 - [`../evaluation/hwpx-public-sector-v1/METHODOLOGY.md`](../evaluation/hwpx-public-sector-v1/METHODOLOGY.md):
@@ -26,11 +27,16 @@ whether a command is supported:
 
 - `editor_hwpx/scripts/hwpx-command-catalog.mjs`
 - `editor_hwpx/scripts/hwpx-runtime-readiness.mjs`
+- `editor_hwpx/scripts/hwpx-mcp-tools.mjs`
+- `editor_hwpx/scripts/hwpx-native-pdf.mjs`
 - `editor_docx/scripts/docx-command-catalog.mjs`
 - `editor_docx/scripts/editor-mcp.mjs`
 - `editor_docx/scripts/editor-gateway.mjs`
 - `npm run test:runtime`
 - `npm run test:hwpx-evaluation`
+
+Generated evaluation results, browser downloads, Hancom evidence, PDFs, caches,
+and temporary artifacts are intentionally excluded from source control.
 
 When prose and an executable catalog differ, fix the prose and code together.
 Do not infer product support from lower-level RHWP tests alone.

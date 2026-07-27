@@ -1,7 +1,7 @@
 # HWPX public-sector acceptance corpus v1
 
 This corpus evaluates whether the HWPX editor can complete difficult,
-multi-source public-sector work through the public HTTP API only.
+multi-source public-sector work through its public REST and MCP surfaces.
 
 ## Contents
 
@@ -29,7 +29,8 @@ npm.cmd run test:hwpx-evaluation
 
 The first command validates IDs, question length, format diversity, source-fact
 linkage, attachment hashes, command contracts, and all 100 gold files. The
-second executes the documents. Focused investigation:
+second executes every scenario through both the public REST API and the public
+MCP tool surface. Focused investigation:
 
 ```powershell
 node evaluation/hwpx-public-sector-v1/scripts/run-api-evaluation.mjs `
@@ -37,9 +38,11 @@ node evaluation/hwpx-public-sector-v1/scripts/run-api-evaluation.mjs `
 ```
 
 `--render` is `full`, `sample`, or `none`. Final acceptance uses `full`.
-The runner starts an ephemeral loopback gateway in-process, calls only public
-`/v1/hwpx` endpoints for document work, discards every session, deletes
-temporary outputs, and closes the server in `finally`.
+The runner starts an ephemeral loopback gateway in-process, exercises REST and
+MCP open/catalog/inspect/apply/quality/render/save/read/hash/delete workflows,
+discards every session, deletes temporary outputs, and closes the server in
+`finally`. It also rejects introduced direct identifiers and any changed
+unrequested binary package entry.
 
 Results are written to:
 

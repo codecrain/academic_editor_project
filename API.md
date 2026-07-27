@@ -44,6 +44,7 @@ HWPX MCP tools:
 - `editor_hwpx_quality_check`
 - `editor_hwpx_save_source`
 - `editor_hwpx_save_checkpoint`
+- `editor_hwpx_export_pdf`
 - `editor_hwpx_artifact_read`
 - `editor_hwpx_artifact_delete`
 
@@ -56,9 +57,10 @@ catalog by category or operation before the first apply. The broker validates
 every apply against that catalog before the document session can mutate.
 
 The broker enforces exact revisions, command-specific inspection or object
-inventory preconditions, and a clean quality check before finalization or
-DOCX PDF export. Information-only findings do not block; warnings and errors
-do.
+inventory preconditions, and a quality check before finalization or PDF
+export. Error-severity findings always block. DOCX new or worsened capacity
+warnings also block; HWPX warnings remain visible for review but do not by
+themselves block a structurally valid package.
 Every `tools/call` argument object is validated against the schema returned by
 `tools/list` before the tool executes. In particular, each format's `open`
 requires top-level `filename` plus exactly one of `bytesBase64` or `bytesRef`;
@@ -235,13 +237,14 @@ POST /v1/{format}/documents/{id}/pages/render-all
 POST /v1/{format}/documents/{id}/documents/save-source
 POST /v1/{format}/documents/{id}/documents/save-checkpoint
 POST /v1/{format}/documents/{id}/documents/discard
-POST /v1/docx/documents/{id}/documents/export-pdf
+POST /v1/{format}/documents/{id}/documents/export-pdf
 ```
 
 Known local bridge gaps:
 - HWPX page rendering returns RHWP SVG payloads. WebP rasterization is not
   part of the current HWPX API.
-- HWPX PDF export is not implemented. DOCX PDF export is implemented through the isolated Collabora UNO renderer.
+- DOCX PDF uses isolated Collabora UNO. HWPX PDF uses the source-built RHWP
+  native CLI in an isolated request-owned Docker container.
 
 Route aliases accepted by the local bridge:
 
@@ -257,7 +260,7 @@ documents/save-source                         -> save
 quality/check                                 -> health/check
 export with body.type=json                    -> documents/read-json
 export with body.type=pages-image             -> pages/render-all
-export with body.type=pdf                     -> documents/export-pdf (DOCX)
+export with body.type=pdf                     -> documents/export-pdf
 ```
 
 ## Open
@@ -296,7 +299,7 @@ Response:
   "fmt": "hwpx",
   "revision": 1,
   "pageCount": 10,
-  "capabilities": ["json", "targetMap", "targetInspect", "objectInventory", "commands", "save", "quality", "renderPage"]
+  "capabilities": ["json", "targetMap", "targetInspect", "objectInventory", "commands", "save", "quality", "renderPage", "exportPdf"]
 }
 ```
 
@@ -644,7 +647,7 @@ package qualification and reopen verification.
 Runtime artifact validation statically compares the `HwpDocument` method
 surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
 initialize WASM or introspect live WASM exports, so method presence is not
-semantic readiness. The 27-ready set is additionally gated by pinned
+semantic readiness. The 27 available-operation set is additionally gated by pinned
 installed-artifact command tests that require the applicable mutation,
 package qualification, export, reopen, and operation-specific postconditions.
 
@@ -1261,9 +1264,9 @@ HWPX save validation:
 
 ## PDF Export
 
-Implemented DOCX API:
+Implemented DOCX and HWPX API:
 
-`POST /v1/docx/documents/{id}/documents/export-pdf`
+`POST /v1/{format}/documents/{id}/documents/export-pdf`
 
 ```json
 { "filename": "edited.pdf" }
@@ -1283,9 +1286,25 @@ Response without `outputPath`:
 }
 ```
 
-The MCP `editor_docx_export_pdf` form writes an opaque `.pdf` artifact after a
-clean quality check. The application-side wrapper reads it, verifies its hash,
-returns it as a real model file input, and deletes the temporary artifact.
+MCP `editor_docx_export_pdf` and `editor_hwpx_export_pdf` write an opaque
+`.pdf` artifact after a quality check with no error-severity issues. The
+application-side wrapper reads it, verifies its hash, returns it as a real
+model file input, and deletes the temporary artifact.
+
+DOCX uses isolated UNO. HWPX uses the source-built RHWP CLI image:
+
+```powershell
+docker build -t academic-rhwp-pdf:latest -f editor_hwpx/docker/pdf/Dockerfile .
+```
+
+The HWPX runner accepts only the complete document (`"pages":"all"` or
+omitted), verifies native JSON, page count, `%PDF-`, byte length, and SHA-256,
+and cleans its unique request container and temporary directory on success,
+failure, or timeout.
+
+Optional HWPX PDF runtime settings are
+`EDITOR_HWPX_PDF_DOCKER_IMAGE`, `EDITOR_HWPX_PDF_TIMEOUT_MS`, and
+`EDITOR_HWPX_PDF_TEMP_ROOT`.
 
 Optional Windows/Word validation command:
 
@@ -1328,8 +1347,10 @@ isolated session opened. An `empty-table`, `cell-overflow-risk`, or
 `cell-line-overflow-risk` warning at the same stable table/cell location is
 reported as `severity=info`, `preexisting=true`, and
 `baselineSeverity=warning` only when every risk ratio is unchanged or lower.
-New or worsened warnings remain warnings and continue to block MCP save/PDF
-export. Errors are never downgraded.
+For DOCX, new or worsened capacity warnings block finalization. For HWPX,
+warnings are returned for review but do not block when package, object, reopen,
+and render gates pass. Errors are never downgraded and always block save/PDF
+finalization.
 
 `POST /v1/{format}/documents/{id}/quality/render-compare`
 
@@ -1481,6 +1502,21 @@ These deterministic checks include package qualification and reopen
 verification; they do not constitute Hancom Office interoperability or visual
 acceptance evidence.
 
+HWPX native PDF and Hancom acceptance:
+
+```powershell
+node --test editor_hwpx/scripts/hwpx-native-pdf.test.mjs
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File editor_hwpx/scripts/hancom/Invoke-HwpxAcceptance.ps1 `
+  -InputPath <candidate.hwpx> `
+  -ResavedPath <hancom-resaved.hwpx> `
+  -PdfPath <hancom.pdf> `
+  -EvidencePath <evidence.json>
+```
+
+The Hancom harness records open/resave/PDF/hash/page evidence and terminates
+only the Hwp processes it created.
+
 Runtime and gateway:
 
 ```powershell
@@ -1507,6 +1543,10 @@ HWPX public-sector acceptance:
 ```powershell
 npm.cmd run test:hwpx-evaluation
 ```
+
+The 100-case runner executes both REST and MCP open/catalog/inspect/apply/
+quality/render/save/read/hash/delete workflows for every case and enforces
+privacy and exact binary-entry preservation gates. It makes no OpenAI calls.
 
 Known acceptable HWPX warning:
 

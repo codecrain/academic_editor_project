@@ -1,5 +1,10 @@
 # HWPX 편집기 DOCX 동급화 및 실제 환경 검수 설계
 
+> 역사적 설계 기록입니다. 지원 상태는 `docs/DOCUMENTATION_INDEX.md`,
+> `API.md`, 현재 명령 카탈로그와 테스트를 기준으로 판단합니다. 이후 실제
+> 검수 결과에 따라 복합 HWPX는 preserve-package API/MCP를 사용하고 Studio는
+> 손실 가능 저장을 명시적으로 차단하는 구조로 확정되었습니다.
+
 - 작성일: 2026-07-27
 - 상태: 승인됨
 - 대상: `editor_hwpx`, 공용 editor gateway/MCP, HWPX 평가 데이터와 문서

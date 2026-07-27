@@ -31,7 +31,7 @@ top-level paragraphs can shift later numeric paragraph positions after reopen,
 so paragraph content is resolved by an exact, case-sensitive paragraph-only
 search. The evaluator never ignores missing or extra words.
 
-## API-only execution
+## REST and MCP execution
 
 For each case the runner:
 
@@ -39,16 +39,17 @@ For each case the runner:
    file signature, format diversity, and source-fact linkage.
 2. Starts one ephemeral loopback gateway.
 3. Opens source bytes through `/v1/hwpx/documents/open`.
-4. Reads the document and object inventory.
-5. Queries every used operation from `commands/catalog`.
-6. Inspects every target and style source.
-7. Applies one atomic command batch.
-8. Runs quality checks and baseline/current SVG rendering.
-9. Saves to a temporary HWPX and validates its SHA-256.
-10. Reopens the bytes through the public API.
-11. Verifies target text, style IDs, and structural/package invariants.
-12. Discards both sessions and deletes the temporary output.
-13. Closes the gateway in `finally`.
+4. Reads the document/object inventory and queries the operation catalog.
+5. Inspects every target/style source and applies one atomic REST batch.
+6. Runs quality checks and requested baseline/current SVG rendering.
+7. Saves, reads the artifact through the trusted REST endpoint, verifies its
+   SHA-256, reopens it, and validates exact targets and package invariants.
+8. Repeats the complete open/catalog/inspect/inventory/apply/quality/render/
+   save/artifact-read/hash/delete lifecycle through `editor_hwpx_*` MCP tools.
+9. Compares every preexisting binary entry byte-for-byte and rejects any
+   introduced email, phone number, or resident-registration number.
+10. Discards all sessions, deletes temporary outputs, and closes the gateway
+    in `finally`.
 
 No OpenAI model is required or called by this deterministic acceptance runner.
 
@@ -70,6 +71,8 @@ Any of these is a hard failure regardless of score:
 - an unrequested table, image, picture, section, XML entry, or binary entry
   disappears;
 - output contains personal data prohibited by the scenario.
+- REST and MCP output hashes differ or either transport skips a required gate;
+- any unrequested preexisting binary entry changes byte-for-byte.
 
 ## Evidence boundary
 
