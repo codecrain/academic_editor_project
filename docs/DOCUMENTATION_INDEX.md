@@ -1,42 +1,52 @@
-# Document editor documentation
+# Academic Editor Documentation
 
-This index is the only supported starting point for the current editor
-contract. Files under vendored upstream source trees may describe upstream
-experiments or historical internals; they are not the product API contract.
+This index lists the current product contracts. Dated implementation plans and
+superseded design notes are intentionally not published as documentation.
 
-## Current contracts
+## Canonical documents
 
-- [`../API.md`](../API.md): complete REST and MCP transport contract shared by
-  DOCX and HWPX.
-- [`HWPX_EDITOR.md`](HWPX_EDITOR.md): HWPX architecture, preservation rules,
-  capability matrix, and known limits.
-- [`HWPX_MCP_API.md`](HWPX_MCP_API.md): concise HWPX agent workflow, tool list,
-  request examples, PDF export, Studio safety boundary, finalization, and
-  failure behavior.
-- [`../evaluation/hwpx-public-sector-v1/README.md`](../evaluation/hwpx-public-sector-v1/README.md):
-  acceptance-corpus entry point.
-- [`../evaluation/hwpx-public-sector-v1/METHODOLOGY.md`](../evaluation/hwpx-public-sector-v1/METHODOLOGY.md):
-  scoring, hard failures, and reproducibility.
-- [`../evaluation/hwpx-public-sector-v1/PROVENANCE.md`](../evaluation/hwpx-public-sector-v1/PROVENANCE.md):
-  attachment sources, licenses, hashes, and adversarial fixtures.
+- [README.md](../README.md): repository ownership, runtime topology, deployment,
+  and verification commands.
+- [API.md](../API.md): complete REST, MCP, WOPI, revision, quality, and artifact
+  contracts.
+- [HWPX_EDITOR.md](HWPX_EDITOR.md): HWPX engine capabilities, limits, and
+  acceptance criteria.
+- [HWPX_MCP_API.md](HWPX_MCP_API.md): concise HWPX MCP workflow and examples.
+- [evaluation/hwpx-public-sector-v1/README.md](../evaluation/hwpx-public-sector-v1/README.md):
+  100-case public-sector evaluation corpus.
+- [evaluation/hwpx-public-sector-v1/METHODOLOGY.md](../evaluation/hwpx-public-sector-v1/METHODOLOGY.md):
+  attachment grounding, scoring, and evidence limits.
 
-## Contract source of truth
+## Executable sources of truth
 
-Documentation explains behavior, but executable catalogs and tests decide
-whether a command is supported:
+- `editor_docx/scripts/docx-command-catalog.mjs`: 29 canonical DOCX commands.
+- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 32 canonical HWPX commands.
+- `editor_common/editor-mcp-tool-factory.mjs`: shared MCP schema factory.
+- `editor_server/editor-mcp.mjs`: 16 DOCX and 16 HWPX public MCP tools.
+- `editor_server/editor-gateway.mjs`: shared HTTP transport, WOPI, session, and
+  artifact gateway.
+- `editor_common/document-api-core.mjs`: format-neutral revision and session
+  contract.
 
-- `editor_hwpx/scripts/hwpx-command-catalog.mjs`
-- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs`
-- `editor_hwpx/scripts/hwpx-mcp-tools.mjs`
-- `editor_hwpx/scripts/hwpx-native-pdf.mjs`
-- `editor_docx/scripts/docx-command-catalog.mjs`
-- `editor_docx/scripts/editor-mcp.mjs`
-- `editor_docx/scripts/editor-gateway.mjs`
-- `npm run test:runtime`
-- `npm run test:hwpx-evaluation`
+The executable catalogs and `tools/list` take precedence over prose if a
+release accidentally drifts. `npm run test:runtime` includes documentation
+contract gates so such drift is treated as a test failure.
 
-Generated evaluation results, browser downloads, Hancom evidence, PDFs, caches,
-and temporary artifacts are intentionally excluded from source control.
+## Source and product boundary
 
-When prose and an executable catalog differ, fix the prose and code together.
-Do not infer product support from lower-level RHWP tests alone.
+`editor_docx/` and `editor_hwpx/` are separate editor engines. They do not
+import each other's implementation. They share only the format-neutral modules
+under `editor_common/` and the server transport under `editor_server/`.
+Compatibility entrypoints under each engine are thin re-exports; they do not
+duplicate gateway or MCP implementation.
+
+The large README trees inside the vendored editor engines are upstream source
+documentation. They are useful when modifying those engines but are not the
+Academic Editor API contract.
+
+## Evaluation boundary
+
+The public-sector v1 runner uses local deterministic REST and MCP calls. It
+does not call OpenAI or any other model API. The calling agent reads the
+question and evidence; the runner verifies that every declared source fact is
+present at the expected saved target after reopen.

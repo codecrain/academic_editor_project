@@ -469,7 +469,7 @@ prepare_rhwp_static_assets() {
 }
 
 start_editor_gateway() {
-  local gateway_script="$ROOT_DIR/editor_docx/scripts/editor-gateway.mjs"
+  local gateway_script="$ROOT_DIR/editor_server/editor-gateway.mjs"
   [ -f "$gateway_script" ] || die "editor gateway script was not found: $gateway_script"
 
   local gateway_name

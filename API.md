@@ -170,7 +170,8 @@ Local implementation files:
 - DOCX API utility: `editor_docx/scripts/docx-api-utils.mjs`
 - DOCX UNO renderer: `editor_docx/scripts/docx-renderer.mjs` and `render-docx-uno.py`
 - HWPX API utility: `editor_hwpx/scripts/hwpx-api-utils.mjs`
-- Local API bridge/gateway: `editor_docx/scripts/editor-gateway.mjs`
+- Canonical API bridge/gateway: `editor_server/editor-gateway.mjs`
+- Compatibility launch path: `editor_docx/scripts/editor-gateway.mjs`
 
 Engine split:
 - DOCX browser editing remains on the DOCX/WOPI editor path.
@@ -640,25 +641,21 @@ object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-The HWPX catalog has 32 canonical entries. Twenty-seven currently report
-`readiness=available`. `table.insertCaption`, `setRunStyle`,
-`setDocumentMetadata`, `setHeaderFooter`, and `insertFootnote` remain canonical
-but report `readiness=unavailable`. No
-published `@rhwp/core` package through 0.8.2 exposes the required metadata
-set/get methods; on the pinned 0.7.15 artifact, table captions, run formatting,
-and header/footer content do not survive export/reopen, while footnote
-insertion traps on the supported blank fixture. Ready structural commands
-report `execution=structural-adapter`; this
-describes their execution path, not a missing implementation.
+The HWPX catalog has 32 canonical entries and all currently report
+`readiness=available`. Commands promoted beyond the published RHWP wrapper use
+qualified package-preserving or structural adapters and must pass mutation,
+package qualification, export, reopen, and operation-specific postconditions.
+Entries report the actual path in `execution`; values such as
+`structural-adapter` describe implementation, not a missing capability.
 `appendParagraph` instead reports `execution=preserve-package-adapter` so it
 can clone inspected paragraph and run style IDs exactly while still passing
 package qualification and reopen verification.
 
 Runtime artifact validation statically compares the `HwpDocument` method
 surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
-initialize WASM or introspect live WASM exports, so method presence is not
-semantic readiness. The 27 available-operation set is additionally gated by pinned
-installed-artifact command tests that require the applicable mutation,
+initialize WASM or introspect live WASM exports, so method presence alone is not
+semantic readiness. The 32-operation set is additionally gated by pinned
+installed-artifact and adapter tests that require the applicable mutation,
 package qualification, export, reopen, and operation-specific postconditions.
 
 ## Text Commands
@@ -814,11 +811,11 @@ Explicit DOCX-like table creation:
 }
 ```
 
-HWPX `table.create` is ready through the structural adapter and requires an
+HWPX `table.create` is available through the structural adapter and requires an
 inspected paragraph `target`, `rows`, and `columns`; query the HWPX catalog for
-its format-specific optional width, height, and cell text fields. Native
-caption creation is unavailable in the installed runtime, and `caption` is
-rejected before mutation.
+its format-specific optional width, height, and cell text fields.
+`table.insertCaption` is also available through the qualified HWPX adapter;
+inspect its target and query the HWPX catalog for the format-specific payload.
 
 On success, the matching `results` item returns `tableId`, `target`, and exact `dimensions` (`rowCount`, `colCount`, `cellCount`). Use that returned `tableId` for all subsequent `target_map`, `target_inspect`, and cell-write calls; do not guess `tbl_0` or select an older table by position.
 
@@ -1090,9 +1087,14 @@ Chart rule:
 - In that case use `image.replace` or `image.generateAndReplace`.
 - Do not call a chart-data API unless the document actually exposes chart objects later.
 
-## DOCX Package Commands
+## Package Commands
 
-DOCX-only metadata:
+The following examples show DOCX payload shapes. HWPX exposes the matching
+metadata, style, page setup, header/footer, and footnote operations with
+format-specific schemas; query `editor_hwpx_command_catalog` before applying
+them.
+
+DOCX metadata example:
 
 ```json
 {
@@ -1103,7 +1105,7 @@ DOCX-only metadata:
 }
 ```
 
-DOCX-only style definition:
+DOCX style definition example:
 
 ```json
 {
@@ -1120,7 +1122,7 @@ DOCX-only style definition:
 }
 ```
 
-DOCX-only page setup:
+DOCX page setup example:
 
 ```json
 {
@@ -1137,7 +1139,7 @@ DOCX-only page setup:
 }
 ```
 
-DOCX-only header/footer:
+DOCX header/footer example:
 
 ```json
 {
@@ -1148,7 +1150,7 @@ DOCX-only header/footer:
 }
 ```
 
-DOCX-only footnote:
+DOCX footnote example:
 
 ```json
 {
@@ -1442,13 +1444,12 @@ object.deleteTextBoxByText
 object.replaceTextBoxText
 ```
 
-`table.insertCaption`, `setRunStyle`, `setDocumentMetadata`,
-`setHeaderFooter`, and `insertFootnote` are listed because they remain
-canonical contract entries, but their current `readiness` is `unavailable`
-and apply validation fails closed.
+All 32 entries currently report `readiness=available`. Apply still fails closed
+when required inspection, object inventory, exact revision, or
+operation-specific postconditions are missing.
 Tracked replacement is limited to one `hp:t` run and must be the only command
-in its atomic batch. The API does not yet list, accept, or reject tracked
-changes.
+in its atomic batch. The API can create the tracked replacement but does not
+expose review operations that accept or reject existing tracked changes.
 
 DOCX local utility supports:
 
@@ -1471,37 +1472,35 @@ save
 DOCX supported shared and package commands:
 
 ```text
+text.replaceParagraph
+text.replace
+text.replaceTracked
+insertText
+deleteRange
+appendParagraph
+table.writeCell
+table.writeRichCell
+table.writeCells
+table.applyCellStyle
+table.create
+table.insertCaption
+style.applyText
+paragraph.applyStyle
+style.clone
+applyStyle
+setRunStyle
+setParagraphStyle
+list.writeBullets
+list.applyNumbering
+layout.fitText
+image.replace
+image.insertAfterParagraph
+image.generateAndReplace
 setDocumentMetadata
 defineStyle
 setPageSetup
 setHeaderFooter
 insertFootnote
-text.replaceParagraph
-text.replace
-insertText
-replaceText
-deleteRange
-appendParagraph
-applyStyle
-setRunStyle
-setParagraphStyle
-table.create
-createTable
-table.insertCaption
-insertTableCaption
-table.writeCell
-setCellText
-table.writeCells
-table.writeRichCell
-table.applyCellStyle
-style.applyText
-paragraph.applyStyle
-style.clone
-list.writeBullets
-list.applyNumbering
-layout.fitText
-image.replace
-image.generateAndReplace
 ```
 
 ## Required Local Verification Commands

@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { EDITOR_MCP_TOOLS, handleEditorMcpJsonRpc } from './editor-mcp.mjs';
-import { HWPX_MCP_TOOLS } from '../../editor_hwpx/scripts/hwpx-mcp-tools.mjs';
-import { EDITOR_MCP_SCHEMA_FACTORY } from '../../editor_common/editor-mcp-tool-factory.mjs';
+import {
+  EDITOR_MCP_TOOLS,
+  handleEditorMcpJsonRpc,
+  HWPX_MCP_TOOLS,
+} from './editor-mcp.mjs';
+import { EDITOR_MCP_SCHEMA_FACTORY } from '../editor_common/editor-mcp-tool-factory.mjs';
 
 test('MCP validates advertised input schemas before executing a tool', async () => {
   const calls = [];

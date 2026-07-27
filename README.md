@@ -23,6 +23,13 @@ the open-source tree.
 - Unified DOCX/HWPX REST and MCP editing contracts.
 - A versioned 100-case public-sector HWPX acceptance suite.
 
+DOCX and HWPX are separate editor engines. `editor_docx/` owns the
+Collabora/WOPI implementation and `editor_hwpx/` owns RHWP Studio and HWPX
+package mutation. They share only the format-neutral modules in
+`editor_common/` and the HTTP/MCP/WOPI transport in `editor_server/`.
+Compatibility scripts under each engine are thin re-exports of that shared
+server; no engine imports the other engine's implementation.
+
 Current documentation starts at [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
 The complete transport contract is [API.md](API.md), and the reproducible HWPX
 acceptance corpus is under
@@ -75,13 +82,15 @@ DOCX and HWPX open/read/target/inspect/apply/quality/render/PDF/finalize
 workflows.
 Finalization returns an opaque `artifactId`; an authenticated application
 server retrieves bytes with the matching `editor_docx_artifact_read` or
-`editor_hwpx_artifact_read` only after user approval. The model and browser
-never receive a server-local artifact path. Successfully applied artifacts are
-deleted immediately; abandoned artifacts expire after
+`editor_hwpx_artifact_read`. The calling application owns any user-approval
+policy. The agent and browser never receive a server-local artifact path.
+`artifact_read` does not delete bytes: the caller verifies the reported hash
+and saved package, then calls the matching `artifact_delete`. Opportunistic TTL
+pruning runs during artifact-producing operations using
 `EDITOR_MCP_ARTIFACT_TTL_MS` (24 hours by default).
 
-Agents must call the matching `editor_docx_discard(documentId)` or
-`editor_hwpx_discard(documentId)` when an edit is cancelled or cannot be
+Agents must call the matching `editor_docx_discard` or `editor_hwpx_discard`
+with `documentId` and the current `baseRevision` when an edit is cancelled or cannot be
 finalized. Discard closes the isolated session and clears its MCP
 inspection/inventory/quality/lock state without creating an artifact; repeated
 calls complete safely with `deleted=false`.
@@ -124,6 +133,31 @@ npm run dev:check:runtime
 If a runtime is already running before the check, it is treated as pre-existing
 and left alone. Set `EDITOR_DEV_KEEP_RUNNING=true` only for a manual debugging
 session where you intentionally want the runtime to stay up.
+
+Full contract and acceptance checks:
+
+```powershell
+npm.cmd run test:runtime
+npm.cmd run test:docx-api
+npm.cmd run test:hwpx-api
+npm.cmd run test:hwpx-dataset
+npm.cmd run test:hwpx-evaluation
+```
+
+Real Chrome save/reopen checks are intentionally separate because they require
+running editor runtimes:
+
+```powershell
+npm.cmd run test:docx-browser
+npm.cmd run test:hwpx-browser
+```
+
+For DOCX with a Docker-based Collabora runtime, the browser-facing gateway may
+use `127.0.0.1`, but `EDITOR_GATEWAY_WOPI_BASE_URL` must use
+`host.docker.internal` so the container can call back to WOPI. The Collabora
+alias group must allow the same WOPI origin. `test:docx-browser` defaults to
+`http://127.0.0.1:11007/docx/`; override `DOCX_ACCEPTANCE_URL` for another
+isolated environment. Both browser tests close the Chrome process they create.
 
 For browser/server source hacking on a Linux dev host, use the source loop:
 

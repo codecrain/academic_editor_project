@@ -8,7 +8,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { EditorDocumentStore } from './editor-document-store.mjs';
+import { EditorDocumentStore } from '../editor_docx/scripts/editor-document-store.mjs';
 
 import {
   createGatewayServer,
@@ -23,8 +23,8 @@ import {
   resolveDocxActionPath,
   resolveStaticPath,
   sanitizeEditorHtml,
-} from '../../editor_server/editor-gateway.mjs';
-import { createDocxBytes, getDocumentXml } from './docx-api-utils.mjs';
+} from './editor-gateway.mjs';
+import { createDocxBytes, getDocumentXml } from '../editor_docx/scripts/docx-api-utils.mjs';
 
 const FAKE_PDF_BYTES = Buffer.from('%PDF-1.4\n%%EOF\n');
 const FAKE_WEBP_BYTES = Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary');
@@ -1118,6 +1118,7 @@ test('gateway DOCX page embeds the editor URL directly', () => {
   assert.doesNotMatch(html, />HWPX</);
   assert.match(html, /height: 100%/);
   assert.match(html, /WOPISrc=x/);
+  assert.match(html, /rel="icon" href="data:,"/);
 });
 
 test('gateway strips upstream branding from proxied editor HTML', () => {
@@ -1274,6 +1275,8 @@ test('gateway replaces only missing optional DOCX runtime assets after an upstre
     ['branding.js', 'text/javascript', /branding script/],
     ['branding-desktop.css', 'text/css', /desktop branding stylesheet/],
     ['images/lc_sr20006.svg', 'image/svg+xml', /^<svg /],
+    ['images/lc_validatesidebara11y.svg', 'image/svg+xml', /^<svg /],
+    ['images/lc_validatedialogsa11y.svg', 'image/svg+xml', /^<svg /],
   ];
 
   try {

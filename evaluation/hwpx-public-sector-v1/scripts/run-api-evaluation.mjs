@@ -3,12 +3,16 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createGatewayServer } from '../../../editor_docx/scripts/editor-gateway.mjs';
+import { createGatewayServer } from '../../../editor_server/editor-gateway.mjs';
 import { inspectHwpxPackage } from '../../../editor_hwpx/scripts/hwpx-package-policy.mjs';
 import {
   findIntroducedDirectIdentifiers,
   visibleDocumentText,
 } from './evaluation-hard-gates.mjs';
+import {
+  extractAttachmentEvidence,
+  verifyExtractedSourceFact,
+} from './attachment-extractors.mjs';
 
 const datasetRoot = path.resolve('evaluation/hwpx-public-sector-v1');
 const attachmentsPayload = JSON.parse(await fs.readFile(path.join(datasetRoot, 'attachments.json'), 'utf8'));
@@ -67,6 +71,7 @@ const close = () => new Promise((resolve, reject) => {
 const address = await listen();
 const origin = `http://127.0.0.1:${address.port}`;
 const activeSessions = new Map();
+const attachmentEvidenceCache = new Map();
 
 async function post(pathname, payload) {
   const response = await fetch(`${origin}${pathname}`, {
@@ -172,6 +177,7 @@ function hasPrefix(bytes, prefix) {
 async function verifyScenarioAttachments(scenario) {
   const formats = new Set();
   const verified = [];
+  const extractedByAttachment = new Map();
   for (const attachmentId of scenario.attachments) {
     const attachment = attachmentById.get(attachmentId);
     if (!attachment) throw new Error(`unknown attachment: ${attachmentId}`);
@@ -200,11 +206,24 @@ async function verifyScenarioAttachments(scenario) {
     if (extension === '.jpg' && !hasPrefix(bytes, [0xff, 0xd8, 0xff])) {
       throw new Error(`${attachmentId} is not a JPEG`);
     }
+    let evidence = attachmentEvidenceCache.get(attachment.sha256);
+    if (!evidence) {
+      evidence = await extractAttachmentEvidence(attachment, bytes);
+      attachmentEvidenceCache.set(attachment.sha256, evidence);
+    }
+    extractedByAttachment.set(attachmentId, evidence);
     verified.push({
       attachmentId,
       extension,
       byteLength: bytes.length,
       sha256: attachment.sha256,
+      extraction: {
+        format: evidence.format,
+        summary: evidence.summary,
+        totalTextChars: evidence.totalTextChars,
+        truncated: evidence.truncated,
+        loadStatus: evidence.loadStatus,
+      },
     });
   }
   if (!formats.has('.hwpx') || formats.size < 4) {
@@ -217,8 +236,24 @@ async function verifyScenarioAttachments(scenario) {
     if (!String(sourceFact.locator ?? '').trim() || sourceFact.fact === undefined) {
       throw new Error(`${scenario.id} source fact is incomplete`);
     }
+    const attachment = attachmentById.get(sourceFact.attachmentId);
+    const verification = verifyExtractedSourceFact(
+      sourceFact,
+      extractedByAttachment.get(sourceFact.attachmentId),
+      attachment,
+    );
+    if (!verification.ok) {
+      throw new Error(
+        `${scenario.id} source fact was not recovered from ${sourceFact.attachmentId}: ${verification.reason}`,
+      );
+    }
   }
-  return { formatCount: formats.size, formats: [...formats].sort(), verified };
+  return {
+    formatCount: formats.size,
+    formats: [...formats].sort(),
+    verified,
+    extractedSourceFactCount: scenario.sourceFacts?.length ?? 0,
+  };
 }
 
 function renderPagesForScenario(scenario, ordinal) {
@@ -254,6 +289,7 @@ try {
       save: false,
       reopen: false,
       content: false,
+      grounding: false,
       structure: false,
       style: false,
       binaryIdentity: false,
@@ -376,6 +412,8 @@ try {
           const target = isCell ? located.targets[0] : located.target;
           const actual = target?.currentText ?? target?.text ?? '';
           expectedChecks.push({
+            verificationId: expected.verificationId,
+            factIds: expected.factIds || [],
             text: expected.text,
             actual,
             found: normalizeComparableText(actual) === normalizeComparableText(expected.text),
@@ -384,6 +422,8 @@ try {
           });
         } catch (error) {
           expectedChecks.push({
+            verificationId: expected.verificationId,
+            factIds: expected.factIds || [],
             text: expected.text,
             found: false,
             location: expected.location,
@@ -394,6 +434,36 @@ try {
       checks.content = expectedChecks.every((check) => check.found);
       details.expectedTargets = expectedChecks;
       if (!checks.content) failures.push('one or more expected target texts were not found after reopen');
+
+      const sourceFactById = new Map(
+        scenario.sourceFacts.map(sourceFact => [sourceFact.factId, sourceFact]),
+      );
+      const expectedCheckById = new Map(
+        expectedChecks.map(expectedCheck => [expectedCheck.verificationId, expectedCheck]),
+      );
+      const groundingChecks = scenario.factUsage.map(usage => {
+        const sourceFact = sourceFactById.get(usage.factId);
+        const expectedCheck = expectedCheckById.get(usage.expectedTargetId);
+        const renderedText = normalizeComparableText(usage.renderedText);
+        const locator = normalizeComparableText(sourceFact?.locator);
+        const fact = normalizeComparableText(sourceFact?.fact);
+        return {
+          factId: usage.factId,
+          expectedTargetId: usage.expectedTargetId,
+          foundAfterReopen: expectedCheck?.found === true,
+          locatorPresent: Boolean(locator) && renderedText.includes(locator),
+          factPresent: Boolean(fact) && renderedText.includes(fact),
+          actual: expectedCheck?.actual ?? '',
+        };
+      });
+      checks.grounding = groundingChecks.length === scenario.sourceFacts.length
+        && groundingChecks.every(check => (
+          check.foundAfterReopen && check.locatorPresent && check.factPresent
+        ));
+      details.grounding = groundingChecks;
+      if (!checks.grounding) {
+        failures.push('one or more source facts were not grounded in a verified target after reopen');
+      }
 
       const invariants = scenario.oracle.invariants;
       const pageDelta = Math.abs(details.current.pageCount - details.baseline.pageCount);
@@ -549,7 +619,7 @@ try {
       await fs.rm(outputPath, { force: true }).catch(() => undefined);
     }
 
-    const contentScore = checks.content ? 35 : 0;
+    const contentScore = checks.content && checks.grounding ? 35 : 0;
     const layoutScore = checks.render && checks.structure ? 20 : checks.structure ? 10 : 0;
     const styleScore = checks.style ? 15 : 0;
     const objectScore = checks.structure ? 10 : 0;
@@ -558,7 +628,7 @@ try {
       && checks.inspect && checks.atomicApply && checks.quality ? 10 : 0;
     const totalScore = contentScore + layoutScore + styleScore + objectScore + packageScore + apiScore;
     const hardFailure = !checks.reopen || !checks.atomicApply || !checks.structure
-      || !checks.binaryIdentity || !checks.privacy || !checks.mcp;
+      || !checks.grounding || !checks.binaryIdentity || !checks.privacy || !checks.mcp;
     const result = {
       scenarioId: scenario.id,
       mode: scenario.mode,

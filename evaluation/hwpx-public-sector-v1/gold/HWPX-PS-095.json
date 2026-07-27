@@ -4,24 +4,50 @@
     "summary": "Apply 1 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
     "sourceFacts": [
       {
+        "factId": "HWPX-PS-095-F01",
         "attachmentId": "source-mpva-veterans-xlsx",
         "locator": "참전(총괄)!B8",
         "fact": 184580
       },
       {
+        "factId": "HWPX-PS-095-F02",
         "attachmentId": "source-mpva-beneficiaries-xlsx",
         "locator": "기본현황(총괄)!D5",
         "fact": 835702
       },
       {
+        "factId": "HWPX-PS-095-F03",
         "attachmentId": "source-procurement-csv",
         "locator": "SAFE-02 지연건수",
         "fact": 6
       },
       {
+        "factId": "HWPX-PS-095-F04",
         "attachmentId": "source-decisions-txt",
         "locator": "결정사항 7",
         "fact": "저장 후 재열기 및 3개 대표 페이지 렌더 비교"
+      }
+    ],
+    "factUsage": [
+      {
+        "factId": "HWPX-PS-095-F01",
+        "expectedTargetId": "HWPX-PS-095-CONTENT-04",
+        "renderedText": "수치검증: [HWPX-PS-095-F01] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580; [HWPX-PS-095-F02] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702"
+      },
+      {
+        "factId": "HWPX-PS-095-F02",
+        "expectedTargetId": "HWPX-PS-095-CONTENT-04",
+        "renderedText": "수치검증: [HWPX-PS-095-F01] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580; [HWPX-PS-095-F02] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702"
+      },
+      {
+        "factId": "HWPX-PS-095-F03",
+        "expectedTargetId": "HWPX-PS-095-CONTENT-05",
+        "renderedText": "위험판정: [HWPX-PS-095-F03] source-procurement-csv | SAFE-02 지연건수 | 6"
+      },
+      {
+        "factId": "HWPX-PS-095-F04",
+        "expectedTargetId": "HWPX-PS-095-CONTENT-07",
+        "renderedText": "품질조건: [HWPX-PS-095-F04] source-decisions-txt | 결정사항 7 | 저장 후 재열기 및 3개 대표 페이지 렌더 비교"
       }
     ],
     "oracle": {
@@ -35,11 +61,13 @@
               "number": 0
             }
           },
-          "text": "공공조달 복합근거 검토보고서\n기준일: 2026-06-30\n정책목표: 계약 이행과 검수·집행 위험\n수치검증: XLSX 총괄값과 CSV 원 단위 근거를 분리하여 확인\n위험판정: 지연 5건 이상 또는 집행률 60% 미만은 위험\n개인정보: 직접 식별값은 결과에서 제외하고 마스킹 건수만 기록\n품질조건: 표·그림·페이지와 패키지 무결성을 저장 후 재검증\n결론: 공공조달 자료는 근거 일치 항목만 반영하고 충돌 항목은 재확인 필요"
+          "text": "공공조달 복합근거 검토보고서\n기준일: 2026-06-30\n정책목표: 계약 이행과 검수·집행 위험\n수치검증: [HWPX-PS-095-F01] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580; [HWPX-PS-095-F02] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702\n위험판정: [HWPX-PS-095-F03] source-procurement-csv | SAFE-02 지연건수 | 6\n개인정보: 직접 식별값은 결과에서 제외하고 마스킹 건수만 기록\n품질조건: [HWPX-PS-095-F04] source-decisions-txt | 결정사항 7 | 저장 후 재열기 및 3개 대표 페이지 렌더 비교\n결론: 공공조달 자료는 근거 일치 항목만 반영하고 충돌 항목은 재확인 필요"
         }
       ],
       "expectedTargets": [
         {
+          "verificationId": "HWPX-PS-095-CONTENT-01",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -49,6 +77,8 @@
           "text": "공공조달 복합근거 검토보고서"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-02",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -58,6 +88,8 @@
           "text": "기준일: 2026-06-30"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-03",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -67,24 +99,35 @@
           "text": "정책목표: 계약 이행과 검수·집행 위험"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-04",
+          "factIds": [
+            "HWPX-PS-095-F01",
+            "HWPX-PS-095-F02"
+          ],
           "location": {
             "paragraph": {
               "section": 0,
               "number": 4
             }
           },
-          "text": "수치검증: XLSX 총괄값과 CSV 원 단위 근거를 분리하여 확인"
+          "text": "수치검증: [HWPX-PS-095-F01] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580; [HWPX-PS-095-F02] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-05",
+          "factIds": [
+            "HWPX-PS-095-F03"
+          ],
           "location": {
             "paragraph": {
               "section": 0,
               "number": 5
             }
           },
-          "text": "위험판정: 지연 5건 이상 또는 집행률 60% 미만은 위험"
+          "text": "위험판정: [HWPX-PS-095-F03] source-procurement-csv | SAFE-02 지연건수 | 6"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-06",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -94,15 +137,21 @@
           "text": "개인정보: 직접 식별값은 결과에서 제외하고 마스킹 건수만 기록"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-07",
+          "factIds": [
+            "HWPX-PS-095-F04"
+          ],
           "location": {
             "paragraph": {
               "section": 0,
               "number": 7
             }
           },
-          "text": "품질조건: 표·그림·페이지와 패키지 무결성을 저장 후 재검증"
+          "text": "품질조건: [HWPX-PS-095-F04] source-decisions-txt | 결정사항 7 | 저장 후 재열기 및 3개 대표 페이지 렌더 비교"
         },
         {
+          "verificationId": "HWPX-PS-095-CONTENT-08",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,

@@ -259,7 +259,7 @@ async function prepareRhwpStudioStaticBuild() {
 }
 
 async function startGateway() {
-  const gatewayScript = path.resolve(editorRoot, 'editor_docx', 'scripts', 'editor-gateway.mjs');
+  const gatewayScript = path.resolve(editorRoot, 'editor_server', 'editor-gateway.mjs');
   const gatewayEnv = {
     ...process.env,
     EDITOR_GATEWAY_HOST: gatewayHost,

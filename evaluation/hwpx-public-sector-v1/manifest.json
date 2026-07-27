@@ -4,8 +4,8 @@
   "scenarioCount": 100,
   "editCount": 90,
   "generationCount": 10,
-  "minQuestionLength": 368,
-  "maxQuestionLength": 402,
+  "minQuestionLength": 426,
+  "maxQuestionLength": 453,
   "domains": [
     "교육행정",
     "보훈복지",

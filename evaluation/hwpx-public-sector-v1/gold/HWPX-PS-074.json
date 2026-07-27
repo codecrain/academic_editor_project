@@ -4,24 +4,50 @@
     "summary": "Apply 4 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
     "sourceFacts": [
       {
+        "factId": "HWPX-PS-074-F01",
         "attachmentId": "source-procurement-csv",
         "locator": "EDU-04 집행액원/본예산원",
         "fact": "1732500000/2310000000 = 75.0%"
       },
       {
+        "factId": "HWPX-PS-074-F02",
         "attachmentId": "source-requirements-docx",
         "locator": "인수 기준",
         "fact": "저장 후 재열기와 구조·렌더 검증 필요"
       },
       {
+        "factId": "HWPX-PS-074-F03",
         "attachmentId": "source-decisions-txt",
         "locator": "결정사항 5",
         "fact": "지연건수 5건 이상 또는 집행률 60% 미만은 위험"
       },
       {
+        "factId": "HWPX-PS-074-F04",
         "attachmentId": "source-moe-preview-png",
         "locator": "공식 보도자료 미리보기",
         "fact": "공식 이미지 증빙"
+      }
+    ],
+    "factUsage": [
+      {
+        "factId": "HWPX-PS-074-F01",
+        "expectedTargetId": "HWPX-PS-074-GROUND-01",
+        "renderedText": "[HWPX-PS-074-F01] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%"
+      },
+      {
+        "factId": "HWPX-PS-074-F02",
+        "expectedTargetId": "HWPX-PS-074-GROUND-02",
+        "renderedText": "[HWPX-PS-074-F02] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
+      },
+      {
+        "factId": "HWPX-PS-074-F03",
+        "expectedTargetId": "HWPX-PS-074-GROUND-03",
+        "renderedText": "[HWPX-PS-074-F03] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+      },
+      {
+        "factId": "HWPX-PS-074-F04",
+        "expectedTargetId": "HWPX-PS-074-GROUND-04",
+        "renderedText": "[HWPX-PS-074-F04] source-moe-preview-png | 공식 보도자료 미리보기 | 공식 이미지 증빙"
       }
     ],
     "oracle": {
@@ -46,7 +72,7 @@
               "number": 6
             }
           },
-          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+          "text": "[HWPX-PS-074-F01] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%\n[HWPX-PS-074-F02] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요\n[HWPX-PS-074-F03] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험\n[HWPX-PS-074-F04] source-moe-preview-png | 공식 보도자료 미리보기 | 공식 이미지 증빙"
         },
         {
           "commandId": "HWPX-PS-074-cell-a",
@@ -90,6 +116,8 @@
       ],
       "expectedTargets": [
         {
+          "verificationId": "HWPX-PS-074-CONTENT-01",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -99,6 +127,8 @@
           "text": "지역균형 검증 074: 지역대학·소도시 교육기반 투자"
         },
         {
+          "verificationId": "HWPX-PS-074-CONTENT-02",
+          "factIds": [],
           "location": {
             "tableId": "tbl_10",
             "cell": {
@@ -110,6 +140,8 @@
           "text": "검증 74"
         },
         {
+          "verificationId": "HWPX-PS-074-CONTENT-03",
+          "factIds": [],
           "location": {
             "tableId": "tbl_10",
             "cell": {
@@ -119,6 +151,58 @@
             }
           },
           "text": "근거 일치"
+        },
+        {
+          "verificationId": "HWPX-PS-074-GROUND-01",
+          "factIds": [
+            "HWPX-PS-074-F01"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 7
+            }
+          },
+          "text": "[HWPX-PS-074-F01] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%"
+        },
+        {
+          "verificationId": "HWPX-PS-074-GROUND-02",
+          "factIds": [
+            "HWPX-PS-074-F02"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 8
+            }
+          },
+          "text": "[HWPX-PS-074-F02] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
+        },
+        {
+          "verificationId": "HWPX-PS-074-GROUND-03",
+          "factIds": [
+            "HWPX-PS-074-F03"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 9
+            }
+          },
+          "text": "[HWPX-PS-074-F03] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+        },
+        {
+          "verificationId": "HWPX-PS-074-GROUND-04",
+          "factIds": [
+            "HWPX-PS-074-F04"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 10
+            }
+          },
+          "text": "[HWPX-PS-074-F04] source-moe-preview-png | 공식 보도자료 미리보기 | 공식 이미지 증빙"
         }
       ],
       "invariants": {

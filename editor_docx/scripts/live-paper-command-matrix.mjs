@@ -16,7 +16,7 @@ import {
   DocxApiSession,
   generatePngBytes,
 } from './docx-api-utils.mjs';
-import { EDITOR_MCP_TOOLS } from './editor-mcp.mjs';
+import { EDITOR_MCP_TOOLS } from '../../editor_server/editor-mcp.mjs';
 
 const EXPECTED_SERVER_TOOLS = Object.freeze([
   'editor_docx_open',
@@ -2122,7 +2122,7 @@ async function runBoundedContractSelfTest() {
 async function runSelfTest(args = {}) {
   assert.equal(EDITOR_MCP_TOOLS.length, EXPECTED_SERVER_TOOLS.length);
   deepEqual(EDITOR_MCP_TOOLS.map((tool) => tool.name), EXPECTED_SERVER_TOOLS, 'Local MCP tool definitions drifted from the expected tool contract.');
-  assert.equal(DOCX_COMMAND_CATALOG.length, 28);
+  assert.equal(DOCX_COMMAND_CATALOG.length, 29);
   assert.equal(DOCX_COMMAND_OPS.length, 28);
   assert.equal(new Set(DOCX_COMMAND_OPS).size, 28);
   assert.equal(MATRIX_CASES.length, 28);

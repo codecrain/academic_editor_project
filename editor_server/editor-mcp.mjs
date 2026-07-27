@@ -221,6 +221,7 @@ export {
   DEFAULT_PROTOCOL_VERSION,
   DOCX_MCP_TOOLS,
   EDITOR_MCP_TOOLS,
+  HWPX_MCP_TOOLS,
   handleEditorMcpJsonRpc,
   normalizeProtocolVersion,
   redactBinaryFields,

@@ -17,7 +17,8 @@ cases.
 
 Every gold file defines:
 
-- traceable source facts and locators;
+- traceable source facts and locators with stable fact IDs;
+- explicit fact-to-result usage and verification-target links;
 - exact canonical command templates;
 - exact paragraph or table-cell targets;
 - expected text after save and reopen;
@@ -43,7 +44,8 @@ For each case the runner:
 5. Inspects every target/style source and applies one atomic REST batch.
 6. Runs quality checks and requested baseline/current SVG rendering.
 7. Saves, reads the artifact through the trusted REST endpoint, verifies its
-   SHA-256, reopens it, and validates exact targets and package invariants.
+   SHA-256, reopens it, and validates exact targets, every fact locator/value
+   grounding, and package invariants.
 8. Repeats the complete open/catalog/inspect/inventory/apply/quality/render/
    save/artifact-read/hash/delete lifecycle through `editor_hwpx_*` MCP tools.
 9. Compares every preexisting binary entry byte-for-byte and rejects any

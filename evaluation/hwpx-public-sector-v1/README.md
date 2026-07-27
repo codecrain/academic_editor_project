@@ -8,7 +8,7 @@ multi-source public-sector work through its public REST and MCP surfaces.
 - 100 scenarios: 90 edits and 10 template-based generation cases.
 - 100 gold answer contracts under `gold/`.
 - Questions between 100 and 1,000 characters; the generated v1 range is
-  368–402 characters.
+  426–453 characters.
 - Ten public-sector domains.
 - Every scenario has an HWPX target and at least three additional source
   formats.
@@ -28,7 +28,9 @@ npm.cmd run test:hwpx-evaluation
 ```
 
 The first command validates IDs, question length, format diversity, source-fact
-linkage, attachment hashes, command contracts, and all 100 gold files. The
+extraction and result-grounding linkage, attachment hashes, command contracts,
+and all 100 gold files. Every `sourceFact.factId` maps through `factUsage` to a
+reopen-verifiable oracle target containing both its locator and value. The
 second executes every scenario through both the public REST API and the public
 MCP tool surface. Focused investigation:
 
@@ -55,8 +57,10 @@ Results are written to:
 node evaluation/hwpx-public-sector-v1/scripts/generate-dataset.mjs
 ```
 
-Regeneration recomputes attachment hashes and gold data. Treat changes to
-scenario wording, targets, scoring, or attachments as a dataset-version
-change; do not weaken an oracle merely to make a failure pass.
+Regeneration recomputes attachment hashes, extracts the beneficiaries workbook
+`#REF!` error count and representative cells, and rebuilds scenarios plus all
+gold data. Treat changes to scenario wording, targets, scoring, or attachments
+as a dataset-version change; do not weaken an oracle merely to make a failure
+pass.
 
 See [METHODOLOGY.md](METHODOLOGY.md) and [PROVENANCE.md](PROVENANCE.md).

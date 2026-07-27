@@ -1,9 +1,10 @@
-# HWPX MCP and REST quick contract
+# HWPX MCP API
 
-## Supported MCP tools
+The shared gateway exposes HWPX tools through Streamable HTTP at `/mcp`.
+Transport requests are stateless; opened documents are isolated,
+revision-bound server sessions.
 
-Call `tools/list` at runtime. HWPX owns its schemas in
-`editor_hwpx/scripts/hwpx-mcp-tools.mjs`; DOCX does not define or clone them.
+## Tools
 
 ```text
 editor_hwpx_open
@@ -24,150 +25,98 @@ editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 ```
 
-## Required agent sequence
+Call `tools/list` for the exact JSON Schema. The schema is generated from the
+same factory used by DOCX, while format-specific command payloads come from the
+HWPX catalog.
 
-```text
-open
-  -> read_json
-  -> command_catalog
-  -> target_map/find
-  -> target_inspect
-  -> object_inventory when required
-  -> apply
-  -> quality_check
-  -> render_pages
-  -> save_checkpoint for review, save_source for HWPX, or export_pdf for PDF
-  -> artifact_read by the trusted application
-  -> artifact_delete
-```
-
-On cancellation or any unresolved failure, call `editor_hwpx_discard`.
-
-## MCP examples
-
-Open:
+## Open
 
 ```json
 {
-  "name": "editor_hwpx_open",
-  "arguments": {
-    "filename": "briefing.hwpx",
-    "bytesBase64": "<base64>"
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "editor_hwpx_open",
+    "arguments": {
+      "filename": "briefing.hwpx",
+      "bytesBase64": "<base64>"
+    }
   }
 }
 ```
 
-Inspect and apply:
+`filename` is required and exactly one of `bytesBase64` or `bytesRef` must be
+present. A nested REST-style `source` object is invalid.
+
+## Inspect and apply
+
+Inspect the target before mutation. The `apply` call uses `baseRevision`, not
+`revision`.
 
 ```json
 {
-  "name": "editor_hwpx_target_inspect",
-  "arguments": {
-    "documentId": "doc_...",
-    "locations": [
-      {"paragraph":{"section":0,"number":31}},
-      {"tableId":"tbl_12","cell":{"number":21}}
-    ]
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": {
+    "name": "editor_hwpx_apply",
+    "arguments": {
+      "documentId": "doc_...",
+      "baseRevision": 1,
+      "commands": [
+        {
+          "commandId": "replace-title",
+          "op": "text.replaceParagraph",
+          "location": {
+            "paragraph": { "section": 0, "number": 4 }
+          },
+          "text": "2026년 공공기관 업무계획"
+        }
+      ]
+    }
   }
 }
 ```
 
+The complete batch succeeds or fails as one revision. A failed batch produces
+no partial mutation.
+
+## Quality, render, and artifact lifecycle
+
+Run `editor_hwpx_quality_check` for the returned revision, then render the
+required pages. `save_source`, `save_checkpoint`, and `export_pdf` return an
+opaque `artifactId`, hashes, and metadata; they never expose a server-local
+path.
+
+`artifact_read` returns bounded Base64 bytes. The caller verifies the reported
+hash and saved package, then calls `artifact_delete`. Artifacts are not deleted
+automatically by `artifact_read`; opportunistic TTL pruning occurs during
+artifact-producing operations. Application-level user approval is a caller
+policy, not an implicit gateway action.
+
+If the edit is cancelled, discard the current revision explicitly:
+
 ```json
 {
-  "name": "editor_hwpx_apply",
-  "arguments": {
-    "documentId": "doc_...",
-    "revision": 1,
-    "commands": [
-      {
-        "commandId": "summary",
-        "op": "text.replaceParagraph",
-        "location": {"paragraph":{"section":0,"number":31}},
-        "text": "검증된 요약"
-      },
-      {
-        "commandId": "status",
-        "op": "table.writeCell",
-        "location": {"tableId":"tbl_12","cell":{"number":21}},
-        "text": "검증 완료",
-        "fit": true,
-        "fitOptions": {"maxLines":2,"truncate":false}
-      }
-    ]
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "editor_hwpx_discard",
+    "arguments": {
+      "documentId": "doc_...",
+      "baseRevision": 2
+    }
   }
 }
 ```
 
-Every apply is all-or-nothing and advances the revision exactly once.
+Discard is idempotent and creates no artifact.
 
-PDF:
+## Authentication
 
-```json
-{
-  "name": "editor_hwpx_export_pdf",
-  "arguments": {
-    "documentId": "doc_...",
-    "filename": "briefing.pdf"
-  }
-}
-```
-
-PDF export runs the source-built RHWP CLI in a request-owned Docker container.
-Only full-document export is supported. The gateway verifies `%PDF-`, byte
-length, page count, and SHA-256, then returns an opaque artifact identifier.
-
-## REST mapping
-
-REST uses `POST /v1/hwpx`:
-
-```text
-/documents/open
-/documents/{id}/documents/read-json
-/documents/{id}/documents/discard
-/documents/{id}/target/map
-/documents/{id}/target/find
-/documents/{id}/target/inspect
-/documents/{id}/object/inventory
-/documents/{id}/commands/catalog
-/documents/{id}/commands/apply
-/documents/{id}/quality/check
-/documents/{id}/quality/render-compare
-/documents/{id}/pages/render-page
-/documents/{id}/pages/render-all
-/documents/{id}/documents/save-source
-/documents/{id}/documents/save-checkpoint
-/documents/{id}/documents/export-pdf
-```
-
-REST `open` accepts the nested source form:
-
-```json
-{
-  "filename": "briefing.hwpx",
-  "source": {"bytesBase64":"<base64>"}
-}
-```
-
-MCP `open` does not: its `bytesBase64` or `bytesRef` field is top-level.
-
-## Studio versus API
-
-Use Studio for interactive viewing and edits that its serializer can preserve.
-Before saving an opened HWPX, Studio compares critical source and candidate
-controls. It blocks the save when pictures, tables, containers, comments,
-shapes, equations, headers, footers, notes, or embedded objects would be lost.
-
-Use REST/MCP `preserve-package` editing for complex public-sector documents.
-That path starts from the original ZIP, changes only addressed entries, reopens
-the result, and enforces package/object invariants. A successful Studio render
-alone is not proof that a complex HWPX can be safely serialized.
-
-## Finalization and artifact safety
-
-Save and PDF export return opaque artifact identifiers and hashes; they never
-expose a server-local path to the model. Only the trusted application reads an
-artifact. Delete it after handoff. Abandoned artifacts expire according to
-`EDITOR_MCP_ARTIFACT_TTL_MS`.
-
-Exact schemas, cursor rules, response budgets, authorization, and error
-envelopes are defined in [`../API.md`](../API.md).
+When the gateway binds beyond loopback, `/mcp` requires
+`Authorization: Bearer <ACADEMIC_EDITOR_MCP_BEARER_TOKEN>`. This internal API
+token is separate from short-lived WOPI document tokens. The repository does
+not use OpenAI API keys or model calls for editor execution or evaluation.

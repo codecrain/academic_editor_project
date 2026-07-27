@@ -53,6 +53,54 @@ export async function initHwpxRuntime() {
   return hwpxReady;
 }
 
+export async function extractRhwpText(bytesLike, { maxTextChars = 200_000 } = {}) {
+  if (!Number.isInteger(maxTextChars) || maxTextChars < 1) {
+    throw new Error('maxTextChars must be a positive integer');
+  }
+  await initHwpxRuntime();
+  const document = new HwpDocument(new Uint8Array(Buffer.from(bytesLike)));
+  const lines = [];
+  let collectedChars = 0;
+  let paragraphCount = 0;
+  let truncated = false;
+
+  for (let section = 0; section < document.getSectionCount(); section += 1) {
+    const sectionParagraphCount = document.getParagraphCount(section);
+    paragraphCount += sectionParagraphCount;
+    for (let paragraph = 0; paragraph < sectionParagraphCount; paragraph += 1) {
+      let text = '';
+      try {
+        const length = document.getParagraphLength(section, paragraph);
+        text = document.getTextRange(section, paragraph, 0, length);
+      } catch {
+        text = '';
+      }
+      if (!text) continue;
+      const line = `s${section + 1}p${paragraph + 1}\t${text}`;
+      const separatorLength = lines.length ? 1 : 0;
+      const remaining = maxTextChars - collectedChars - separatorLength;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      lines.push(line.slice(0, remaining));
+      collectedChars += separatorLength + Math.min(line.length, remaining);
+      if (line.length > remaining) {
+        truncated = true;
+        break;
+      }
+    }
+    if (truncated) break;
+  }
+
+  return {
+    sectionCount: document.getSectionCount(),
+    paragraphCount,
+    text: lines.join('\n'),
+    truncated,
+  };
+}
+
 function parseResult(value, label = 'api') {
   const parsed = typeof value === 'string' && value.trim().startsWith('{') ? JSON.parse(value) : value;
   if (parsed && typeof parsed === 'object' && parsed.ok === false) {

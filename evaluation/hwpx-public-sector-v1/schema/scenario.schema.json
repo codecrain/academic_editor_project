@@ -15,6 +15,7 @@
     "attachments",
     "target",
     "sourceFacts",
+    "factUsage",
     "requiredCapabilities",
     "oracle",
     "tags"
@@ -74,11 +75,32 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["attachmentId", "locator", "fact"],
+        "required": ["factId", "attachmentId", "locator", "fact"],
         "properties": {
+          "factId": {
+            "type": "string",
+            "pattern": "^HWPX-PS-[0-9]{3}-F[0-9]{2}$"
+          },
           "attachmentId": { "type": "string" },
           "locator": { "type": "string" },
           "fact": { "type": ["string", "number", "boolean"] }
+        }
+      }
+    },
+    "factUsage": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["factId", "expectedTargetId", "renderedText"],
+        "properties": {
+          "factId": {
+            "type": "string",
+            "pattern": "^HWPX-PS-[0-9]{3}-F[0-9]{2}$"
+          },
+          "expectedTargetId": { "type": "string", "minLength": 1 },
+          "renderedText": { "type": "string", "minLength": 1 }
         }
       }
     },
@@ -117,8 +139,17 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["location", "text"],
+            "required": ["verificationId", "factIds", "location", "text"],
             "properties": {
+              "verificationId": { "type": "string", "minLength": 1 },
+              "factIds": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^HWPX-PS-[0-9]{3}-F[0-9]{2}$"
+                }
+              },
               "location": { "type": "object" },
               "text": { "type": "string" }
             }

@@ -276,6 +276,7 @@ function renderDocxPage(editorUrl, formParameters = null) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>Academic DOCX Editor</title>
   <style>html, body, iframe { margin: 0; width: 100%; height: 100%; border: 0; overflow: hidden; }</style>
 </head>
@@ -293,6 +294,7 @@ ${inputs}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <meta name="description" content="Academic DOCX Editor for opening, editing, and saving DOCX documents.">
   <meta name="application-name" content="Academic DOCX Editor">
   <meta property="og:title" content="Academic DOCX Editor">
@@ -1596,6 +1598,20 @@ const OPTIONAL_DOCX_RUNTIME_ASSET_FALLBACKS = new Map([
       body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg>\n',
     },
   ],
+  [
+    'images/lc_validatesidebara11y.svg',
+    {
+      contentType: 'image/svg+xml; charset=utf-8',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg>\n',
+    },
+  ],
+  [
+    'images/lc_validatedialogsa11y.svg',
+    {
+      contentType: 'image/svg+xml; charset=utf-8',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" viewBox="0 0 1 1" aria-hidden="true"></svg>\n',
+    },
+  ],
 ]);
 
 function resolveOptionalDocxRuntimeAssetFallback(pathname, docxServiceRoot) {
@@ -1603,7 +1619,9 @@ function resolveOptionalDocxRuntimeAssetFallback(pathname, docxServiceRoot) {
   const runtimePath = pathname.startsWith(rootedPrefix)
     ? pathname.slice(docxServiceRoot.length)
     : pathname;
-  const match = runtimePath.match(/^\/browser\/[^/]+\/(branding(?:-desktop)?\.css|branding\.js|images\/lc_sr20006\.svg)$/);
+  const match = runtimePath.match(
+    /^\/browser\/[^/]+\/(branding(?:-desktop)?\.css|branding\.js|images\/lc_(?:sr20006|validatesidebara11y|validatedialogsa11y)\.svg)$/,
+  );
   return match ? OPTIONAL_DOCX_RUNTIME_ASSET_FALLBACKS.get(match[1]) ?? null : null;
 }
 

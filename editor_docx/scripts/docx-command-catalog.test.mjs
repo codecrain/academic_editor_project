@@ -9,7 +9,7 @@ import {
   validateDocxCommands,
 } from './docx-command-catalog.mjs';
 import { DocxApiSession, createDocxBytes, getZipText } from './docx-api-utils.mjs';
-import { EDITOR_MCP_TOOLS } from './editor-mcp.mjs';
+import { EDITOR_MCP_TOOLS } from '../../editor_server/editor-mcp.mjs';
 
 const EXECUTABLE_OPS = new Set([
   'table.writeCell',

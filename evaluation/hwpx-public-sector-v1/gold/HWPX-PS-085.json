@@ -4,24 +4,50 @@
     "summary": "Apply 5 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
     "sourceFacts": [
       {
+        "factId": "HWPX-PS-085-F01",
         "attachmentId": "source-large-legacy-hwp",
         "locator": "파일 크기 및 형식",
         "fact": "약 10MB OLE 기반 레거시 HWP 참고자료"
       },
       {
+        "factId": "HWPX-PS-085-F02",
         "attachmentId": "source-moe-work-plan-pdf",
         "locator": "2025년 교육부 주요업무 추진계획",
         "fact": "기회의 사다리가 되는 공정한 교육 실현"
       },
       {
+        "factId": "HWPX-PS-085-F03",
         "attachmentId": "source-procurement-csv",
         "locator": "EDU-04 집행액원/본예산원",
         "fact": "1732500000/2310000000 = 75.0%"
       },
       {
+        "factId": "HWPX-PS-085-F04",
         "attachmentId": "source-requirements-docx",
         "locator": "인수 기준",
         "fact": "저장 후 재열기와 구조·렌더 검증 필요"
+      }
+    ],
+    "factUsage": [
+      {
+        "factId": "HWPX-PS-085-F01",
+        "expectedTargetId": "HWPX-PS-085-GROUND-01",
+        "renderedText": "[HWPX-PS-085-F01] source-large-legacy-hwp | 파일 크기 및 형식 | 약 10MB OLE 기반 레거시 HWP 참고자료"
+      },
+      {
+        "factId": "HWPX-PS-085-F02",
+        "expectedTargetId": "HWPX-PS-085-GROUND-02",
+        "renderedText": "[HWPX-PS-085-F02] source-moe-work-plan-pdf | 2025년 교육부 주요업무 추진계획 | 기회의 사다리가 되는 공정한 교육 실현"
+      },
+      {
+        "factId": "HWPX-PS-085-F03",
+        "expectedTargetId": "HWPX-PS-085-GROUND-03",
+        "renderedText": "[HWPX-PS-085-F03] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%"
+      },
+      {
+        "factId": "HWPX-PS-085-F04",
+        "expectedTargetId": "HWPX-PS-085-GROUND-04",
+        "renderedText": "[HWPX-PS-085-F04] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
       }
     ],
     "oracle": {
@@ -46,7 +72,7 @@
               "number": 45
             }
           },
-          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+          "text": "[HWPX-PS-085-F01] source-large-legacy-hwp | 파일 크기 및 형식 | 약 10MB OLE 기반 레거시 HWP 참고자료\n[HWPX-PS-085-F02] source-moe-work-plan-pdf | 2025년 교육부 주요업무 추진계획 | 기회의 사다리가 되는 공정한 교육 실현\n[HWPX-PS-085-F03] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%\n[HWPX-PS-085-F04] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
         },
         {
           "commandId": "HWPX-PS-085-cell-a",
@@ -112,6 +138,8 @@
       ],
       "expectedTargets": [
         {
+          "verificationId": "HWPX-PS-085-CONTENT-01",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -121,6 +149,8 @@
           "text": "공공조달 검증 085: 계약 이행과 검수·집행 위험"
         },
         {
+          "verificationId": "HWPX-PS-085-CONTENT-02",
+          "factIds": [],
           "location": {
             "tableId": "tbl_12",
             "cell": {
@@ -132,6 +162,8 @@
           "text": "검증 85"
         },
         {
+          "verificationId": "HWPX-PS-085-CONTENT-03",
+          "factIds": [],
           "location": {
             "tableId": "tbl_12",
             "cell": {
@@ -141,6 +173,58 @@
             }
           },
           "text": "재확인 필요"
+        },
+        {
+          "verificationId": "HWPX-PS-085-GROUND-01",
+          "factIds": [
+            "HWPX-PS-085-F01"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 46
+            }
+          },
+          "text": "[HWPX-PS-085-F01] source-large-legacy-hwp | 파일 크기 및 형식 | 약 10MB OLE 기반 레거시 HWP 참고자료"
+        },
+        {
+          "verificationId": "HWPX-PS-085-GROUND-02",
+          "factIds": [
+            "HWPX-PS-085-F02"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 47
+            }
+          },
+          "text": "[HWPX-PS-085-F02] source-moe-work-plan-pdf | 2025년 교육부 주요업무 추진계획 | 기회의 사다리가 되는 공정한 교육 실현"
+        },
+        {
+          "verificationId": "HWPX-PS-085-GROUND-03",
+          "factIds": [
+            "HWPX-PS-085-F03"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 48
+            }
+          },
+          "text": "[HWPX-PS-085-F03] source-procurement-csv | EDU-04 집행액원/본예산원 | 1732500000/2310000000 = 75.0%"
+        },
+        {
+          "verificationId": "HWPX-PS-085-GROUND-04",
+          "factIds": [
+            "HWPX-PS-085-F04"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 49
+            }
+          },
+          "text": "[HWPX-PS-085-F04] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
         }
       ],
       "invariants": {

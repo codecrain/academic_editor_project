@@ -4,24 +4,61 @@
     "summary": "Apply 5 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
     "sourceFacts": [
       {
+        "factId": "HWPX-PS-067-F01",
         "attachmentId": "source-mpva-beneficiaries-xlsx",
         "locator": "기본현황(총괄)!D5",
         "fact": 835702
       },
       {
+        "factId": "HWPX-PS-067-F02",
         "attachmentId": "source-mpva-veterans-xlsx",
         "locator": "참전(총괄)!B8",
         "fact": 184580
       },
       {
+        "factId": "HWPX-PS-067-F03",
         "attachmentId": "source-requirements-docx",
         "locator": "인수 기준",
         "fact": "저장 후 재열기와 구조·렌더 검증 필요"
       },
       {
+        "factId": "HWPX-PS-067-F04",
         "attachmentId": "source-decisions-txt",
         "locator": "결정사항 5",
         "fact": "지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+      },
+      {
+        "factId": "HWPX-PS-067-F05",
+        "attachmentId": "source-mpva-beneficiaries-xlsx",
+        "locator": "기본현황(경합형태별현황)!#REF!",
+        "fact": "#REF! 오류 68개; 대표 셀 J7, AA7"
+      }
+    ],
+    "factUsage": [
+      {
+        "factId": "HWPX-PS-067-F01",
+        "expectedTargetId": "HWPX-PS-067-GROUND-01",
+        "renderedText": "[HWPX-PS-067-F01] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702"
+      },
+      {
+        "factId": "HWPX-PS-067-F02",
+        "expectedTargetId": "HWPX-PS-067-GROUND-02",
+        "renderedText": "[HWPX-PS-067-F02] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580"
+      },
+      {
+        "factId": "HWPX-PS-067-F03",
+        "expectedTargetId": "HWPX-PS-067-GROUND-03",
+        "renderedText": "[HWPX-PS-067-F03] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
+      },
+      {
+        "factId": "HWPX-PS-067-F04",
+        "expectedTargetId": "HWPX-PS-067-GROUND-04",
+        "renderedText": "[HWPX-PS-067-F04] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+      },
+      {
+        "factId": "HWPX-PS-067-F05",
+        "expectedTargetId": "HWPX-PS-067-GROUND-05",
+        "renderedText": "[HWPX-PS-067-F05] source-mpva-beneficiaries-xlsx | 기본현황(경합형태별현황)!#REF! | #REF! 오류 68개; 대표 셀 J7, AA7"
       }
     ],
     "oracle": {
@@ -46,7 +83,7 @@
               "number": 47
             }
           },
-          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+          "text": "[HWPX-PS-067-F01] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702\n[HWPX-PS-067-F02] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580\n[HWPX-PS-067-F03] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요\n[HWPX-PS-067-F04] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험\n[HWPX-PS-067-F05] source-mpva-beneficiaries-xlsx | 기본현황(경합형태별현황)!#REF! | #REF! 오류 68개; 대표 셀 J7, AA7"
         },
         {
           "commandId": "HWPX-PS-067-cell-a",
@@ -112,6 +149,8 @@
       ],
       "expectedTargets": [
         {
+          "verificationId": "HWPX-PS-067-CONTENT-01",
+          "factIds": [],
           "location": {
             "paragraph": {
               "section": 0,
@@ -121,6 +160,8 @@
           "text": "환경기후 검증 067: 기후적응 사업의 예산·성과 점검"
         },
         {
+          "verificationId": "HWPX-PS-067-CONTENT-02",
+          "factIds": [],
           "location": {
             "tableId": "tbl_10",
             "cell": {
@@ -132,6 +173,8 @@
           "text": "검증 67"
         },
         {
+          "verificationId": "HWPX-PS-067-CONTENT-03",
+          "factIds": [],
           "location": {
             "tableId": "tbl_10",
             "cell": {
@@ -141,6 +184,71 @@
             }
           },
           "text": "재확인 필요"
+        },
+        {
+          "verificationId": "HWPX-PS-067-GROUND-01",
+          "factIds": [
+            "HWPX-PS-067-F01"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 48
+            }
+          },
+          "text": "[HWPX-PS-067-F01] source-mpva-beneficiaries-xlsx | 기본현황(총괄)!D5 | 835702"
+        },
+        {
+          "verificationId": "HWPX-PS-067-GROUND-02",
+          "factIds": [
+            "HWPX-PS-067-F02"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 49
+            }
+          },
+          "text": "[HWPX-PS-067-F02] source-mpva-veterans-xlsx | 참전(총괄)!B8 | 184580"
+        },
+        {
+          "verificationId": "HWPX-PS-067-GROUND-03",
+          "factIds": [
+            "HWPX-PS-067-F03"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 50
+            }
+          },
+          "text": "[HWPX-PS-067-F03] source-requirements-docx | 인수 기준 | 저장 후 재열기와 구조·렌더 검증 필요"
+        },
+        {
+          "verificationId": "HWPX-PS-067-GROUND-04",
+          "factIds": [
+            "HWPX-PS-067-F04"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 51
+            }
+          },
+          "text": "[HWPX-PS-067-F04] source-decisions-txt | 결정사항 5 | 지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+        },
+        {
+          "verificationId": "HWPX-PS-067-GROUND-05",
+          "factIds": [
+            "HWPX-PS-067-F05"
+          ],
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 52
+            }
+          },
+          "text": "[HWPX-PS-067-F05] source-mpva-beneficiaries-xlsx | 기본현황(경합형태별현황)!#REF! | #REF! 오류 68개; 대표 셀 J7, AA7"
         }
       ],
       "invariants": {
