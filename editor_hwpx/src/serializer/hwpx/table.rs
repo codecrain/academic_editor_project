@@ -30,7 +30,8 @@ use quick_xml::Writer;
 
 use crate::model::paragraph::LineSeg;
 use crate::model::shape::{
-    CommonObjAttr, HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign, VertRelTo,
+    Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign,
+    VertRelTo,
 };
 use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
 
@@ -92,6 +93,9 @@ pub fn write_table<W: Write>(
     write_sz(w, &table.common)?;
     write_pos(w, &table.common)?;
     write_out_margin(w, table)?;
+    if let Some(caption) = &table.caption {
+        write_caption(w, caption, ctx)?;
+    }
     write_in_margin(w, table)?;
 
     // tr[]: 행 단위 반복. 각 행에 속한 셀 (cell.row == r) 을 col 오름차순으로 출력.
@@ -222,21 +226,70 @@ fn write_sub_list<W: Write>(
     cell: &Cell,
     ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
+    write_paragraph_sub_list(
+        w,
+        &cell.paragraphs,
+        if cell.text_direction == 1 {
+            "VERTICAL"
+        } else {
+            "HORIZONTAL"
+        },
+        cell_vert_align_str(cell.vertical_align),
+        ctx,
+    )
+}
+
+fn write_caption<W: Write>(
+    w: &mut Writer<W>,
+    caption: &Caption,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
+    let side = match caption.direction {
+        CaptionDirection::Left => "LEFT",
+        CaptionDirection::Right => "RIGHT",
+        CaptionDirection::Top => "TOP",
+        CaptionDirection::Bottom => "BOTTOM",
+    };
+    let full_size = bool01(caption.include_margin);
+    let width = caption.width.to_string();
+    let gap = caption.spacing.to_string();
+    let last_width = caption.max_width.to_string();
+    start_tag_attrs(
+        w,
+        "hp:caption",
+        &[
+            ("side", side),
+            ("fullSz", full_size),
+            ("width", &width),
+            ("gap", &gap),
+            ("lastWidth", &last_width),
+        ],
+    )?;
+    write_paragraph_sub_list(
+        w,
+        &caption.paragraphs,
+        "HORIZONTAL",
+        "TOP",
+        ctx,
+    )?;
+    end_tag(w, "hp:caption")
+}
+
+fn write_paragraph_sub_list<W: Write>(
+    w: &mut Writer<W>,
+    paragraphs: &[crate::model::paragraph::Paragraph],
+    text_direction: &str,
+    vertical_alignment: &str,
+    ctx: &mut SerializeContext,
+) -> Result<(), SerializeError> {
     start_tag_attrs(
         w,
         "hp:subList",
         &[
             ("id", ""),
-            (
-                "textDirection",
-                if cell.text_direction == 1 {
-                    "VERTICAL"
-                } else {
-                    "HORIZONTAL"
-                },
-            ),
+            ("textDirection", text_direction),
             ("lineWrap", "BREAK"),
-            ("vertAlign", cell_vert_align_str(cell.vertical_align)),
+            ("vertAlign", vertical_alignment),
             ("linkListIDRef", "0"),
             ("linkListNextIDRef", "0"),
             ("textWidth", "0"),
@@ -247,7 +300,7 @@ fn write_sub_list<W: Write>(
     )?;
 
     // 셀 내부 문단 재귀 — 각 문단은 간단한 <hp:p><hp:run><hp:t>텍스트</hp:t></hp:run></hp:p> 구조
-    for para in cell.paragraphs.iter() {
+    for para in paragraphs {
         ctx.para_shape_ids.reference(para.para_shape_id);
         ctx.style_ids.reference(para.style_id as u16);
         if let Some(cs_ref) = para.char_shapes.first() {

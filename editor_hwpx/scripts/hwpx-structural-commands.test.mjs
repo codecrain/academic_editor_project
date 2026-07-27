@@ -470,6 +470,10 @@ test('table.insertCaption creates a native caption and writes its text through t
       calls.push(['setTableProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
       return '{"ok":true,"captionCharOffset":4}';
     },
+    deleteTextInCell: (...args) => {
+      calls.push(['deleteTextInCell', ...args]);
+      return '{"ok":true}';
+    },
     insertTextInCell: (...args) => {
       calls.push(['insertTextInCell', ...args]);
       return '{"ok":true,"charOffset":13}';
@@ -491,7 +495,8 @@ test('table.insertCaption creates a native caption and writes its text through t
 
   assert.deepEqual(calls, [
     ['setTableProperties', 1, 3, 2, { hasCaption: true, captionDirection: 2 }],
-    ['insertTextInCell', 1, 3, 2, 65534, 0, 4, '평가 결과'],
+    ['deleteTextInCell', 1, 3, 2, 65534, 0, 0, 4],
+    ['insertTextInCell', 1, 3, 2, 65534, 0, 0, '평가 결과'],
   ]);
   assert.deepEqual(result.target, {
     kind: 'tableCaption',
@@ -506,6 +511,7 @@ test('table.insertCaption rejects an existing native caption before mutation', (
   const doc = {
     getTableProperties: () => '{"hasCaption":true,"captionDirection":2}',
     setTableProperties: (...args) => calls.push(args),
+    deleteTextInCell: (...args) => calls.push(args),
     insertTextInCell: (...args) => calls.push(args),
   };
   assert.throws(() => applyHwpxStructuralCommand(doc, {
@@ -518,7 +524,7 @@ test('table.insertCaption rejects an existing native caption before mutation', (
   assert.deepEqual(calls, []);
 });
 
-test('table.create lower-level adapter exercises width, height, cell text, and unpromoted caption path', () => {
+test('table.create lower-level adapter exercises width, height, cell text, and caption path', () => {
   const calls = [];
   const doc = {
     getParagraphLength: () => 2,
@@ -542,6 +548,10 @@ test('table.create lower-level adapter exercises width, height, cell text, and u
     setTableProperties: (...args) => {
       calls.push(['setTableProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
       return '{"ok":true,"captionCharOffset":4}';
+    },
+    deleteTextInCell: (...args) => {
+      calls.push(['deleteTextInCell', ...args]);
+      return '{"ok":true}';
     },
   };
   applyHwpxStructuralCommand(doc, {
@@ -582,7 +592,8 @@ test('table.create lower-level adapter exercises width, height, cell text, and u
   ]);
   assert.deepEqual(calls.slice(9), [
     ['setTableProperties', 0, 2, 0, { hasCaption: true, captionDirection: 2 }],
-    ['insertTextInCell', 0, 2, 0, 65534, 0, 4, '평가표'],
+    ['deleteTextInCell', 0, 2, 0, 65534, 0, 0, 4],
+    ['insertTextInCell', 0, 2, 0, 65534, 0, 0, '평가표'],
   ]);
 });
 

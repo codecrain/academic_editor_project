@@ -220,7 +220,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Create a new HWPX table after an inspected body paragraph.',
     required: ['target', 'rows', 'columns'],
-    optional: ['width', 'height', 'cellTexts'],
+    optional: ['width', 'height', 'cellTexts', 'caption'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: [
@@ -229,6 +229,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       'resizeTableCells',
       'insertTextInCell',
       'setTableProperties',
+      'deleteTextInCell',
     ],
     fields: {
       target: locationField,
@@ -237,6 +238,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       width: 'Optional table width in HWP units.',
       height: 'Optional table height in HWP units.',
       cellTexts: 'Optional row-major array of initial cell text.',
+      caption: 'Optional nonempty native table caption text.',
     },
     example: {
       op: 'table.create',
@@ -252,9 +254,9 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'text'],
     optional: ['position'],
     precondition: 'target_inspect',
-    readiness: 'unavailable',
+    readiness: 'available',
     execution: 'structural-adapter',
-    nativeMethods: ['setTableProperties', 'insertTextInCell'],
+    nativeMethods: ['setTableProperties', 'deleteTextInCell', 'insertTextInCell'],
     enum: { position: ['before', 'after'] },
     fields: { target: locationField, text: 'Complete caption text.', position: 'before or after; default before.' },
     example: {
@@ -263,7 +265,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       text: '표 1. 평가 결과',
     },
     notes: [
-      'The pinned published @rhwp/core@0.7.15 reports success but drops the caption during structural export and reopen.',
+      'Requires the repository source-built RHWP runtime; save/reopen verification is mandatory.',
     ],
   }),
   command({
@@ -328,7 +330,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'style'],
     aliases: ['style.setRunStyle'],
     precondition: 'target_inspect',
-    readiness: 'unavailable',
+    readiness: 'available',
     execution: 'structural-adapter',
     nativeMethods: [
       'applyCharFormat',
@@ -336,7 +338,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       'findOrCreateFontId',
     ],
     notes: [
-      'The pinned published @rhwp/core@0.7.15 reports success but loses the requested run formatting during structural export and reopen.',
+      'Requires the repository source-built RHWP runtime; both range boundaries are verified after reopen.',
     ],
     fields: { target: locationField, style: 'Character format such as bold, italic, font size, color, and font family.' },
     example: { op: 'setRunStyle', target: { paragraph: { section: 0, number: 1 } }, style: { bold: true, fontSizePt: 12 } },
@@ -457,11 +459,11 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Set HWPX package metadata.',
     optional: ['title', 'subject', 'author', 'keywords', 'description'],
     anyOf: [['title', 'subject', 'author', 'keywords', 'description']],
-    readiness: 'unavailable',
+    readiness: 'available',
     execution: 'structural-adapter',
     nativeMethods: ['setDocumentMetadata', 'getDocumentMetadata'],
     notes: [
-      'The repository source implements this adapter, but no published @rhwp/core artifact through 0.8.2 exposes the required metadata methods.',
+      'Requires the repository source-built RHWP runtime and metadata equality after reopen.',
     ],
     fields: {
       title: 'Document title.',
@@ -511,7 +513,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Create or replace an HWPX header or footer in one section.',
     required: ['target', 'type', 'text'],
     optional: ['applyTo', 'align'],
-    readiness: 'unavailable',
+    readiness: 'available',
     execution: 'structural-adapter',
     nativeMethods: [
       'createHeaderFooter',
@@ -520,7 +522,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       'deleteHeaderFooter',
     ],
     notes: [
-      'The pinned published @rhwp/core@0.7.15 surface exposes these methods, but header/footer content does not survive structural export and reopen.',
+      'Requires the repository source-built RHWP runtime and header/footer text verification after reopen.',
     ],
     enum: {
       type: ['header', 'footer'],
@@ -542,11 +544,11 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Insert a footnote reference at an inspected HWPX text target and create its footnote body.',
     required: ['target', 'text'],
     precondition: 'target_inspect',
-    readiness: 'unavailable',
+    readiness: 'available',
     execution: 'structural-adapter',
     nativeMethods: ['insertFootnote', 'insertTextInFootnote'],
     notes: [
-      'The pinned published @rhwp/core@0.7.15 traps during footnote insertion on the supported blank-document fixture.',
+      'Requires the repository source-built RHWP runtime and footnote reference/body verification after reopen.',
     ],
     fields: { target: locationField, text: 'Footnote body text.' },
     example: {
@@ -780,11 +782,6 @@ function validateHwpxCommands(commands) {
           throw new Error(`table.writeCells cells[${cellIndex}] requires a text string; an empty string explicitly clears the cell.`);
         }
       });
-    }
-    if (entry.op === 'table.create' && value.caption !== undefined) {
-      throw new Error(
-        'table.create caption is not ready in the installed runtime; create the table without caption.',
-      );
     }
     if (entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering') {
       if (!Array.isArray(value.items) || value.items.length === 0

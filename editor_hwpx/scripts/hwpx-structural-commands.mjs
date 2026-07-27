@@ -667,6 +667,7 @@ function applyCreateTable(doc, command, context) {
     : null;
   if (command.caption !== undefined) {
     requireMethod(doc, 'setTableProperties');
+    requireMethod(doc, 'deleteTextInCell');
     requireMethod(doc, 'insertTextInCell');
   }
   const createTableEx = requireMethod(doc, 'createTableEx');
@@ -768,7 +769,10 @@ function applyCreateTable(doc, command, context) {
     native.caption = captionResult.native;
     createdTargets.push(captionResult.target);
   }
-  return structuralResult(command, native, createdTarget, createdTargets);
+  return {
+    ...structuralResult(command, native, createdTarget, createdTargets),
+    ...(command.caption === undefined ? {} : { expectedCaptionText: command.caption }),
+  };
 }
 
 function applyInsertTableCaption(doc, command, context) {
@@ -785,6 +789,7 @@ function applyInsertTableCaption(doc, command, context) {
   }
   const table = resolveHwpxTableTarget(command, context);
   const setTableProperties = requireMethod(doc, 'setTableProperties');
+  const deleteTextInCell = requireMethod(doc, 'deleteTextInCell');
   const insertTextInCell = requireMethod(doc, 'insertTextInCell');
   if (typeof doc?.getTableProperties === 'function') {
     const properties = parseNativeObject(
@@ -816,6 +821,20 @@ function applyInsertTableCaption(doc, command, context) {
     'setTableProperties',
     ['captionCharOffset'],
   );
+  const clearedNative = captionNative.captionCharOffset === 0
+    ? null
+    : parseNativeResult(
+      deleteTextInCell(
+        table.sectionIndex,
+        table.paragraphIndex,
+        table.controlIndex,
+        65534,
+        0,
+        0,
+        captionNative.captionCharOffset,
+      ),
+      'deleteTextInCell',
+    );
   const textNative = parseNativeResult(
     insertTextInCell(
       table.sectionIndex,
@@ -823,7 +842,7 @@ function applyInsertTableCaption(doc, command, context) {
       table.controlIndex,
       65534,
       0,
-      captionNative.captionCharOffset,
+      0,
       command.text,
     ),
     'insertTextInCell',
@@ -832,6 +851,7 @@ function applyInsertTableCaption(doc, command, context) {
   return {
     ...structuralResult(command, {
       caption: captionNative,
+      cleared: clearedNative,
       text: textNative,
     }, {
       kind: 'tableCaption',
@@ -1217,19 +1237,23 @@ function applyHeaderFooter(doc, command) {
     ),
     'applyParaFormatInHf',
   );
-  return structuralResult(command, {
-    replaced,
-    control: controlNative,
-    text: textNative,
-    alignment: alignNative,
-  }, {
-    kind: 'headerFooter',
-    sectionIndex,
-    paragraphIndex: controlNative.paraIndex,
-    controlIndex: controlNative.controlIndex,
-    type: command.type,
-    applyTo: applyToName,
-  });
+  return {
+    ...structuralResult(command, {
+      replaced,
+      control: controlNative,
+      text: textNative,
+      alignment: alignNative,
+    }, {
+      kind: 'headerFooter',
+      sectionIndex,
+      paragraphIndex: controlNative.paraIndex,
+      controlIndex: controlNative.controlIndex,
+      type: command.type,
+      applyTo: applyToName,
+    }),
+    expectedHeaderFooterText: command.text,
+    expectedHeaderFooterAlign: align,
+  };
 }
 
 function applyInsertFootnote(doc, command, context) {
@@ -1274,10 +1298,13 @@ function applyInsertFootnote(doc, command, context) {
     controlIndex: controlNative.controlIdx,
     footnoteNumber: controlNative.footnoteNumber,
   };
-  return structuralResult(command, {
-    control: controlNative,
-    text: textNative,
-  }, createdTarget, [createdTarget]);
+  return {
+    ...structuralResult(command, {
+      control: controlNative,
+      text: textNative,
+    }, createdTarget, [createdTarget]),
+    expectedFootnoteText: command.text,
+  };
 }
 
 const CHARACTER_STYLE_KEYS = new Set([

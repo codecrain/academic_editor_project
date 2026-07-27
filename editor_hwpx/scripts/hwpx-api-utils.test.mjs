@@ -687,7 +687,7 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
 });
 
-test('HWPX API rejects table.insertCaption before revision when installed export cannot preserve it', async () => {
+test('HWPX API table.insertCaption survives source-built save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
   const session = new HwpxApiSession(input);
@@ -699,36 +699,43 @@ test('HWPX API rejects table.insertCaption before revision when installed export
     cellTexts: ['A'],
   }]);
   const table = session.readJson().tables[0];
-  const beforeRevision = session.revision;
-  const beforeBytes = session.save().bytes;
-
-  assert.throws(() => session.commandsBatch([{
+  const result = session.commandsBatch([{
     op: 'table.insertCaption',
     target: table.cells[0].location,
-    text: 'CAP',
-  }]), /not ready in the installed runtime/);
-  assert.equal(session.revision, beforeRevision);
-  assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+    text: '표 1. 재개방 캡션',
+  }]);
+  assert.equal(result.results[0].target.kind, 'tableCaption');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const properties = JSON.parse(reopened.doc.getTableProperties(0, 1, 0));
+  assert.equal(properties.hasCaption, true);
+  const captionLength = reopened.doc.getCellParagraphLength(0, 1, 0, 65534, 0);
+  assert.equal(
+    reopened.doc.getTextInCell(0, 1, 0, 65534, 0, 0, captionLength),
+    result.results[0].expectedCaptionText,
+  );
 });
 
-test('HWPX API rejects table.create caption before mutation when installed export cannot preserve it', async () => {
+test('HWPX API table.create caption survives source-built save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
   const session = new HwpxApiSession(input);
-  const beforeRevision = session.revision;
 
-  assert.throws(() => session.commandsBatch([{
+  const result = session.commandsBatch([{
     op: 'table.create',
     target: { paragraph: { section: 0, number: 0 } },
     rows: 1,
     columns: 1,
     caption: 'CAP',
-  }]), /caption is not ready/);
-  assert.equal(session.revision, beforeRevision);
-  assert.equal(Buffer.compare(session.save().bytes, input), 0);
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const properties = JSON.parse(reopened.doc.getTableProperties(0, 1, 0));
+  assert.equal(properties.hasCaption, true);
+  const captionLength = reopened.doc.getCellParagraphLength(0, 1, 0, 65534, 0);
+  assert.equal(reopened.doc.getTextInCell(0, 1, 0, 65534, 0, 0, captionLength), 'CAP');
+  assert.equal(result.results[0].expectedCaptionText, 'CAP');
 });
 
-test('HWPX API rejects setRunStyle before revision when installed export cannot preserve it', async () => {
+test('HWPX API setRunStyle survives source-built save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
   const session = new HwpxApiSession(input);
@@ -737,19 +744,82 @@ test('HWPX API rejects setRunStyle before revision when installed export cannot 
     target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
     text: 'ABCDE',
   }]);
-  const beforeRevision = session.revision;
-  const beforeBytes = session.save().bytes;
-
-  assert.throws(() => session.commandsBatch([{
+  const result = session.commandsBatch([{
     op: 'setRunStyle',
     target: { native: { section: 0, para: 0, offset: 0, length: 2 } },
-    style: { bold: true },
-  }]), /not ready in the installed runtime/);
-  assert.equal(session.revision, beforeRevision);
-  assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+    style: { bold: true, italic: true, fontSizePt: 13 },
+  }]);
+  assert.equal(result.results[0].target.kind, 'paragraph');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const style = JSON.parse(reopened.doc.getCharPropertiesAt(0, 0, 1));
+  assert.equal(style.bold, true);
+  assert.equal(style.italic, true);
+  assert.equal(style.fontSize, 1300);
 });
 
-test('future setRunStyle verifier checks both paragraph range boundaries after reopen', () => {
+test('HWPX API setDocumentMetadata survives source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  session.commandsBatch([{
+    op: 'setDocumentMetadata',
+    title: '공공기관 성과보고서',
+    author: '기획조정실',
+    keywords: '성과,검수',
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const metadata = JSON.parse(reopened.doc.getDocumentMetadata());
+  assert.equal(metadata.title, '공공기관 성과보고서');
+  assert.equal(metadata.author, '기획조정실');
+  assert.equal(metadata.keywords, '성과,검수');
+});
+
+test('HWPX API setHeaderFooter survives source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const result = session.commandsBatch([{
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'header',
+    applyTo: 'both',
+    align: 'center',
+    text: '공공기관 내부검토용',
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const header = JSON.parse(reopened.doc.getHeaderFooter(0, true, 0));
+  assert.equal(header.exists, true);
+  assert.equal(header.text, result.results[0].expectedHeaderFooterText);
+  const paragraph = JSON.parse(reopened.doc.getParaPropertiesInHf(0, true, 0, 0));
+  assert.equal(paragraph.alignment, result.results[0].expectedHeaderFooterAlign);
+});
+
+test('HWPX API insertFootnote survives source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  session.commandsBatch([{
+    op: 'insertText',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+    text: '기준일',
+  }]);
+  const result = session.commandsBatch([{
+    op: 'insertFootnote',
+    target: { native: { section: 0, para: 0, offset: 3, length: 0 } },
+    text: '통계 작성 기준일은 2026년 6월 30일이다.',
+  }]);
+  const target = result.results[0].target;
+  assert.equal(target.kind, 'footnote');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const footnote = JSON.parse(reopened.doc.getFootnoteInfo(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+  ));
+  assert.equal(footnote.texts[0].slice(2), result.results[0].expectedFootnoteText);
+});
+
+test('setRunStyle verifier checks both paragraph range boundaries after reopen', () => {
   const calls = [];
   const session = {
     doc: {
@@ -777,7 +847,7 @@ test('future setRunStyle verifier checks both paragraph range boundaries after r
   assert.deepEqual(calls, [[0, 0, 1], [0, 0, 3]]);
 });
 
-test('future setRunStyle verifier checks both inspected table-cell range boundaries after reopen', () => {
+test('setRunStyle verifier checks both inspected table-cell range boundaries after reopen', () => {
   const calls = [];
   const session = {
     doc: {

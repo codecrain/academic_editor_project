@@ -1248,6 +1248,38 @@ export function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
+    if (result?.expectedHeaderFooterText !== undefined
+      && headerFooter.text !== result.expectedHeaderFooterText) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISMATCH',
+        'A structural header or footer text did not survive reopening exactly.',
+        {
+          target,
+          expectedHeaderFooterText: result.expectedHeaderFooterText,
+          headerFooterText: headerFooter.text,
+        },
+      );
+    }
+    if (result?.expectedHeaderFooterAlign !== undefined) {
+      const paragraphProperties = tryJson(() => session.doc.getParaPropertiesInHf(
+        target.sectionIndex,
+        target.type === 'header',
+        applyTo,
+        0,
+      ));
+      if (!paragraphProperties
+        || paragraphProperties.alignment !== result.expectedHeaderFooterAlign) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural header or footer alignment did not survive reopening exactly.',
+          {
+            target,
+            expectedHeaderFooterAlign: result.expectedHeaderFooterAlign,
+            headerFooterAlign: paragraphProperties?.alignment,
+          },
+        );
+      }
+    }
     return;
   }
   if (target.kind === 'footnote') {
@@ -1261,6 +1293,24 @@ export function verifyStructuralTarget(session, target, result = null) {
         'HWPX_CREATED_TARGET_MISSING',
         'A structural footnote target was not found after reopening the candidate.',
         { target },
+      );
+    }
+    const logicalFootnoteText = Array.isArray(footnote.texts)
+      && typeof footnote.texts[0] === 'string'
+      && footnote.texts[0].startsWith('  ')
+      ? [footnote.texts[0].slice(2), ...footnote.texts.slice(1)].join('\n')
+      : null;
+    if (result?.expectedFootnoteText !== undefined
+      && logicalFootnoteText !== result.expectedFootnoteText) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISMATCH',
+        'A structural footnote body did not survive reopening exactly.',
+        {
+          target,
+          expectedFootnoteText: result.expectedFootnoteText,
+          footnoteTexts: footnote.texts,
+          logicalFootnoteText,
+        },
       );
     }
     return;

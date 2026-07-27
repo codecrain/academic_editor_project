@@ -13,6 +13,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { getHwpxCommandCatalog } from './hwpx-command-catalog.mjs';
 import * as runtimeReadiness from './hwpx-runtime-readiness.mjs';
 
 const {
@@ -20,6 +21,10 @@ const {
   materializeCoreArtifact,
   validateCoreArtifact,
 } = runtimeReadiness;
+
+const COMPLETE_RUNTIME_METHODS = [...new Set(
+  getHwpxCommandCatalog().commands.flatMap(command => command.nativeMethods),
+)];
 
 function artifactFixture(root, {
   name = '@rhwp/core',
@@ -67,6 +72,7 @@ test('runtime readiness rejects methods declared only in typings, not the execut
       'resizeTableCells',
       'insertTextInCell',
       'setTableProperties',
+      'deleteTextInCell',
       'insertParagraph',
       'insertPicture',
       'setPageDef',
@@ -98,41 +104,7 @@ test('runtime readiness accepts a complete fixture and materializes all files at
   const source = path.join(root, 'source');
   const destination = path.join(root, 'destination');
   artifactFixture(source, {
-    methods: [
-      'insertText',
-      'deleteRange',
-      'insertParagraph',
-      'getStyleAt',
-      'getCellStyleAt',
-      'getParaPropertiesAt',
-      'getCellParaPropertiesAt',
-      'getCharPropertiesAt',
-      'getCellCharPropertiesAt',
-      'applyStyle',
-      'applyParaFormat',
-      'applyCharFormat',
-      'createTableEx',
-      'getCellProperties',
-      'resizeTableCells',
-      'insertTextInCell',
-      'setTableProperties',
-      'insertPicture',
-      'setPageDef',
-      'createHeaderFooter',
-      'insertTextInHeaderFooter',
-      'applyParaFormatInHf',
-      'deleteHeaderFooter',
-      'insertFootnote',
-      'insertTextInFootnote',
-      'createStyle',
-      'updateStyleShapes',
-      'applyCellStyle',
-      'applyCharFormat',
-      'applyCharFormatInCell',
-      'applyParaFormat',
-      'applyParaFormatInCell',
-      'findOrCreateFontId',
-    ],
+    methods: COMPLETE_RUNTIME_METHODS,
   });
 
   const readiness = validateCoreArtifact(source);
@@ -169,27 +141,7 @@ test('failed staging copy leaves an existing destination byte-for-byte unchanged
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-copy-failure-'));
   const source = path.join(root, 'source');
   const destination = path.join(root, 'destination');
-  const methods = [
-    'insertText',
-    'insertParagraph',
-    'deleteRange',
-    'createTableEx',
-    'getCellProperties',
-    'resizeTableCells',
-    'insertTextInCell',
-    'setTableProperties',
-    'insertPicture',
-    'setPageDef',
-    'createStyle',
-    'updateStyleShapes',
-    'applyStyle',
-    'applyCellStyle',
-    'applyCharFormat',
-    'applyCharFormatInCell',
-    'applyParaFormat',
-    'applyParaFormatInCell',
-    'findOrCreateFontId',
-  ];
+  const methods = COMPLETE_RUNTIME_METHODS;
   artifactFixture(source, { methods, marker: 'complete' });
   artifactFixture(destination, { methods: ['existingMethod'], marker: 'existing' });
   const before = new Map(CORE_ARTIFACT_FILES.map(fileName => [
@@ -211,27 +163,7 @@ test('staging cleanup failure cannot mask a swap failure or prevent backup resto
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-cleanup-rollback-'));
   const source = path.join(root, 'source');
   const destination = path.join(root, 'destination');
-  const methods = [
-    'insertText',
-    'insertParagraph',
-    'deleteRange',
-    'createTableEx',
-    'getCellProperties',
-    'resizeTableCells',
-    'insertTextInCell',
-    'setTableProperties',
-    'insertPicture',
-    'setPageDef',
-    'createStyle',
-    'updateStyleShapes',
-    'applyStyle',
-    'applyCellStyle',
-    'applyCharFormat',
-    'applyCharFormatInCell',
-    'applyParaFormat',
-    'applyParaFormatInCell',
-    'findOrCreateFontId',
-  ];
+  const methods = COMPLETE_RUNTIME_METHODS;
   artifactFixture(source, { methods, marker: 'new-staging' });
   artifactFixture(destination, { methods: ['existingMethod'], marker: 'old-destination' });
   const before = new Map(CORE_ARTIFACT_FILES.map(fileName => [
@@ -270,27 +202,7 @@ test('backup cleanup failure returns committed success with an explicit warning'
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-cleanup-warning-'));
   const source = path.join(root, 'source');
   const destination = path.join(root, 'destination');
-  const methods = [
-    'insertText',
-    'insertParagraph',
-    'deleteRange',
-    'createTableEx',
-    'getCellProperties',
-    'resizeTableCells',
-    'insertTextInCell',
-    'setTableProperties',
-    'insertPicture',
-    'setPageDef',
-    'createStyle',
-    'updateStyleShapes',
-    'applyStyle',
-    'applyCellStyle',
-    'applyCharFormat',
-    'applyCharFormatInCell',
-    'applyParaFormat',
-    'applyParaFormatInCell',
-    'findOrCreateFontId',
-  ];
+  const methods = COMPLETE_RUNTIME_METHODS;
   artifactFixture(source, { methods, marker: 'new-committed' });
   artifactFixture(destination, { methods: ['existingMethod'], marker: 'old-backup' });
 
