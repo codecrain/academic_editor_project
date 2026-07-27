@@ -48,6 +48,31 @@ test('HWPX command catalog publishes every promoted DOCX parity operation', () =
     getHwpxCommandCatalog({ op: 'text.replaceTracked' }).commands[0].capability,
     'engine-required',
   );
+  for (const op of promoted.filter((value) => value !== 'text.replaceTracked')) {
+    assert.equal(
+      getHwpxCommandCatalog({ op }).commands[0].capability,
+      'adapter-required',
+    );
+  }
+});
+
+test('HWPX promoted contracts expose optional fields and enforced enums', () => {
+  const createTable = getHwpxCommandCatalog({ op: 'table.create' }).commands[0];
+  assert.deepEqual(createTable.optional, ['width', 'height', 'cellTexts', 'caption']);
+
+  const pageSetup = getHwpxCommandCatalog({ op: 'setPageSetup' }).commands[0];
+  assert.deepEqual(pageSetup.enum.orientation, ['portrait', 'landscape']);
+
+  const headerFooter = getHwpxCommandCatalog({ op: 'setHeaderFooter' }).commands[0];
+  assert.deepEqual(headerFooter.enum.type, ['header', 'footer']);
+  assert.deepEqual(headerFooter.enum.applyTo, ['both', 'odd', 'even']);
+
+  assert.throws(() => validateHwpxCommands([{
+    op: 'setHeaderFooter',
+    sectionIndex: 0,
+    type: 'sidebar',
+    text: '잘못된 유형',
+  }]), /type must be one of: header, footer/);
 });
 
 test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {

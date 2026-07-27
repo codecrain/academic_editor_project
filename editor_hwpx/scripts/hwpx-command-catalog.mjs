@@ -4,10 +4,12 @@ const command = ({
   description,
   normalizeAs = op,
   required = [],
+  optional = [],
   anyOf = [],
   aliases = [],
   precondition = 'none',
   capability = 'available',
+  enum: enumValues = {},
   fields = {},
   example,
   notes = [],
@@ -17,10 +19,14 @@ const command = ({
   description,
   normalizeAs,
   required: Object.freeze(['op', ...required]),
+  optional: Object.freeze([...optional]),
   anyOf: Object.freeze(anyOf.map((group) => Object.freeze([...group]))),
   aliases: Object.freeze([...aliases]),
   precondition,
   capability,
+  enum: Object.freeze(Object.fromEntries(
+    Object.entries(enumValues).map(([field, values]) => [field, Object.freeze([...values])]),
+  )),
   fields: Object.freeze({
     op: `Use exactly ${op}.`,
     commandId: 'Optional stable ID for matching command results.',
@@ -115,6 +121,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Insert a new paragraph after an inspected HWPX body paragraph.',
     required: ['target', 'text'],
+    optional: ['styleSource'],
     aliases: ['paragraph.append'],
     precondition: 'target_inspect',
     capability: 'adapter-required',
@@ -201,6 +208,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Create a new HWPX table after an inspected body paragraph.',
     required: ['target', 'rows', 'columns'],
+    optional: ['width', 'height', 'cellTexts', 'caption'],
     precondition: 'target_inspect',
     capability: 'adapter-required',
     fields: {
@@ -224,8 +232,10 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Insert a caption paragraph adjacent to an inspected HWPX table.',
     required: ['target', 'text'],
+    optional: ['position'],
     precondition: 'target_inspect',
     capability: 'adapter-required',
+    enum: { position: ['before', 'after'] },
     fields: { target: locationField, text: 'Complete caption text.', position: 'before or after; default before.' },
     example: {
       op: 'table.insertCaption',
@@ -373,6 +383,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'image',
     description: 'Insert a new inline image after an inspected HWPX paragraph.',
     required: ['target'],
+    optional: ['mimeType', 'width', 'height', 'altText', 'caption'],
     anyOf: [['bytesBase64', 'bytes', 'filePath']],
     aliases: ['image.insert', 'object.insertImage'],
     precondition: 'target_inspect',
@@ -409,6 +420,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     op: 'setDocumentMetadata',
     category: 'package',
     description: 'Set HWPX package metadata.',
+    optional: ['title', 'subject', 'author', 'keywords', 'description'],
     anyOf: [['title', 'subject', 'author', 'keywords', 'description']],
     capability: 'adapter-required',
     fields: {
@@ -426,6 +438,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Create a named HWPX paragraph or character style.',
     required: ['name', 'kind', 'properties'],
     capability: 'adapter-required',
+    enum: { kind: ['paragraph', 'character'] },
     fields: {
       name: 'Unique style name.',
       kind: 'paragraph or character.',
@@ -438,7 +451,9 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'package',
     description: 'Set HWPX page size, orientation, and margins for one section.',
     required: ['sectionIndex', 'width', 'height'],
+    optional: ['orientation', 'margins'],
     capability: 'adapter-required',
+    enum: { orientation: ['portrait', 'landscape'] },
     fields: {
       sectionIndex: 'Zero-based section index.',
       width: 'Page width in HWP units.',
@@ -453,7 +468,13 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'package',
     description: 'Create or replace an HWPX header or footer in one section.',
     required: ['sectionIndex', 'type', 'text'],
+    optional: ['applyTo', 'align'],
     capability: 'adapter-required',
+    enum: {
+      type: ['header', 'footer'],
+      applyTo: ['both', 'odd', 'even'],
+      align: ['left', 'center', 'right'],
+    },
     fields: {
       sectionIndex: 'Zero-based section index.',
       type: 'header or footer.',
@@ -669,6 +690,11 @@ function validateHwpxCommands(commands) {
     for (const alternatives of entry.anyOf) {
       if (!alternatives.some((field) => meaningful(value[field]))) {
         throw new Error(`${entry.op} requires at least one of: ${alternatives.join(', ')}.`);
+      }
+    }
+    for (const [field, allowed] of Object.entries(entry.enum)) {
+      if (value[field] !== undefined && value[field] !== null && !allowed.includes(value[field])) {
+        throw new Error(`${entry.op} ${field} must be one of: ${allowed.join(', ')}.`);
       }
     }
     if (entry.op === 'table.writeCells') {
