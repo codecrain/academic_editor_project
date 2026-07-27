@@ -981,10 +981,52 @@ fn export_png(args: &[String]) {
 }
 
 fn export_pdf(args: &[String]) {
+    let json_output = args.iter().any(|arg| arg == "--json");
+    match export_pdf_document(args) {
+        Ok((output_file, byte_length, page_count)) => {
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "renderer": "rhwp-native",
+                        "pageCount": page_count,
+                        "byteLength": byte_length,
+                        "output": output_file,
+                    })
+                );
+            } else {
+                println!(
+                    "PDF export complete: {} ({} KB, {} pages)",
+                    output_file,
+                    byte_length / 1024,
+                    page_count
+                );
+            }
+        }
+        Err(message) => {
+            if json_output {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": false,
+                        "error": message,
+                    })
+                );
+            } else {
+                eprintln!("PDF export failed: {}", message);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn export_pdf_document(args: &[String]) -> Result<(String, usize, usize), String> {
     if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-pdf <파일.hwp> [-o 출력.pdf] [-p 페이지]");
-        return;
+        return Err(
+            "usage: rhwp export-pdf <document.hwp|document.hwpx> [-o output.pdf] [-p page] [--json]"
+                .to_string(),
+        );
     }
 
     let file_path = &args[0];
@@ -995,115 +1037,84 @@ fn export_pdf(args: &[String]) {
     while i < args.len() {
         match args[i].as_str() {
             "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_file = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 파일 경로가 필요합니다.");
-                    return;
-                }
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--output requires a file path".to_string())?;
+                output_file = value.clone();
+                i += 2;
             }
             "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--page requires a zero-based page number".to_string())?;
+                target_page = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|_| format!("invalid page number: {value}"))?,
+                );
+                i += 2;
             }
-            _ => {
+            "--json" => {
                 i += 1;
+            }
+            option => {
+                return Err(format!("unknown export-pdf option: {option}"));
             }
         }
     }
 
-    // 기본 출력 파일명
     if output_file.is_empty() {
         let stem = Path::new(file_path)
             .file_stem()
-            .and_then(|s| s.to_str())
+            .and_then(|value| value.to_str())
             .unwrap_or("output");
-        output_file = format!("output/{}.pdf", stem);
+        output_file = format!("output/{stem}.pdf");
     }
 
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
+    let data = fs::read(file_path)
+        .map_err(|error| format!("cannot read input document {file_path}: {error}"))?;
+    let mut doc = rhwp::wasm_api::HwpDocument::from_bytes(&data)
+        .map_err(|error| format!("cannot parse input document: {error}"))?;
     let page_count = doc.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-
-    // 출력 디렉토리 생성
-    if let Some(parent) = Path::new(&output_file).parent() {
-        if !parent.exists() {
-            let _ = fs::create_dir_all(parent);
-        }
+    if page_count == 0 {
+        return Err("input document contains no renderable pages".to_string());
     }
 
-    // 페이지 범위 결정
+    if let Some(parent) = Path::new(&output_file).parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("cannot create PDF output directory: {error}"))?;
+    }
+
     let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
+        Some(page) if page < page_count => vec![page],
+        Some(page) => {
+            return Err(format!(
+                "page {page} is out of range for a {page_count}-page document"
+            ));
         }
         None => (0..page_count).collect(),
     };
 
-    // SVG 렌더링 → PDF 변환
-    let mut svg_pages: Vec<String> = Vec::new();
-    for page_num in &pages {
-        match doc.render_page_svg(*page_num) {
-            Ok(svg) => svg_pages.push(svg),
-            Err(e) => {
-                eprintln!("오류: 페이지 {} 렌더링 실패 - {:?}", page_num, e);
-                return;
-            }
-        }
-    }
+    let svg_pages = pages
+        .iter()
+        .map(|page| {
+            doc.render_page_svg(*page)
+                .map_err(|error| format!("cannot render page {page}: {error:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rhwp::renderer::pdf;
-        match pdf::svgs_to_pdf(&svg_pages) {
-            Ok(pdf_bytes) => match fs::write(&output_file, &pdf_bytes) {
-                Ok(_) => println!(
-                    "  → {} ({}KB, {}페이지)",
-                    output_file,
-                    pdf_bytes.len() / 1024,
-                    svg_pages.len()
-                ),
-                Err(e) => eprintln!("오류: PDF 저장 실패 - {}", e),
-            },
-            Err(e) => eprintln!("오류: PDF 변환 실패 - {}", e),
-        }
+        let pdf_bytes = pdf::svgs_to_pdf(&svg_pages)
+            .map_err(|error| format!("cannot convert rendered pages to PDF: {error}"))?;
+        fs::write(&output_file, &pdf_bytes)
+            .map_err(|error| format!("cannot write PDF output {output_file}: {error}"))?;
+        Ok((output_file, pdf_bytes.len(), svg_pages.len()))
     }
 
-    println!("PDF 내보내기 완료");
+    #[cfg(target_arch = "wasm32")]
+    Err("PDF export is not available in the wasm32 CLI build".to_string())
 }
 
 fn export_text(args: &[String]) {

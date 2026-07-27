@@ -61,6 +61,17 @@ function fakeDocxRenderer(_bytes, options = {}) {
   });
 }
 
+function fakeHwpxPdfRenderer(bytes) {
+  assert.equal(Buffer.from(bytes).subarray(0, 2).toString('hex'), '504b');
+  return Promise.resolve({
+    bytes: FAKE_PDF_BYTES,
+    byteLength: FAKE_PDF_BYTES.length,
+    sha256: createHash('sha256').update(FAKE_PDF_BYTES).digest('hex'),
+    pageCount: 1,
+    renderer: 'rhwp-native',
+  });
+}
+
 function listen(server, port = 0) {
   return new Promise((resolve) => {
     server.listen(port, '127.0.0.1', () => resolve(server.address()));
@@ -165,7 +176,7 @@ test('discardApiSessionState releases the isolated session and every MCP cache i
   assert.equal(discardApiSessionState(state, documentId), false);
 });
 
-test('gateway exposes a stateless MCP tools/list and guarded DOCX candidate workflow', async () => {
+test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workflow', async () => {
   const server = createGatewayServer({
     host: '127.0.0.1',
     port: 0,
@@ -241,6 +252,7 @@ test('gateway exposes a stateless MCP tools/list and guarded DOCX candidate work
       'editor_hwpx_apply',
       'editor_hwpx_render_pages',
       'editor_hwpx_quality_check',
+      'editor_hwpx_export_pdf',
       'editor_hwpx_save_source',
       'editor_hwpx_save_checkpoint',
       'editor_hwpx_artifact_read',
@@ -1639,6 +1651,7 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     wopiBaseUrl: 'http://127.0.0.1',
     sampleDocxPath: path.join(tempRoot, 'sample.docx'),
     enableSampleDocx: true,
+    hwpxPdfRenderer: fakeHwpxPdfRenderer,
   });
   const address = await listen(server);
   assert.equal(typeof address, 'object');
@@ -1697,6 +1710,11 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(renderedPage.page.nonBlank, true);
     assert.equal(renderedPage.pages.length, 1);
 
+    const exported = await post(`/v1/hwpx/documents/${opened.documentId}/documents/export-pdf`, {});
+    assert.equal(exported.renderer, 'rhwp-native');
+    assert.equal(exported.mimeType, 'application/pdf');
+    assert.equal(Buffer.from(exported.bytesBase64, 'base64').compare(FAKE_PDF_BYTES), 0);
+
     const saved = await post(`/v1/hwpx/documents/${opened.documentId}/documents/save-source`, {
       outputPath,
       filename: 'bridge-smoke.hwpx',
@@ -1723,6 +1741,7 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     wopiBaseUrl: 'http://127.0.0.1',
     sampleDocxPath: path.join(tempRoot, 'sample.docx'),
     enableSampleDocx: true,
+    hwpxPdfRenderer: fakeHwpxPdfRenderer,
   });
   const address = await listen(server);
   assert.equal(typeof address, 'object');
@@ -1748,6 +1767,7 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
   }
 
   let artifact;
+  let pdfArtifact;
   try {
     const catalog = await mcp(1, 'editor_hwpx_command_catalog', { op: 'text.replaceParagraph' });
     assert.equal(catalog.result.isError, false);
@@ -1804,7 +1824,31 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     assert.equal(renderCall.result.structuredContent.baseline.pages[0].nonBlank, true);
     assert.equal(renderCall.result.structuredContent.current.pages[0].nonBlank, true);
 
-    const saveCall = await mcp(8, 'editor_hwpx_save_source', {
+    const exportCall = await mcp(8, 'editor_hwpx_export_pdf', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      filename: 'hwpx-mcp-output.pdf',
+    });
+    assert.equal(exportCall.result.isError, false, JSON.stringify(exportCall.result.structuredContent));
+    pdfArtifact = exportCall.result.structuredContent;
+    assert.equal(pdfArtifact.renderer, 'rhwp-native');
+
+    const pdfReadCall = await mcp(9, 'editor_hwpx_artifact_read', {
+      artifactId: pdfArtifact.artifactId,
+      expectedSha256: pdfArtifact.sha256,
+    });
+    assert.equal(pdfReadCall.result.isError, false);
+    assert.equal(pdfReadCall.result.structuredContent.mimeType, 'application/pdf');
+    assert.equal(Buffer.from(pdfReadCall.result.structuredContent.bytesBase64, 'base64').compare(FAKE_PDF_BYTES), 0);
+
+    const pdfDeleteCall = await mcp(10, 'editor_hwpx_artifact_delete', {
+      artifactId: pdfArtifact.artifactId,
+      expectedSha256: pdfArtifact.sha256,
+    });
+    assert.equal(pdfDeleteCall.result.isError, false);
+    pdfArtifact = null;
+
+    const saveCall = await mcp(11, 'editor_hwpx_save_source', {
       documentId: opened.documentId,
       baseRevision: revision,
       filename: 'hwpx-mcp-output.hwpx',
@@ -1812,7 +1856,7 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     assert.equal(saveCall.result.isError, false, JSON.stringify(saveCall.result.structuredContent));
     artifact = saveCall.result.structuredContent;
 
-    const readCall = await mcp(9, 'editor_hwpx_artifact_read', {
+    const readCall = await mcp(12, 'editor_hwpx_artifact_read', {
       artifactId: artifact.artifactId,
       expectedSha256: artifact.sha256,
     });
@@ -1823,7 +1867,7 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
       '504b',
     );
 
-    const deleteCall = await mcp(10, 'editor_hwpx_artifact_delete', {
+    const deleteCall = await mcp(13, 'editor_hwpx_artifact_delete', {
       artifactId: artifact.artifactId,
       expectedSha256: artifact.sha256,
     });
@@ -1831,8 +1875,14 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     assert.equal(deleteCall.result.structuredContent.deleted, true);
     artifact = null;
   } finally {
+    if (pdfArtifact) {
+      await mcp(14, 'editor_hwpx_artifact_delete', {
+        artifactId: pdfArtifact.artifactId,
+        expectedSha256: pdfArtifact.sha256,
+      }).catch(() => undefined);
+    }
     if (artifact) {
-      await mcp(11, 'editor_hwpx_artifact_delete', {
+      await mcp(15, 'editor_hwpx_artifact_delete', {
         artifactId: artifact.artifactId,
         expectedSha256: artifact.sha256,
       }).catch(() => undefined);

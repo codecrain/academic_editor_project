@@ -21,6 +21,7 @@ import {
 import { DEFAULT_EDITOR_TOKEN_TTL_MS, EditorDocumentStore } from './editor-document-store.mjs';
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
 import { HwpxApiSession, initHwpxRuntime } from '../../editor_hwpx/scripts/hwpx-api-utils.mjs';
+import { renderHwpxPdf } from '../../editor_hwpx/scripts/hwpx-native-pdf.mjs';
 import {
   commandsNeedPrecondition as hwpxCommandsNeedPrecondition,
   getHwpxCommandCatalog,
@@ -1171,7 +1172,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
       'renderPage',
       'renderAll',
       'renderCompare',
-      ...(fmt === 'docx' ? ['exportPdf'] : []),
+      'exportPdf',
     ],
     ...(issued ? {
       liveEditorSession: {
@@ -1361,16 +1362,21 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'documents/export-pdf' || actionPath === 'export' && body.type === 'pdf') {
-    if (fmt !== 'docx') {
-      sendJson(res, 501, { ok: false, message: 'HWPX PDF export is not exposed by the local API bridge yet.' });
-      return true;
-    }
-    const rendered = await renderDocxBytes(config, session.save().bytes, 'none');
-    const filename = path.basename(String(body.filename || record.filename || 'edited.docx')).replace(/\.(?:docx|pdf)$/i, '') || 'edited';
+    const sourceBytes = session.save().bytes;
+    const rendered = fmt === 'hwpx'
+      ? await (config.hwpxPdfRenderer || renderHwpxPdf)(sourceBytes, {
+        pages: 'all',
+        dockerImage: config.hwpxPdfDockerImage,
+        timeoutMs: config.hwpxPdfTimeoutMs,
+        tempRoot: config.hwpxPdfTempRoot,
+      })
+      : await renderDocxBytes(config, sourceBytes, 'none');
+    const pdf = fmt === 'hwpx' ? rendered : rendered.pdf;
+    const filename = path.basename(String(body.filename || record.filename || `edited.${fmt}`)).replace(/\.(?:docx|hwpx|pdf)$/i, '') || 'edited';
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : '';
     if (outputPath) {
       mkdirSync(path.dirname(outputPath), { recursive: true });
-      await writeFile(outputPath, rendered.pdf.bytes);
+      await writeFile(outputPath, pdf.bytes);
     }
     sendJson(res, 200, {
       ok: true,
@@ -1379,9 +1385,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       pageCount: rendered.pageCount,
       mimeType: 'application/pdf',
       filename: `${filename}.pdf`,
-      sha256: rendered.pdf.sha256,
-      byteLength: rendered.pdf.byteLength,
-      ...(outputPath ? { bytesRef: outputPath } : { bytesBase64: rendered.pdf.bytes.toString('base64') }),
+      sha256: pdf.sha256,
+      byteLength: pdf.byteLength,
+      ...(outputPath ? { bytesRef: outputPath } : { bytesBase64: pdf.bytes.toString('base64') }),
     });
     return true;
   }
@@ -2056,9 +2062,14 @@ function assertCurrentRevision(structure, baseRevision) {
   }
 }
 
-function qualityHasNoIssues(quality) {
-  return quality?.ok === true && quality?.stable !== false && Array.isArray(quality?.issues)
-    && quality.issues.every((issue) => issue?.severity === 'info');
+function qualityAllowsFinalization(quality, fmt) {
+  if (quality?.ok !== true || quality?.stable === false || !Array.isArray(quality?.issues)) {
+    return false;
+  }
+  if (fmt === 'hwpx') {
+    return quality.issues.every((issue) => issue?.severity !== 'error');
+  }
+  return quality.issues.every((issue) => issue?.severity === 'info');
 }
 
 async function executeEditorMcpTool(req, config, state, name, args = {}) {
@@ -2097,7 +2108,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       throw new Error('expectedSha256 must be a lowercase SHA-256 digest.');
     }
     const artifact = await resolveMcpArtifact(artifactId);
-    if (artifact.extension !== fmt && !(fmt === 'docx' && artifact.extension === 'pdf')) {
+    if (artifact.extension !== fmt && artifact.extension !== 'pdf') {
       throw new Error(`artifact_format_mismatch: expected ${fmt}, found ${artifact.extension}.`);
     }
     const bytes = await readFile(artifact.filePath);
@@ -2241,14 +2252,14 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (name === `${toolPrefix}_quality_check`) {
       const quality = await postLocalEditorApi(req, config, `${prefix}/quality/check`, {});
       state.mcpQualityRevisions ??= new Map();
-      if (qualityHasNoIssues(quality)) {
+      if (qualityAllowsFinalization(quality, fmt)) {
         state.mcpQualityRevisions.set(documentId, baseRevision);
       } else {
         state.mcpQualityRevisions.delete(documentId);
       }
       return quality;
     }
-    if (name === 'editor_docx_export_pdf') {
+    if (name === `${toolPrefix}_export_pdf`) {
       if (state.mcpQualityRevisions?.get(documentId) !== baseRevision) {
         throw new Error('quality_check_required: run a clean quality check at the current revision before exporting PDF.');
       }
@@ -2525,6 +2536,9 @@ function buildConfigFromEnv() {
     docxRenderOperationTimeoutSeconds: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_OPERATION_TIMEOUT_SECONDS', '180'), 180),
     docxRenderShutdownTimeoutSeconds: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_SHUTDOWN_TIMEOUT_SECONDS', '10'), 10),
     docxRenderMaxResultBytes: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_MAX_RESULT_BYTES', String(64 * 1024 * 1024)), 64 * 1024 * 1024),
+    hwpxPdfDockerImage: readEnv('EDITOR_HWPX_PDF_DOCKER_IMAGE', 'academic-rhwp-pdf:latest'),
+    hwpxPdfTimeoutMs: parsePositiveInteger(readEnv('EDITOR_HWPX_PDF_TIMEOUT_MS', '210000'), 210_000),
+    hwpxPdfTempRoot: path.resolve(readEnv('EDITOR_HWPX_PDF_TEMP_ROOT', os.tmpdir())),
     documentRoot: path.resolve(readEnv(
       'EDITOR_DOCUMENT_ROOT',
       process.platform === 'linux'

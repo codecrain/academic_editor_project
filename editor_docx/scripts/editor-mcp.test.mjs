@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
+import { HWPX_MCP_TOOLS } from '../../editor_hwpx/scripts/hwpx-mcp-tools.mjs';
 
 test('MCP validates advertised input schemas before executing a tool', async () => {
   const calls = [];
@@ -151,6 +152,7 @@ test('MCP advertises HWPX parity tools with the HWPX command enum', async () => 
     'editor_hwpx_apply',
     'editor_hwpx_render_pages',
     'editor_hwpx_quality_check',
+    'editor_hwpx_export_pdf',
     'editor_hwpx_save_source',
     'editor_hwpx_save_checkpoint',
     'editor_hwpx_artifact_read',
@@ -158,9 +160,15 @@ test('MCP advertises HWPX parity tools with the HWPX command enum', async () => 
   ]) {
     assert.ok(tools.has(name), `${name} must be advertised`);
   }
-  assert.equal(tools.has('editor_hwpx_export_pdf'), false);
   const opEnum = tools.get('editor_hwpx_apply').inputSchema.properties.commands.items.properties.op.enum;
   assert.ok(opEnum.includes('text.replaceParagraph'));
   assert.ok(opEnum.includes('object.replaceTextBoxText'));
   assert.ok(opEnum.includes('setDocumentMetadata'));
+});
+
+test('HWPX MCP schema is owned by the HWPX environment and contains no DOCX contract text', () => {
+  assert.ok(HWPX_MCP_TOOLS.length > 0);
+  assert.ok(HWPX_MCP_TOOLS.every((tool) => tool.name.startsWith('editor_hwpx_')));
+  assert.ok(HWPX_MCP_TOOLS.some((tool) => tool.name === 'editor_hwpx_export_pdf'));
+  assert.doesNotMatch(JSON.stringify(HWPX_MCP_TOOLS), /editor_docx|DOCX/);
 });

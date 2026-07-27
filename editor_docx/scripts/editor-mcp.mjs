@@ -2,10 +2,7 @@ import {
   DOCX_COMMAND_CATEGORIES,
   DOCX_COMMAND_OPS,
 } from './docx-command-catalog.mjs';
-import {
-  HWPX_COMMAND_CATEGORIES,
-  HWPX_COMMAND_OPS,
-} from '../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
+import { HWPX_MCP_TOOLS } from '../../editor_hwpx/scripts/hwpx-mcp-tools.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -149,7 +146,7 @@ const DOCX_MCP_TOOLS = Object.freeze([
   },
   {
     name: 'editor_docx_quality_check',
-    description: 'Run structural and layout-risk checks at the exact current revision. Issues must be repaired before finalization.',
+    description: 'Run structural and layout-risk checks at the exact current revision. Blocking warnings and errors must be repaired; informational findings must be reviewed.',
     inputSchema: objectSchema({
       documentId: documentIdProperty,
       baseRevision: baseRevisionProperty,
@@ -205,22 +202,6 @@ const DOCX_MCP_TOOLS = Object.freeze([
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
 ]);
-
-const HWPX_MCP_TOOLS = Object.freeze(DOCX_MCP_TOOLS
-  .filter((tool) => tool.name !== 'editor_docx_export_pdf')
-  .map((tool) => {
-    const cloned = JSON.parse(JSON.stringify(tool)
-      .replaceAll('editor_docx', 'editor_hwpx')
-      .replaceAll('DOCX', 'HWPX')
-      .replaceAll('docx', 'hwpx'));
-    if (cloned.name === 'editor_hwpx_command_catalog') {
-      cloned.inputSchema.properties.category.enum = [...HWPX_COMMAND_CATEGORIES, null];
-    }
-    if (cloned.name === 'editor_hwpx_apply') {
-      cloned.inputSchema.properties.commands.items.properties.op.enum = [...HWPX_COMMAND_OPS];
-    }
-    return Object.freeze(cloned);
-  }));
 
 const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS]);
 
