@@ -6,3 +6,7 @@ sh.start_dev text eol=lf
 *.mjs text eol=lf
 *.md text eol=lf
 Dockerfile text eol=lf
+
+# These evaluation fixtures are hashed byte-for-byte. Never translate EOLs.
+evaluation/hwpx-public-sector-v1/attachments/source/*.csv -text
+evaluation/hwpx-public-sector-v1/attachments/source/*.txt -text

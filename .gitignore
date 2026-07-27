@@ -17,6 +17,11 @@ build/
 dist/
 coverage/
 output/
+.qa/
+.playwright-cli/
+.superpowers/
+**/__pycache__/
+evaluation/**/results/
 .worktrees/
 **/.tmp-render/
 **/target/
