@@ -1,0 +1,204 @@
+{
+  "version": "1.0.0",
+  "generatedAt": "2026-07-27",
+  "attachmentCount": 13,
+  "attachments": [
+    {
+      "id": "target-moe-briefing-hwpx",
+      "path": "attachments/source/moe-2025-briefing.hwpx",
+      "mediaType": "application/vnd.hancom.hwpx",
+      "sha256": "4734378952381ed032f1cfa08064af7f8bce4332b9b755f1ed9ce8e4fa00aad2",
+      "byteLength": 4096970,
+      "origin": {
+        "kind": "official-public",
+        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
+        "publisher": "대한민국 교육부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "공공누리 제1유형 출처표시",
+      "role": "Primary editable public-sector HWPX with 11 pages, 14 tables, and embedded images."
+    },
+    {
+      "id": "target-blank-generation-hwpx",
+      "path": "attachments/source/blank-generation-template.hwpx",
+      "mediaType": "application/vnd.hancom.hwpx",
+      "sha256": "cf7291b4aab53f25b48df4fce83e33db636fea8600beed369a5eb34880c803ef",
+      "byteLength": 12707,
+      "origin": {
+        "kind": "repository-fixture",
+        "url": "editor_hwpx/samples/hwpx/blank_hwpx.hwpx",
+        "publisher": "academic_editor_project fixture",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Repository test fixture; internal evaluation use.",
+      "role": "Minimal one-page HWPX template for template-based generation cases."
+    },
+    {
+      "id": "target-public-form-hwpx",
+      "path": "attachments/source/public-form-template.hwpx",
+      "mediaType": "application/vnd.hancom.hwpx",
+      "sha256": "588f278e892c5bd644bcf73b6d3cd3b0ebe6e6ebe38df9f53dfb4d3fa38e079e",
+      "byteLength": 37946,
+      "origin": {
+        "kind": "repository-fixture",
+        "url": "editor_hwpx/samples/api-fixtures/esg-original.hwpx",
+        "publisher": "academic_editor_project fixture",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Repository test fixture; internal evaluation use.",
+      "role": "Two-page structured public form with multiple tables for form-preservation cases."
+    },
+    {
+      "id": "adversarial-encrypted-moe-hwpx",
+      "path": "attachments/source/moe-2025-work-plan.hwpx",
+      "mediaType": "application/vnd.hancom.hwpx",
+      "sha256": "c77b7af0f3c69fb69b3cea63f0e852c2466dac217ddddd99928ec95573885514",
+      "byteLength": 3034487,
+      "origin": {
+        "kind": "official-public",
+        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
+        "publisher": "대한민국 교육부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "공공누리 제1유형 출처표시",
+      "role": "Official encrypted/distribution HWPX used by the separate loader rejection audit.",
+      "notes": "Contains ODF manifest encryption-data; expected loader result is unsupported_encrypted_hwpx."
+    },
+    {
+      "id": "source-moe-work-plan-pdf",
+      "path": "attachments/source/moe-2025-work-plan.pdf",
+      "mediaType": "application/pdf",
+      "sha256": "0b3dfbbc98583734892aa7dea656d5b975254f3eb8e573c561bc5cb19a991f6c",
+      "byteLength": 1116634,
+      "origin": {
+        "kind": "official-public",
+        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
+        "publisher": "대한민국 교육부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "공공누리 제1유형 출처표시",
+      "role": "Official rendered reference for page-level policy and layout comparison."
+    },
+    {
+      "id": "source-mpva-veterans-xlsx",
+      "path": "attachments/source/mpva-2026-05-veterans-status.xlsx",
+      "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sha256": "9b8e92531c51346adf9bb86e83fb7ef4f3fb55c8612c78cb76beac3a018c80dc",
+      "byteLength": 150996,
+      "origin": {
+        "kind": "official-public",
+        "url": "https://518.mpva.go.kr/mpva/selectBbsNttList.do?bbsNo=54&key=181",
+        "publisher": "대한민국 국가보훈부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "대한민국 공공기관 공개자료; source attribution required.",
+      "role": "Official 23-sheet veterans and Agent Orange statistics workbook."
+    },
+    {
+      "id": "source-mpva-beneficiaries-xlsx",
+      "path": "attachments/source/mpva-2026-05-beneficiaries-status.xlsx",
+      "mediaType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "sha256": "d4eb649328b45701f09d43881357d3bc278d54bba5a9f465773cb035b3c27ec1",
+      "byteLength": 165633,
+      "origin": {
+        "kind": "official-public",
+        "url": "https://518.mpva.go.kr/mpva/selectBbsNttList.do?bbsNo=54&key=181",
+        "publisher": "대한민국 국가보훈부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "대한민국 공공기관 공개자료; source attribution required.",
+      "role": "Official 26-sheet beneficiary workbook containing intentional adversarial #REF! cells in remote columns.",
+      "notes": "Formula-error trap: 기본현황(경합형태별현황)!Z7:AA40 contains #REF! values."
+    },
+    {
+      "id": "source-procurement-csv",
+      "path": "attachments/source/procurement-evidence.csv",
+      "mediaType": "text/csv",
+      "sha256": "29e23f4809e9c373383a952452c661b83a29cddce2a5ad58f682dc05eab755bb",
+      "byteLength": 935,
+      "origin": {
+        "kind": "generated-fixture",
+        "url": "evaluation/hwpx-public-sector-v1/attachments/source/procurement-evidence.csv",
+        "publisher": "academic_editor_project evaluation generator",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Synthetic evaluation data.",
+      "role": "Synthetic cross-agency budget, execution, delay, and sensitive-data evidence."
+    },
+    {
+      "id": "source-decisions-txt",
+      "path": "attachments/source/steering-committee-decisions.txt",
+      "mediaType": "text/plain",
+      "sha256": "f7e9d4d8977044324e18bb7869101ec26f1c8ecf082971823b847c0aca1f8fba",
+      "byteLength": 1847,
+      "origin": {
+        "kind": "generated-fixture",
+        "url": "evaluation/hwpx-public-sector-v1/attachments/source/steering-committee-decisions.txt",
+        "publisher": "academic_editor_project evaluation generator",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Synthetic evaluation data.",
+      "role": "Synthetic steering-committee decision rules and acceptance thresholds."
+    },
+    {
+      "id": "source-requirements-docx",
+      "path": "attachments/source/public-procurement-requirements.docx",
+      "mediaType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "sha256": "46fae8ca3254aebe568acbf211f5b9b6bc80b7efaf826646d9fbf2e61c174d85",
+      "byteLength": 14539,
+      "origin": {
+        "kind": "generated-fixture",
+        "url": "evaluation/hwpx-public-sector-v1/scripts/build-supporting-docx.mjs",
+        "publisher": "academic_editor_project evaluation generator",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Synthetic evaluation data.",
+      "role": "Three-page formal procurement and acceptance-requirements document."
+    },
+    {
+      "id": "source-moe-preview-png",
+      "path": "attachments/source/moe-2025-briefing-preview.png",
+      "mediaType": "image/png",
+      "sha256": "dd9bf896e8b49524f455d367cb5cad95935598234e131be7f39c2f1ab13821dd",
+      "byteLength": 77857,
+      "origin": {
+        "kind": "derived-official",
+        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
+        "publisher": "대한민국 교육부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "공공누리 제1유형 출처표시",
+      "role": "Official HWPX preview image extracted without transformation."
+    },
+    {
+      "id": "source-moe-cover-jpg",
+      "path": "attachments/source/moe-2025-briefing-cover.jpg",
+      "mediaType": "image/jpeg",
+      "sha256": "fc5d0dc48957fd33252e5ae822b859964fd885230e196a7147f5aae525ba4649",
+      "byteLength": 120914,
+      "origin": {
+        "kind": "derived-official",
+        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
+        "publisher": "대한민국 교육부",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "공공누리 제1유형 출처표시",
+      "role": "Official embedded briefing image extracted without transformation."
+    },
+    {
+      "id": "source-large-legacy-hwp",
+      "path": "attachments/source/adversarial-exam-kor-large.hwp",
+      "mediaType": "application/x-hwp",
+      "sha256": "0315576fb25dd29ad3b6b188ee2539d0e8d31c15b74847be801c2186a97aac69",
+      "byteLength": 10418688,
+      "origin": {
+        "kind": "repository-fixture",
+        "url": "editor_hwpx/samples/exam_kor.hwp",
+        "publisher": "rhwp upstream sample corpus",
+        "retrievedAt": "2026-07-27"
+      },
+      "license": "Repository sample; internal compatibility evaluation only.",
+      "role": "10 MB legacy HWP stress attachment for heterogeneous-input scenarios."
+    }
+  ]
+}

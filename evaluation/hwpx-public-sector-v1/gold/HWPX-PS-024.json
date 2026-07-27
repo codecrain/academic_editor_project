@@ -1,0 +1,167 @@
+{
+  "scenarioId": "HWPX-PS-024",
+  "answerContract": {
+    "summary": "Apply 4 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
+    "sourceFacts": [
+      {
+        "attachmentId": "source-mpva-beneficiaries-xlsx",
+        "locator": "기본현황(총괄)!D5",
+        "fact": 835702
+      },
+      {
+        "attachmentId": "source-requirements-docx",
+        "locator": "인수 기준",
+        "fact": "저장 후 재열기와 구조·렌더 검증 필요"
+      },
+      {
+        "attachmentId": "source-decisions-txt",
+        "locator": "결정사항 5",
+        "fact": "지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+      },
+      {
+        "attachmentId": "source-moe-preview-png",
+        "locator": "공식 보도자료 미리보기",
+        "fact": "공식 이미지 증빙"
+      }
+    ],
+    "oracle": {
+      "commandTemplates": [
+        {
+          "commandId": "HWPX-PS-024-paragraph",
+          "op": "text.replaceParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 21
+            }
+          },
+          "text": "지역균형 검증 024: 지역대학·소도시 교육기반 투자"
+        },
+        {
+          "commandId": "HWPX-PS-024-insert",
+          "op": "text.insertAfterParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 29
+            }
+          },
+          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+        },
+        {
+          "commandId": "HWPX-PS-024-cell-a",
+          "op": "table.writeCell",
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 238,
+              "row": 46,
+              "column": 5
+            }
+          },
+          "text": "검증 24",
+          "fit": true,
+          "fitOptions": {
+            "maxLines": 2,
+            "truncate": false
+          }
+        },
+        {
+          "commandId": "HWPX-PS-024-cell-b",
+          "op": "style.applyText",
+          "target": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 267,
+              "row": 52,
+              "column": 5
+            }
+          },
+          "styleSource": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 238,
+              "row": 46,
+              "column": 5
+            }
+          },
+          "text": "근거 일치"
+        }
+      ],
+      "expectedTargets": [
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 21
+            }
+          },
+          "text": "지역균형 검증 024: 지역대학·소도시 교육기반 투자"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 238,
+              "row": 46,
+              "column": 5
+            }
+          },
+          "text": "검증 24"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 267,
+              "row": 52,
+              "column": 5
+            }
+          },
+          "text": "근거 일치"
+        }
+      ],
+      "invariants": {
+        "reopenRequired": true,
+        "maxPageCountDelta": 1,
+        "preserveTableCount": true,
+        "preservePictureCount": true,
+        "preserveImageCount": true,
+        "noUnexpectedTargetChanges": true
+      },
+      "renderChecks": {
+        "pages": [
+          1,
+          6,
+          11
+        ],
+        "requireNonBlank": true,
+        "compareBaseline": true
+      },
+      "score": {
+        "contentAccuracy": 35,
+        "layout": 20,
+        "styleConsistency": 15,
+        "objectPreservation": 10,
+        "packageIntegrity": 10,
+        "reopenAndApiUsability": 10,
+        "hardFailures": [
+          "saved HWPX cannot be reopened",
+          "personal information is copied into the output",
+          "failed batch commits a partial edit",
+          "unrequested table or image disappears"
+        ]
+      }
+    },
+    "adjudication": {
+      "passThreshold": 85,
+      "hardFailureOverridesScore": true,
+      "visualReviewRequiredForFinalAcceptance": true,
+      "unsupportedClaims": [
+        "A successful save alone is not visual proof.",
+        "A structural reopen alone is not Hancom rendering proof.",
+        "Visible hyphen text is not a native HWPX numbering object."
+      ]
+    }
+  }
+}

@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { HwpxApiSession, initHwpxRuntime, readZip } from './hwpx-api-utils.mjs';
 
 const ESG_FIXTURE_PATH = 'editor_hwpx/samples/api-fixtures/esg-original.hwpx';
+const PUBLIC_BRIEFING_FIXTURE_PATH = 'evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-briefing.hwpx';
 
 test('HWPX API preserve save returns original bytes when no commands run', async () => {
   await initHwpxRuntime();
@@ -13,6 +14,16 @@ test('HWPX API preserve save returns original bytes when no commands run', async
   const saved = session.save();
   assert.equal(Buffer.compare(input, saved.bytes), 0);
   assert.equal(saved.validation.pageCount, 2);
+});
+
+test('HWPX API reports encrypted public-sector packages with an actionable error code', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-work-plan.hwpx');
+  assert.throws(
+    () => new HwpxApiSession(input),
+    (error) => error?.code === 'unsupported_encrypted_hwpx'
+      && /배포용 또는 암호화된 HWPX/.test(error.message),
+  );
 });
 
 test('HWPX API keeps legacy setCellText compatibility for existing callers', async () => {
@@ -183,9 +194,9 @@ test('HWPX API list.applyNumbering writes numbered items with preserved cell sty
   assert.equal(targetIds.paraPrIDRef, sourceIds.paraPrIDRef);
 });
 
-test('HWPX API paragraph.applyStyle can clone top-level paragraph style ids', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx') }, async () => {
+test('HWPX API paragraph.applyStyle can clone top-level paragraph style ids', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const paragraphs = session.readJson().sections[0].paragraphs.filter((paragraph) => paragraph.text.trim().length > 0);
   assert.ok(paragraphs.length >= 2);
@@ -235,63 +246,63 @@ test('HWPX API text.insertAfterParagraph preserves package and reopens inserted 
   assert.ok(texts.includes('INSERTED DETAIL'));
 });
 
-test('HWPX API top-level paragraph replacement preserves business template pagination', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/editor_agent_soft_feedback/business-source.hwpx') }, async () => {
+test('HWPX API top-level paragraph replacement preserves public briefing pagination', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/editor_agent_soft_feedback/business-source.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const before = session.readJson();
-  const beforeFinalCard = before.tables.find((item) => item.id === 'tbl_15')?.layout?.bbox;
+  const beforeFinalCard = before.tables.find((item) => item.id === 'tbl_12')?.layout?.bbox;
 
   session.apply([
     {
       commandId: 'business-overview',
       op: 'text.replaceParagraph',
-      location: { paragraph: { section: 0, number: 14 } },
+      location: { paragraph: { section: 0, number: 4 } },
       text: '□ 사업개요: AI 기반 안전관리 플랫폼 구축',
     },
     {
       commandId: 'business-actions',
       op: 'text.replaceParagraph',
-      location: { paragraph: { section: 0, number: 15 } },
+      location: { paragraph: { section: 0, number: 5 } },
       text: '□ 추진내용: 위험 알림·예측정비·고객안내 개선',
     },
     {
       commandId: 'business-budget',
       op: 'text.replaceParagraph',
-      location: { paragraph: { section: 0, number: 25 } },
+      location: { paragraph: { section: 0, number: 6 } },
       text: '□ 사업비 / 물량 : 3,850백만원 / 시범역 12개소',
     },
   ]);
 
   const saved = session.save();
   const reopened = new HwpxApiSession(saved.bytes).readJson();
-  const finalCard = reopened.tables.find((item) => item.id === 'tbl_15')?.layout?.bbox;
+  const finalCard = reopened.tables.find((item) => item.id === 'tbl_12')?.layout?.bbox;
 
-  assert.equal(before.pageCount, 6);
+  assert.equal(before.pageCount, 11);
   assert.equal(reopened.pageCount, before.pageCount);
   assert.equal(finalCard?.pageIndex, beforeFinalCard?.pageIndex);
   assert.equal(finalCard?.y, beforeFinalCard?.y);
 });
 
-test('HWPX API paragraph replacement does not push table controls sideways', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/app/domains/project/default_templates/시의회 업무보고서 작성양식.hwpx') }, async () => {
+test('HWPX API paragraph replacement does not push table controls sideways', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/app/domains/project/default_templates/시의회 업무보고서 작성양식.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const before = session.readJson();
-  const beforeTable = before.tables.find((item) => item.id === 'tbl_2')?.layout?.bbox;
+  const beforeTable = before.tables.find((item) => item.id === 'tbl_3')?.layout?.bbox;
 
   session.apply([
     {
       commandId: 'table-paragraph-safe',
       op: 'text.replaceParagraph',
-      location: { paragraph: { section: 0, number: 14 } },
+      location: { paragraph: { section: 0, number: 4 } },
       text: '□ 추진 일정: 조사, 현장 적용, 효과검증 단계로 관리',
     },
   ]);
 
   const saved = session.save();
   const reopened = new HwpxApiSession(saved.bytes).readJson();
-  const table = reopened.tables.find((item) => item.id === 'tbl_2')?.layout?.bbox;
+  const table = reopened.tables.find((item) => item.id === 'tbl_3')?.layout?.bbox;
 
   assert.equal(reopened.pageCount, before.pageCount);
   assert.equal(table?.pageIndex, beforeTable?.pageIndex);
@@ -299,9 +310,9 @@ test('HWPX API paragraph replacement does not push table controls sideways', { s
   assert.equal(table?.y, beforeTable?.y);
 });
 
-test('HWPX API table.writeCell preserves pictures in image cells', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/app/domains/project/default_templates/시의회 업무보고서 작성양식.hwpx') }, async () => {
+test('HWPX API table.writeCell preserves pictures in image cells', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/app/domains/project/default_templates/시의회 업무보고서 작성양식.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const before = session.readJson();
   const beforePictures = session.objectInventory().pictures.length;
@@ -310,7 +321,7 @@ test('HWPX API table.writeCell preserves pictures in image cells', { skip: !exis
     {
       commandId: 'image-cell-caption',
       op: 'table.writeCell',
-      location: { tableId: 'tbl_4', cell: { number: 3 } },
+      location: { tableId: 'tbl_3', cell: { number: 9 } },
       text: '< 현장 혼잡도 증빙 >',
     },
   ]);
@@ -318,16 +329,16 @@ test('HWPX API table.writeCell preserves pictures in image cells', { skip: !exis
   const saved = session.save();
   const reopenedSession = new HwpxApiSession(saved.bytes);
   const reopened = reopenedSession.readJson();
-  const table = reopened.tables.find((item) => item.id === 'tbl_4');
+  const table = reopened.tables.find((item) => item.id === 'tbl_3');
 
   assert.equal(reopened.pageCount, before.pageCount);
   assert.equal(reopenedSession.objectInventory().pictures.length, beforePictures);
-  assert.equal(table.cells.find((cell) => cell.cellIndex === 3).text, '< 현장 혼잡도 증빙 >');
+  assert.equal(table.cells.find((cell) => cell.cellIndex === 9).text, '< 현장 혼잡도 증빙 >');
 });
 
-test('HWPX API object inventory discovers embedded pictures in report templates', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx') }, async () => {
+test('HWPX API object inventory discovers embedded pictures in report templates', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const inventory = session.objectInventory();
   const quality = session.qualityCheck();
@@ -337,9 +348,9 @@ test('HWPX API object inventory discovers embedded pictures in report templates'
   assert.ok(quality.targetSummary.cellTargets >= 1);
 });
 
-test('HWPX API image.replace can update an embedded package image and reopen', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx') }, async () => {
+test('HWPX API image.replace can update an embedded package image and reopen', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const firstImage = session.objectInventory().images[0];
   assert.ok(firstImage?.name);
@@ -356,13 +367,13 @@ test('HWPX API image.replace can update an embedded package image and reopen', {
 
   const saved = session.save();
   const reopenedSession = new HwpxApiSession(saved.bytes);
-  assert.equal(reopenedSession.readJson().pageCount, 10);
+  assert.equal(reopenedSession.readJson().pageCount, 11);
   assert.ok(reopenedSession.objectInventory().images.some((image) => image.name === firstImage.name && image.byteLength === firstImage.byteLength));
 });
 
-test('HWPX API image.generateAndReplace creates a PNG package replacement and reopens', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx') }, async () => {
+test('HWPX API image.generateAndReplace creates a PNG package replacement and reopens', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
   const firstImage = session.objectInventory().images.find((image) => /\.png$/i.test(image.name));
   assert.ok(firstImage?.name);
@@ -386,7 +397,7 @@ test('HWPX API image.generateAndReplace creates a PNG package replacement and re
   const entries = readZip(saved.bytes);
   const imageBytes = entries.get(firstImage.name);
   const reopenedSession = new HwpxApiSession(saved.bytes);
-  assert.equal(reopenedSession.readJson().pageCount, 10);
+  assert.equal(reopenedSession.readJson().pageCount, 11);
   assert.deepEqual([...imageBytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.notEqual(imageBytes.length, firstImage.byteLength);
 });
@@ -461,24 +472,104 @@ test('HWPX API preserve save keeps XML valid when the same cell is written twice
   assert.equal(reopened.tables.length, 4);
 });
 
-test('HWPX API paragraph replacement does not erase table cells in the same body paragraph', { skip: !existsSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx') }, async () => {
+test('HWPX API style.applyText applies paragraph style inside a drawing-control cell', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('C:/CC/tlooto_onpremise_project/server2/generated/document_editor_api_samples/sample-input.hwpx');
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const source = { tableId: 'tbl_12', cell: { number: 59 } };
+  const target = { tableId: 'tbl_3', cell: { number: 9 } };
+  const sourceIds = session.paragraphStyleIds(source);
+  const beforePictures = session.objectInventory().pictures.length;
+
+  session.apply([{
+    commandId: 'drawing-cell-style',
+    op: 'style.applyText',
+    target,
+    styleSource: source,
+    text: '근거 일치',
+  }]);
+
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const targetIds = reopened.paragraphStyleIds(target);
+  assert.equal(reopened.inspectTarget(target).currentText, '근거 일치');
+  assert.equal(targetIds.paraPrIDRef, sourceIds.paraPrIDRef);
+  assert.equal(targetIds.charPrIDRef, sourceIds.charPrIDRef);
+  assert.equal(reopened.objectInventory().pictures.length, beforePictures);
+});
+
+test('HWPX API command batches are atomic when a later target is invalid', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(ESG_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const table = session.findTable((item) => item.dims.rowCount === 9 && item.dims.colCount === 5);
+  const before = session.inspectTarget({ tableId: table.id, cell: { number: 1 } }).currentText;
+  const beforeRevision = session.revision;
+
+  assert.throws(() => session.apply([
+    {
+      op: 'table.writeCell',
+      location: { tableId: table.id, cell: { number: 1 } },
+      text: 'MUST-NOT-COMMIT',
+    },
+    {
+      op: 'table.writeCell',
+      location: { tableId: table.id, cell: { number: 9999 } },
+      text: 'INVALID',
+    },
+  ]), /cell not found/);
+
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(session.inspectTarget({ tableId: table.id, cell: { number: 1 } }).currentText, before);
+  assert.equal(Buffer.compare(session.save().bytes, input), 0);
+});
+
+test('HWPX API text.replace survives preserve-package save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/test-image.hwpx');
+  const session = new HwpxApiSession(input);
+  const paragraph = session.readJson().sections[0].paragraphs.find((item) => item.text.length >= 4);
+  assert.ok(paragraph);
+  const replacement = '검증';
+  const expected = `${paragraph.text.slice(0, 1)}${replacement}${paragraph.text.slice(3)}`;
+
+  session.apply([{
+    op: 'text.replace',
+    target: {
+      native: {
+        section: 0,
+        para: paragraph.para,
+        offset: 1,
+        length: 2,
+      },
+    },
+    text: replacement,
+  }]);
+
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(
+    reopened.inspectTarget({ paragraph: { section: 0, number: paragraph.para } }).currentText,
+    expected,
+  );
+});
+
+test('HWPX API paragraph replacement does not erase table cells in the same body paragraph', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
 
   session.apply([
     {
       commandId: 'safe-paragraph-replace',
       op: 'text.replaceParagraph',
-      location: { paragraph: { section: 0, number: 25 } },
+      location: { paragraph: { section: 0, number: 4 } },
       text: '1. 기부통계',
     },
   ]);
 
   const saved = session.save();
   const reopened = new HwpxApiSession(saved.bytes).readJson();
-  const table = reopened.tables.find((item) => item.id === 'tbl_2');
-  assert.equal(table.cells.length, 9);
-  assert.equal(reopened.pageCount, 10);
-  assert.equal(reopened.tables.length, 15);
+  const table = reopened.tables.find((item) => item.id === 'tbl_3');
+  assert.equal(table.cells.length, 35);
+  assert.equal(reopened.pageCount, 11);
+  assert.equal(reopened.tables.length, 14);
 });

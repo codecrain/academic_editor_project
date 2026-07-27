@@ -1,0 +1,156 @@
+{
+  "scenarioId": "HWPX-PS-100",
+  "answerContract": {
+    "summary": "Apply 1 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
+    "sourceFacts": [
+      {
+        "attachmentId": "source-mpva-veterans-xlsx",
+        "locator": "참전(총괄)!B8",
+        "fact": 184580
+      },
+      {
+        "attachmentId": "source-mpva-beneficiaries-xlsx",
+        "locator": "기본현황(총괄)!D5",
+        "fact": 835702
+      },
+      {
+        "attachmentId": "source-procurement-csv",
+        "locator": "SAFE-02 지연건수",
+        "fact": 6
+      },
+      {
+        "attachmentId": "source-decisions-txt",
+        "locator": "결정사항 7",
+        "fact": "저장 후 재열기 및 3개 대표 페이지 렌더 비교"
+      }
+    ],
+    "oracle": {
+      "commandTemplates": [
+        {
+          "commandId": "HWPX-PS-100-generate",
+          "op": "text.insertAfterParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 0
+            }
+          },
+          "text": "청년고용 복합근거 검토보고서\n기준일: 2026-06-30\n정책목표: 직업교육·청년 일자리 연계성과\n수치검증: XLSX 총괄값과 CSV 원 단위 근거를 분리하여 확인\n위험판정: 지연 5건 이상 또는 집행률 60% 미만은 위험\n개인정보: 직접 식별값은 결과에서 제외하고 마스킹 건수만 기록\n품질조건: 표·그림·페이지와 패키지 무결성을 저장 후 재검증\n결론: 청년고용 자료는 근거 일치 항목만 반영하고 충돌 항목은 재확인 필요"
+        }
+      ],
+      "expectedTargets": [
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 1
+            }
+          },
+          "text": "청년고용 복합근거 검토보고서"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 2
+            }
+          },
+          "text": "기준일: 2026-06-30"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 3
+            }
+          },
+          "text": "정책목표: 직업교육·청년 일자리 연계성과"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 4
+            }
+          },
+          "text": "수치검증: XLSX 총괄값과 CSV 원 단위 근거를 분리하여 확인"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 5
+            }
+          },
+          "text": "위험판정: 지연 5건 이상 또는 집행률 60% 미만은 위험"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 6
+            }
+          },
+          "text": "개인정보: 직접 식별값은 결과에서 제외하고 마스킹 건수만 기록"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 7
+            }
+          },
+          "text": "품질조건: 표·그림·페이지와 패키지 무결성을 저장 후 재검증"
+        },
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 8
+            }
+          },
+          "text": "결론: 청년고용 자료는 근거 일치 항목만 반영하고 충돌 항목은 재확인 필요"
+        }
+      ],
+      "invariants": {
+        "reopenRequired": true,
+        "maxPageCountDelta": 1,
+        "preserveTableCount": true,
+        "preservePictureCount": true,
+        "preserveImageCount": true,
+        "noUnexpectedTargetChanges": true
+      },
+      "renderChecks": {
+        "pages": [
+          1
+        ],
+        "requireNonBlank": true,
+        "compareBaseline": true
+      },
+      "score": {
+        "contentAccuracy": 35,
+        "layout": 20,
+        "styleConsistency": 15,
+        "objectPreservation": 10,
+        "packageIntegrity": 10,
+        "reopenAndApiUsability": 10,
+        "hardFailures": [
+          "saved HWPX cannot be reopened",
+          "personal information is copied into the output",
+          "failed batch commits a partial edit",
+          "unrequested table or image disappears"
+        ]
+      }
+    },
+    "adjudication": {
+      "passThreshold": 85,
+      "hardFailureOverridesScore": true,
+      "visualReviewRequiredForFinalAcceptance": true,
+      "unsupportedClaims": [
+        "A successful save alone is not visual proof.",
+        "A structural reopen alone is not Hancom rendering proof.",
+        "Visible hyphen text is not a native HWPX numbering object."
+      ]
+    }
+  }
+}

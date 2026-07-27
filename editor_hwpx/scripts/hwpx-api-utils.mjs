@@ -18,6 +18,7 @@ import {
   stableStringify as coreStableStringify,
   wrapLine as coreWrapLine,
 } from '../../editor_common/document-api-core.mjs';
+import { validateHwpxCommands } from './hwpx-command-catalog.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -830,7 +831,9 @@ const CELL_DRAWING_CONTROL_PATTERN = /<hp:(?:pic|container)\b/;
 
 function replaceCellTextXml(cellXml, text, options = {}) {
   if (CELL_DRAWING_CONTROL_PATTERN.test(cellXml)) {
-    return applyCellOuterStyleXml(replaceFirstInlineTextXml(cellXml, text), options.cellStyle);
+    const textPatched = replaceFirstInlineTextXml(cellXml, text);
+    const stylePatched = applyParagraphStyleIdsXml(textPatched, options.styleIds);
+    return applyCellOuterStyleXml(stylePatched, options.cellStyle);
   }
   const subList = extractSubList(cellXml);
   const paragraphs = findBlocks(subList.inner, 'p');
@@ -1111,9 +1114,29 @@ function setCellTextWithApi(doc, table, cellIndex, text) {
   });
 }
 
+function assertSupportedHwpxPackage(inputBytes) {
+  const bytes = Buffer.from(inputBytes);
+  if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+    return;
+  }
+  let entries;
+  try {
+    entries = readZip(bytes);
+  } catch {
+    return;
+  }
+  const manifest = entries.get('META-INF/manifest.xml')?.toString('utf8') ?? '';
+  if (/<(?:[\w.-]+:)?encryption-data\b/i.test(manifest)) {
+    const error = new Error('unsupported_encrypted_hwpx: 배포용 또는 암호화된 HWPX 패키지는 암호 해제 없이 편집할 수 없습니다.');
+    error.code = 'unsupported_encrypted_hwpx';
+    throw error;
+  }
+}
+
 export class HwpxApiSession {
   constructor(inputBytes, options = {}) {
     this.inputBytes = Buffer.from(inputBytes);
+    assertSupportedHwpxPackage(this.inputBytes);
     this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
     this.revision = 1;
     this.saveMode = options.saveMode ?? 'preserve-package';
@@ -1569,6 +1592,23 @@ export class HwpxApiSession {
   }
 
   commandsBatch(ops) {
+    validateHwpxCommands(ops);
+    const trial = new HwpxApiSession(this.inputBytes, { saveMode: this.saveMode });
+    const trialResult = trial.commandsBatchUnsafe(ops);
+    const committed = trial.save();
+    this.inputBytes = Buffer.from(committed.bytes);
+    this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
+    this.cellPatches = [];
+    this.paragraphPatches = [];
+    this.paragraphInsertPatches = [];
+    this.packagePatches = [];
+    this.shapePatches = [];
+    this.textBoxPatches = [];
+    this.revision += 1;
+    return { revision: this.revision, results: trialResult.results };
+  }
+
+  commandsBatchUnsafe(ops) {
     const results = [];
     const normalizedOps = ops.flatMap((op, index) => this.normalizeCommand(op, index));
     for (const op of normalizedOps) {
@@ -1608,7 +1648,18 @@ export class HwpxApiSession {
         this.paragraphInsertPatches.push({ section, para: paragraph, text: op.text, styleIds, opId: op.opId });
         results.push({ opId: op.opId, ok: true, target: `s${section}_p${paragraph}`, action: 'text.insertAfterParagraph' });
       } else if (op.op === 'replaceText') {
+        const { section, para } = op.target.native;
+        const styleIds = this.paragraphStyleIds({
+          paragraph: { section, number: para },
+        });
         replaceTextInBody(this.doc, op);
+        this.paragraphPatches.push({
+          section,
+          para,
+          text: readBodyParagraphText(this.doc, section, para),
+          styleIds,
+          opId: op.opId,
+        });
         results.push({ opId: op.opId, ok: true, action: 'text.replace' });
       } else if (op.op === 'layout.fitText') {
         const fit = this.fitText(op.location, op.text, op.options);
@@ -1709,7 +1760,6 @@ export class HwpxApiSession {
         throw new Error(`unsupported HWPX API op: ${op.op}`);
       }
     }
-    this.revision += 1;
     return { revision: this.revision, results };
   }
 
@@ -1837,11 +1887,16 @@ export class HwpxApiSession {
   }
 
   validationReport(doc = this.doc) {
+    const sectionCount = doc.getSectionCount();
+    let paragraphCount = 0;
+    for (let section = 0; section < sectionCount; section += 1) {
+      paragraphCount += doc.getParagraphCount(section);
+    }
     return {
       sourceFormat: doc.getSourceFormat(),
       pageCount: doc.pageCount(),
-      sectionCount: doc.getSectionCount(),
-      paragraphCount: doc.getParagraphCount(0),
+      sectionCount,
+      paragraphCount,
       tables: discoverTables(doc).map((table) => ({
         id: table.id,
         section: table.section,

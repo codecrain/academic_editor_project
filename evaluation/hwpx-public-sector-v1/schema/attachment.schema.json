@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://academic-editor.local/schema/hwpx-public-sector-attachment-v1.json",
+  "title": "HWPX Evaluation Attachment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "path",
+    "mediaType",
+    "sha256",
+    "byteLength",
+    "origin",
+    "license",
+    "role"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 3 },
+    "path": { "type": "string", "minLength": 1 },
+    "mediaType": { "type": "string", "minLength": 3 },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "byteLength": { "type": "integer", "minimum": 1 },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "url", "publisher", "retrievedAt"],
+      "properties": {
+        "kind": { "enum": ["official-public", "repository-fixture", "generated-fixture", "derived-official"] },
+        "url": { "type": "string" },
+        "publisher": { "type": "string" },
+        "retrievedAt": { "type": "string" }
+      }
+    },
+    "license": { "type": "string" },
+    "role": { "type": "string" },
+    "notes": { "type": "string" }
+  }
+}

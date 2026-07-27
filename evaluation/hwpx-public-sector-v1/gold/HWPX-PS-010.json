@@ -1,0 +1,189 @@
+{
+  "scenarioId": "HWPX-PS-010",
+  "answerContract": {
+    "summary": "Apply 5 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
+    "sourceFacts": [
+      {
+        "attachmentId": "source-mpva-veterans-xlsx",
+        "locator": "참전(총괄)!B8",
+        "fact": 184580
+      },
+      {
+        "attachmentId": "source-mpva-beneficiaries-xlsx",
+        "locator": "기본현황(총괄)!D5",
+        "fact": 835702
+      },
+      {
+        "attachmentId": "source-procurement-csv",
+        "locator": "EDU-04 집행액원/본예산원",
+        "fact": "1732500000/2310000000 = 75.0%"
+      },
+      {
+        "attachmentId": "source-moe-work-plan-pdf",
+        "locator": "2025년 교육부 주요업무 추진계획",
+        "fact": "기회의 사다리가 되는 공정한 교육 실현"
+      }
+    ],
+    "oracle": {
+      "commandTemplates": [
+        {
+          "commandId": "HWPX-PS-010-paragraph",
+          "op": "text.replaceParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 36
+            }
+          },
+          "text": "청년고용 검증 010: 직업교육·청년 일자리 연계성과"
+        },
+        {
+          "commandId": "HWPX-PS-010-insert",
+          "op": "text.insertAfterParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 44
+            }
+          },
+          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+        },
+        {
+          "commandId": "HWPX-PS-010-cell-a",
+          "op": "table.writeCell",
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 66,
+              "row": 12,
+              "column": 5
+            }
+          },
+          "text": "검증 10",
+          "fit": true,
+          "fitOptions": {
+            "maxLines": 2,
+            "truncate": false
+          }
+        },
+        {
+          "commandId": "HWPX-PS-010-cell-b",
+          "op": "style.applyText",
+          "target": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 92,
+              "row": 17,
+              "column": 5
+            }
+          },
+          "styleSource": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 66,
+              "row": 12,
+              "column": 5
+            }
+          },
+          "text": "근거 일치"
+        },
+        {
+          "commandId": "HWPX-PS-010-image",
+          "op": "image.generateAndReplace",
+          "imageName": "BinData/image2.png",
+          "generator": {
+            "width": 640,
+            "height": 360,
+            "background": "#ffffff",
+            "accent": "#2f5fbd",
+            "values": [
+              {
+                "value": 64
+              },
+              {
+                "value": 49
+              },
+              {
+                "value": 61
+              }
+            ]
+          }
+        }
+      ],
+      "expectedTargets": [
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 36
+            }
+          },
+          "text": "청년고용 검증 010: 직업교육·청년 일자리 연계성과"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 66,
+              "row": 12,
+              "column": 5
+            }
+          },
+          "text": "검증 10"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 92,
+              "row": 17,
+              "column": 5
+            }
+          },
+          "text": "근거 일치"
+        }
+      ],
+      "invariants": {
+        "reopenRequired": true,
+        "maxPageCountDelta": 1,
+        "preserveTableCount": true,
+        "preservePictureCount": true,
+        "preserveImageCount": true,
+        "noUnexpectedTargetChanges": true
+      },
+      "renderChecks": {
+        "pages": [
+          1,
+          6,
+          11
+        ],
+        "requireNonBlank": true,
+        "compareBaseline": true
+      },
+      "score": {
+        "contentAccuracy": 35,
+        "layout": 20,
+        "styleConsistency": 15,
+        "objectPreservation": 10,
+        "packageIntegrity": 10,
+        "reopenAndApiUsability": 10,
+        "hardFailures": [
+          "saved HWPX cannot be reopened",
+          "personal information is copied into the output",
+          "failed batch commits a partial edit",
+          "unrequested table or image disappears"
+        ]
+      }
+    },
+    "adjudication": {
+      "passThreshold": 85,
+      "hardFailureOverridesScore": true,
+      "visualReviewRequiredForFinalAcceptance": true,
+      "unsupportedClaims": [
+        "A successful save alone is not visual proof.",
+        "A structural reopen alone is not Hancom rendering proof.",
+        "Visible hyphen text is not a native HWPX numbering object."
+      ]
+    }
+  }
+}

@@ -1,0 +1,189 @@
+{
+  "scenarioId": "HWPX-PS-058",
+  "answerContract": {
+    "summary": "Apply 5 exact HWPX command(s), then save, reopen, and verify structural plus rendered invariants.",
+    "sourceFacts": [
+      {
+        "attachmentId": "source-mpva-veterans-xlsx",
+        "locator": "참전(총괄)!B8",
+        "fact": 184580
+      },
+      {
+        "attachmentId": "source-moe-work-plan-pdf",
+        "locator": "2025년 교육부 주요업무 추진계획",
+        "fact": "기회의 사다리가 되는 공정한 교육 실현"
+      },
+      {
+        "attachmentId": "source-decisions-txt",
+        "locator": "결정사항 5",
+        "fact": "지연건수 5건 이상 또는 집행률 60% 미만은 위험"
+      },
+      {
+        "attachmentId": "source-large-legacy-hwp",
+        "locator": "파일 크기 및 형식",
+        "fact": "약 10MB OLE 기반 레거시 HWP 참고자료"
+      }
+    ],
+    "oracle": {
+      "commandTemplates": [
+        {
+          "commandId": "HWPX-PS-058-paragraph",
+          "op": "text.replaceParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 7
+            }
+          },
+          "text": "교통물류 검증 058: 대중교통 취약지역 서비스 개선"
+        },
+        {
+          "commandId": "HWPX-PS-058-insert",
+          "op": "text.insertAfterParagraph",
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 17
+            }
+          },
+          "text": "근거 기준일 2026-05-31, 교차검증 완료\n오류·민감정보는 별도 검증메모로 관리"
+        },
+        {
+          "commandId": "HWPX-PS-058-cell-a",
+          "op": "table.writeCell",
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 108,
+              "row": 21,
+              "column": 1
+            }
+          },
+          "text": "검증 58",
+          "fit": true,
+          "fitOptions": {
+            "maxLines": 2,
+            "truncate": false
+          }
+        },
+        {
+          "commandId": "HWPX-PS-058-cell-b",
+          "op": "style.applyText",
+          "target": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 137,
+              "row": 26,
+              "column": 5
+            }
+          },
+          "styleSource": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 108,
+              "row": 21,
+              "column": 1
+            }
+          },
+          "text": "근거 일치"
+        },
+        {
+          "commandId": "HWPX-PS-058-image",
+          "op": "image.generateAndReplace",
+          "imageName": "BinData/image2.png",
+          "generator": {
+            "width": 640,
+            "height": 360,
+            "background": "#ffffff",
+            "accent": "#2f5fbd",
+            "values": [
+              {
+                "value": 72
+              },
+              {
+                "value": 52
+              },
+              {
+                "value": 63
+              }
+            ]
+          }
+        }
+      ],
+      "expectedTargets": [
+        {
+          "location": {
+            "paragraph": {
+              "section": 0,
+              "number": 7
+            }
+          },
+          "text": "교통물류 검증 058: 대중교통 취약지역 서비스 개선"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 108,
+              "row": 21,
+              "column": 1
+            }
+          },
+          "text": "검증 58"
+        },
+        {
+          "location": {
+            "tableId": "tbl_10",
+            "cell": {
+              "number": 137,
+              "row": 26,
+              "column": 5
+            }
+          },
+          "text": "근거 일치"
+        }
+      ],
+      "invariants": {
+        "reopenRequired": true,
+        "maxPageCountDelta": 1,
+        "preserveTableCount": true,
+        "preservePictureCount": true,
+        "preserveImageCount": true,
+        "noUnexpectedTargetChanges": true
+      },
+      "renderChecks": {
+        "pages": [
+          1,
+          6,
+          11
+        ],
+        "requireNonBlank": true,
+        "compareBaseline": true
+      },
+      "score": {
+        "contentAccuracy": 35,
+        "layout": 20,
+        "styleConsistency": 15,
+        "objectPreservation": 10,
+        "packageIntegrity": 10,
+        "reopenAndApiUsability": 10,
+        "hardFailures": [
+          "saved HWPX cannot be reopened",
+          "personal information is copied into the output",
+          "failed batch commits a partial edit",
+          "unrequested table or image disappears"
+        ]
+      }
+    },
+    "adjudication": {
+      "passThreshold": 85,
+      "hardFailureOverridesScore": true,
+      "visualReviewRequiredForFinalAcceptance": true,
+      "unsupportedClaims": [
+        "A successful save alone is not visual proof.",
+        "A structural reopen alone is not Hancom rendering proof.",
+        "Visible hyphen text is not a native HWPX numbering object."
+      ]
+    }
+  }
+}

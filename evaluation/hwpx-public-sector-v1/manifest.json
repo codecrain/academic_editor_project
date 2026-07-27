@@ -1,0 +1,44 @@
+{
+  "version": "1.0.0",
+  "generatedAt": "2026-07-27",
+  "scenarioCount": 100,
+  "editCount": 90,
+  "generationCount": 10,
+  "minQuestionLength": 368,
+  "maxQuestionLength": 402,
+  "domains": [
+    "교육행정",
+    "보훈복지",
+    "재난안전",
+    "지역균형",
+    "공공조달",
+    "보건의료",
+    "환경기후",
+    "교통물류",
+    "디지털정부",
+    "청년고용"
+  ],
+  "sourceFormats": [
+    "csv",
+    "docx",
+    "hwp",
+    "hwpx",
+    "jpg",
+    "pdf",
+    "png",
+    "txt",
+    "xlsx"
+  ],
+  "attachmentCount": 13,
+  "encryptedPackageAudit": {
+    "attachmentId": "adversarial-encrypted-moe-hwpx",
+    "expectedErrorCode": "unsupported_encrypted_hwpx"
+  },
+  "files": {
+    "attachments": "attachments.json",
+    "scenarios": "scenarios.jsonl",
+    "scenarioSchema": "schema/scenario.schema.json",
+    "attachmentSchema": "schema/attachment.schema.json",
+    "goldDirectory": "gold"
+  }
+}
