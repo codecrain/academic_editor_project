@@ -21,6 +21,35 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('image'));
 });
 
+test('HWPX command catalog publishes every promoted DOCX parity operation', () => {
+  const promoted = [
+    'text.replaceTracked',
+    'insertText',
+    'deleteRange',
+    'appendParagraph',
+    'table.create',
+    'table.insertCaption',
+    'applyStyle',
+    'setRunStyle',
+    'setParagraphStyle',
+    'image.insertAfterParagraph',
+    'setDocumentMetadata',
+    'defineStyle',
+    'setPageSetup',
+    'setHeaderFooter',
+    'insertFootnote',
+  ];
+
+  for (const op of promoted) {
+    assert.ok(HWPX_COMMAND_OPS.includes(op), `${op} must be public`);
+    assert.equal(getHwpxCommandCatalog({ op }).commandCount, 1);
+  }
+  assert.equal(
+    getHwpxCommandCatalog({ op: 'text.replaceTracked' }).commands[0].capability,
+    'engine-required',
+  );
+});
+
 test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {
   assert.equal(resolveHwpxCommand('setCellText').op, 'table.writeCell');
   assert.equal(resolveHwpxCommand({ group: 'table', action: 'writeCell' }).op, 'table.writeCell');
@@ -72,5 +101,27 @@ test('HWPX inspection requirements include every batch cell and style source', (
   assert.deepEqual(
     requiredInspectionTargets(commands, entries).map((target) => target.key),
     ['table:tbl_0/cell:1', 'table:tbl_0/cell:2', 'table:tbl_0/cell:0'],
+  );
+});
+
+test('HWPX promoted target operations require stable inspection targets', () => {
+  const commands = [
+    {
+      op: 'text.replaceTracked',
+      target: { paragraph: { section: 0, number: 1 } },
+      text: '수정',
+      author: '검토자',
+    },
+    {
+      op: 'table.create',
+      target: { paragraph: { section: 0, number: 2 } },
+      rows: 2,
+      columns: 3,
+    },
+  ];
+  const entries = validateHwpxCommands(commands);
+  assert.deepEqual(
+    requiredInspectionTargets(commands, entries).map((target) => target.key),
+    ['paragraph:0:1', 'paragraph:0:2'],
   );
 });
