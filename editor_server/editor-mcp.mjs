@@ -1,17 +1,20 @@
-import {
-  DOCX_COMMAND_CATEGORIES,
-  DOCX_COMMAND_OPS,
-} from '../editor_docx/scripts/docx-command-catalog.mjs';
-import { HWPX_MCP_TOOLS } from '../editor_hwpx/scripts/hwpx-mcp-tools.mjs';
 import { createEditorMcpTools } from '../editor_common/editor-mcp-tool-factory.mjs';
+import { docxAdapter } from './format-adapters/docx-adapter.mjs';
+import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 
 const DOCX_MCP_TOOLS = createEditorMcpTools({
   format: 'docx',
-  commandCategories: DOCX_COMMAND_CATEGORIES,
-  commandOps: DOCX_COMMAND_OPS,
+  commandCategories: docxAdapter.commandCategories,
+  commandOps: docxAdapter.commandOps,
+});
+
+const HWPX_MCP_TOOLS = createEditorMcpTools({
+  format: 'hwpx',
+  commandCategories: hwpxAdapter.commandCategories,
+  commandOps: hwpxAdapter.commandOps,
 });
 
 const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS]);

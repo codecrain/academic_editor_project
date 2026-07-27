@@ -23,7 +23,7 @@ import {
   resolveDocxActionPath,
   resolveStaticPath,
   sanitizeEditorHtml,
-} from './editor-gateway.mjs';
+} from '../../editor_server/editor-gateway.mjs';
 import { createDocxBytes, getDocumentXml } from './docx-api-utils.mjs';
 
 const FAKE_PDF_BYTES = Buffer.from('%PDF-1.4\n%%EOF\n');
@@ -1676,6 +1676,21 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     });
     assert.equal(opened.ok, true);
     assert.equal(opened.fmt, 'hwpx');
+
+    const docxOpened = await post('/v1/docx/documents/open', {
+      source: { bytesBase64: createDocxBytes({ paragraphs: ['DOCX isolation fixture'] }).toString('base64') },
+      filename: 'isolation.docx',
+    });
+    const hwpxIdOnDocxRoute = await fetch(
+      `${origin}/v1/docx/documents/${opened.documentId}/documents/read-json`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    );
+    const docxIdOnHwpxRoute = await fetch(
+      `${origin}/v1/hwpx/documents/${docxOpened.documentId}/documents/read-json`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+    );
+    assert.equal(hwpxIdOnDocxRoute.status, 404);
+    assert.equal(docxIdOnHwpxRoute.status, 404);
 
     const structure = await post(`/v1/hwpx/documents/${opened.documentId}/documents/read-json`, {});
     assert.equal(structure.sourceFormat, 'hwpx');
