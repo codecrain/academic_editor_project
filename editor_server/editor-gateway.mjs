@@ -581,9 +581,6 @@ function apiStore(state) {
 
 function discardApiSessionState(state, documentId, options = {}) {
   const deleted = apiStore(state).delete(documentId);
-  state.mcpInspectionRevisions?.delete(documentId);
-  state.mcpInventoryRevisions?.delete(documentId);
-  state.mcpQualityRevisions?.delete(documentId);
   if (options.clearLock !== false) {
     state.mcpDocumentLocks?.delete(documentId);
   }
@@ -596,6 +593,107 @@ function findApiRecord(state, fmt, id) {
     return null;
   }
   return record;
+}
+
+class EditorContractError extends Error {
+  constructor(code, message, statusCode = 409, details = undefined) {
+    super(`${code}: ${message}`);
+    this.name = 'EditorContractError';
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+  }
+}
+
+function recordPreconditions(record) {
+  record.preconditions ??= {
+    inspectionRevision: null,
+    inspectedTargetKeys: new Set(),
+    inventoryRevision: null,
+    qualityRevision: null,
+  };
+  return record.preconditions;
+}
+
+function clearRecordPreconditions(record) {
+  const preconditions = recordPreconditions(record);
+  preconditions.inspectionRevision = null;
+  preconditions.inspectedTargetKeys = new Set();
+  preconditions.inventoryRevision = null;
+  preconditions.qualityRevision = null;
+}
+
+function requireBaseRevision(record, body) {
+  const baseRevision = Number(body?.baseRevision);
+  if (!Number.isInteger(baseRevision) || baseRevision < 1) {
+    throw new EditorContractError(
+      'invalid_base_revision',
+      'baseRevision must be a positive integer.',
+      400,
+    );
+  }
+  const currentRevision = Number(record.session.revision);
+  if (baseRevision !== currentRevision) {
+    throw new EditorContractError(
+      'stale_revision',
+      `expected revision ${baseRevision}, current revision ${currentRevision}. Re-read and re-inspect before continuing.`,
+    );
+  }
+  return baseRevision;
+}
+
+function assertMutationPreconditions(record, action, body, commands = []) {
+  const baseRevision = requireBaseRevision(record, body);
+  const adapter = formatAdapters.get(record.fmt);
+  const preconditions = recordPreconditions(record);
+  let commandEntries = [];
+
+  if (action === 'apply') {
+    try {
+      commandEntries = adapter.validateCommands(commands);
+    } catch (error) {
+      throw new EditorContractError(
+        'invalid_commands',
+        error instanceof Error ? error.message : String(error),
+        422,
+      );
+    }
+    if (adapter.commandsNeedPrecondition(commandEntries, 'target_inspect')) {
+      const requiredTargets = adapter.requiredInspectionTargets(commands, commandEntries);
+      const inspectedKeys = preconditions.inspectionRevision === baseRevision
+        ? preconditions.inspectedTargetKeys
+        : new Set();
+      const missingTargets = requiredTargets.filter((target) => !inspectedKeys.has(target.key));
+      if (preconditions.inspectionRevision !== baseRevision || missingTargets.length) {
+        const missingDetail = missingTargets.length
+          ? ` Missing: ${missingTargets.map((target) => `${target.op}.${target.role}=${target.key}`).join(', ')}.`
+          : '';
+        throw new EditorContractError(
+          'inspection_required',
+          `inspect every exact target and style source at the current revision before applying commands.${missingDetail}`,
+          409,
+          { missingTargets },
+        );
+      }
+    }
+    if (adapter.commandsNeedPrecondition(commandEntries, 'object_inventory')
+      && preconditions.inventoryRevision !== baseRevision) {
+      throw new EditorContractError(
+        'object_inventory_required',
+        'inspect current document objects before applying image commands.',
+      );
+    }
+  }
+
+  if ((action === 'save-source' || action === 'export-pdf')
+    && preconditions.qualityRevision !== baseRevision) {
+    throw new EditorContractError(
+      'quality_check_required',
+      'run a clean quality check at the current revision before finalizing the document.',
+    );
+  }
+
+  return { baseRevision, commandEntries };
 }
 
 function pruneExpiredApiSessions(state, ttlMs) {
@@ -1191,6 +1289,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   const { session } = record;
 
   if (actionPath === 'documents/discard' || actionPath === 'discard') {
+    assertMutationPreconditions(record, 'discard', body);
     const deleted = discardApiSessionState(state, id);
     sendJson(res, 200, {
       ok: true,
@@ -1220,7 +1319,26 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   if (actionPath === 'target/inspect' || actionPath === 'targets/inspect') {
     const locations = body.locations || (body.location ? [body.location] : []);
     const targets = locations.map((location) => session.inspectTarget(location));
-    sendJson(res, 200, { revision: session.revision, targets });
+    const adapter = formatAdapters.get(fmt);
+    const inspectedTargetKeys = targets.map((target) => adapter.stableTargetKey(target.location));
+    if (inspectedTargetKeys.some((key) => !key)) {
+      throw new EditorContractError(
+        'unstable_inspection_target',
+        'target inspection returned a location without a stable paragraph or table-cell key.',
+        422,
+      );
+    }
+    const preconditions = recordPreconditions(record);
+    if (preconditions.inspectionRevision !== session.revision) {
+      preconditions.inspectedTargetKeys = new Set();
+    }
+    preconditions.inspectionRevision = session.revision;
+    inspectedTargetKeys.forEach((key) => preconditions.inspectedTargetKeys.add(key));
+    sendJson(res, 200, {
+      revision: session.revision,
+      targets,
+      inspectedTargetKeys: [...preconditions.inspectedTargetKeys],
+    });
     return true;
   }
   if (actionPath === 'target/find' || actionPath === 'targets/resolve') {
@@ -1237,7 +1355,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'object/inventory' || actionPath === 'objects/inventory') {
-    sendJson(res, 200, session.objectInventory());
+    const inventory = session.objectInventory();
+    recordPreconditions(record).inventoryRevision = session.revision;
+    sendJson(res, 200, { revision: session.revision, ...inventory });
     return true;
   }
   if (actionPath === 'commands/catalog') {
@@ -1251,11 +1371,16 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 400, { ok: false, message: 'commands/apply requires commands or ops array.' });
       return true;
     }
+    assertMutationPreconditions(record, 'apply', body, commands);
     const result = session.apply(commands);
+    clearRecordPreconditions(record);
     sendJson(res, 200, { ...result, warnings: [] });
     return true;
   }
-  if (actionPath === 'documents/save-source' || actionPath === 'save') {
+  if (actionPath === 'documents/save-source' || actionPath === 'save'
+    || actionPath === 'documents/save-checkpoint') {
+    const checkpoint = actionPath === 'documents/save-checkpoint';
+    assertMutationPreconditions(record, checkpoint ? 'save-checkpoint' : 'save-source', body);
     const saved = session.save();
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : bytesRefForSavedDocument(config, body.filename || record.filename);
     mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -1267,11 +1392,17 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sha256: sha256(saved.bytes),
       ...(fmt === 'docx' ? { visibleTextHash: sha256(Buffer.from(docxAdapter.visibleText(saved.bytes), 'utf8')) } : {}),
       validation: saved.validation,
+      checkpoint,
+      verified: !checkpoint,
     });
     return true;
   }
   if (actionPath === 'quality/check' || actionPath === 'health/check') {
+    const { baseRevision } = assertMutationPreconditions(record, 'quality-check', body);
     const quality = session.qualityCheck({ baselineJson: record.baselineJson });
+    recordPreconditions(record).qualityRevision = qualityAllowsFinalization(quality, fmt)
+      ? baseRevision
+      : null;
     sendJson(res, 200, {
       ok: quality.ok,
       stable: quality.ok,
@@ -1345,6 +1476,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'documents/export-pdf' || actionPath === 'export' && body.type === 'pdf') {
+    assertMutationPreconditions(record, 'export-pdf', body);
     const sourceBytes = session.save().bytes;
     const rendered = fmt === 'hwpx'
       ? await (config.hwpxPdfRenderer || hwpxAdapter.renderPages)(sourceBytes, {
@@ -2061,10 +2193,6 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
   const adapter = formatAdapters.get(fmt);
   if (!adapter) throw new Error(`unsupported format: ${fmt}`);
   const catalogForFormat = adapter.commandCatalog;
-  const validateCommandsForFormat = adapter.validateCommands;
-  const commandsNeedPreconditionForFormat = adapter.commandsNeedPrecondition;
-  const requiredInspectionTargetsForFormat = adapter.requiredInspectionTargets;
-  const stableTargetKeyForFormat = adapter.stableTargetKey;
 
   if (name === `${toolPrefix}_command_catalog`) {
     const catalog = catalogForFormat({ category: args.category, op: args.op });
@@ -2122,14 +2250,24 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
 
   return withMcpDocumentLock(state, documentId, async () => {
     if (name === `${toolPrefix}_discard`) {
-      const deleted = discardApiSessionState(state, documentId, { clearLock: false });
+      const record = findApiRecord(state, fmt, documentId);
+      if (!record) {
+        return {
+          ok: true,
+          status: 'completed',
+          documentId,
+          deleted: false,
+          sessionClosed: true,
+          artifactCreated: false,
+        };
+      }
+      const prefix = `/v1/${fmt}/documents/${encodeURIComponent(documentId)}`;
+      const discarded = await postLocalEditorApi(req, config, `${prefix}/documents/discard`, {
+        baseRevision: args.baseRevision,
+      });
       return {
-        ok: true,
+        ...discarded,
         status: 'completed',
-        documentId,
-        deleted,
-        sessionClosed: true,
-        artifactCreated: false,
       };
     }
 
@@ -2157,41 +2295,10 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       return postLocalEditorApi(req, config, `${prefix}/target/find`, { query: args.query, match: args.match || {} });
     }
     if (name === `${toolPrefix}_object_inventory`) {
-      const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
-        responseMode: MCP_BOUNDED_RESPONSE_MODE,
-        view: 'summary',
-      });
-      const inventory = await postLocalEditorApi(req, config, `${prefix}/object/inventory`, {});
-      state.mcpInventoryRevisions ??= new Map();
-      state.mcpInventoryRevisions.set(documentId, Number(structure.revision));
-      return { revision: structure.revision, ...inventory };
+      return postLocalEditorApi(req, config, `${prefix}/object/inventory`, {});
     }
     if (name === `${toolPrefix}_target_inspect`) {
-      const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
-        responseMode: MCP_BOUNDED_RESPONSE_MODE,
-        view: 'summary',
-      });
-      const inspected = await postLocalEditorApi(req, config, `${prefix}/target/inspect`, { locations: args.locations });
-      if (Number(inspected.revision) !== Number(structure.revision)) {
-        throw new Error('stale_revision: document changed while targets were being inspected. Re-read and inspect again.');
-      }
-      const inspectedTargetKeys = inspected.targets.map((target) => stableTargetKeyForFormat(target.location));
-      if (inspectedTargetKeys.some((key) => !key)) {
-        throw new Error('target_inspect returned a target without a stable paragraph or table-cell location.');
-      }
-      state.mcpInspectionRevisions ??= new Map();
-      const previous = state.mcpInspectionRevisions.get(documentId);
-      const targetKeys = previous?.revision === Number(structure.revision)
-        ? new Set(previous.targetKeys ?? [])
-        : new Set();
-      for (const key of inspectedTargetKeys) {
-        targetKeys.add(key);
-      }
-      state.mcpInspectionRevisions.set(documentId, {
-        revision: Number(structure.revision),
-        targetKeys,
-      });
-      return { ...inspected, inspectedTargetKeys: [...targetKeys] };
+      return postLocalEditorApi(req, config, `${prefix}/target/inspect`, { locations: args.locations });
     }
 
     const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
@@ -2202,27 +2309,10 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     assertCurrentRevision(structure, baseRevision);
 
     if (name === `${toolPrefix}_apply`) {
-      const commandEntries = validateCommandsForFormat(args.commands);
-      if (commandsNeedPreconditionForFormat(commandEntries, 'target_inspect')) {
-        const inspection = state.mcpInspectionRevisions?.get(documentId);
-        const requiredTargets = requiredInspectionTargetsForFormat(args.commands, commandEntries);
-        const inspectedKeys = inspection?.revision === baseRevision ? new Set(inspection.targetKeys ?? []) : new Set();
-        const missingTargets = requiredTargets.filter((target) => !inspectedKeys.has(target.key));
-        if (inspection?.revision !== baseRevision || missingTargets.length) {
-          const detail = missingTargets.length
-            ? ` Missing: ${missingTargets.map((target) => `${target.op}.${target.role}=${target.key}`).join(', ')}.`
-            : '';
-          throw new Error(`inspection_required: inspect every exact target and style source at the current revision before applying commands.${detail}`);
-        }
-      }
-      if (commandsNeedPreconditionForFormat(commandEntries, 'object_inventory') && state.mcpInventoryRevisions?.get(documentId) !== baseRevision) {
-        throw new Error('object_inventory_required: inspect current document objects before applying image commands.');
-      }
-      const applied = await postLocalEditorApi(req, config, `${prefix}/commands/apply`, { commands: args.commands });
-      state.mcpInspectionRevisions?.delete(documentId);
-      state.mcpInventoryRevisions?.delete(documentId);
-      state.mcpQualityRevisions?.delete(documentId);
-      return applied;
+      return postLocalEditorApi(req, config, `${prefix}/commands/apply`, {
+        baseRevision,
+        commands: args.commands,
+      });
     }
     if (name === `${toolPrefix}_render_pages`) {
       const pages = Array.isArray(args.pages) && args.pages.length ? args.pages.map(Number) : [1];
@@ -2235,24 +2325,15 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       return postLocalEditorApi(req, config, `${prefix}/pages/render-all`, { pages });
     }
     if (name === `${toolPrefix}_quality_check`) {
-      const quality = await postLocalEditorApi(req, config, `${prefix}/quality/check`, {});
-      state.mcpQualityRevisions ??= new Map();
-      if (qualityAllowsFinalization(quality, fmt)) {
-        state.mcpQualityRevisions.set(documentId, baseRevision);
-      } else {
-        state.mcpQualityRevisions.delete(documentId);
-      }
-      return quality;
+      return postLocalEditorApi(req, config, `${prefix}/quality/check`, { baseRevision });
     }
     if (name === `${toolPrefix}_export_pdf`) {
-      if (state.mcpQualityRevisions?.get(documentId) !== baseRevision) {
-        throw new Error('quality_check_required: run a clean quality check at the current revision before exporting PDF.');
-      }
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
       const outputPath = mcpArtifactPath(artifactId, 'pdf');
       try {
         const exported = await postLocalEditorApi(req, config, `${prefix}/documents/export-pdf`, {
+          baseRevision,
           filename: args.filename,
           outputPath,
         });
@@ -2268,12 +2349,10 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       }
     }
     if (name === `${toolPrefix}_save_source`) {
-      if (state.mcpQualityRevisions?.get(documentId) !== baseRevision) {
-        throw new Error('quality_check_required: run a clean quality check at the current revision before saving.');
-      }
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
       const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+        baseRevision,
         filename: args.filename,
         outputPath: mcpArtifactPath(artifactId, fmt),
       });
@@ -2284,7 +2363,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (name === `${toolPrefix}_save_checkpoint`) {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
-      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-checkpoint`, {
+        baseRevision,
         filename: args.filename,
         outputPath: mcpArtifactPath(artifactId, fmt),
       });
@@ -2442,6 +2522,15 @@ function createGatewayServer(config) {
 
       sendText(res, 404, 'Not found');
     } catch (error) {
+      if (error instanceof EditorContractError) {
+        sendJson(res, error.statusCode, {
+          ok: false,
+          code: error.code,
+          message: error.message,
+          ...(error.details === undefined ? {} : { details: error.details }),
+        });
+        return;
+      }
       sendText(res, 500, error instanceof Error ? error.message : String(error));
     }
   });

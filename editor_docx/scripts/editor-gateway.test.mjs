@@ -157,21 +157,15 @@ test('gateway routes DOCX root, runtime, and HWPX paths separately', () => {
   assert.equal(isHwpxPath('/docx/browser/hash/cool.html', '/hwpx/'), false);
 });
 
-test('discardApiSessionState releases the isolated session and every MCP cache idempotently', () => {
+test('discardApiSessionState releases the isolated session and its lock idempotently', () => {
   const documentId = 'doc_discard-test';
   const state = {
     apiDocuments: new Map([[documentId, { id: documentId }]]),
-    mcpInspectionRevisions: new Map([[documentId, 2]]),
-    mcpInventoryRevisions: new Map([[documentId, 2]]),
-    mcpQualityRevisions: new Map([[documentId, 2]]),
     mcpDocumentLocks: new Map([[documentId, Promise.resolve()]]),
   };
 
   assert.equal(discardApiSessionState(state, documentId), true);
   assert.equal(state.apiDocuments.has(documentId), false);
-  assert.equal(state.mcpInspectionRevisions.has(documentId), false);
-  assert.equal(state.mcpInventoryRevisions.has(documentId), false);
-  assert.equal(state.mcpQualityRevisions.has(documentId), false);
   assert.equal(state.mcpDocumentLocks.has(documentId), false);
   assert.equal(discardApiSessionState(state, documentId), false);
 });
@@ -259,7 +253,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_artifact_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');
-    assert.deepEqual(discardTool.inputSchema.required, ['documentId']);
+    assert.deepEqual(discardTool.inputSchema.required, ['documentId', 'baseRevision']);
     assert.deepEqual(discardTool.annotations, {
       readOnlyHint: false,
       destructiveHint: true,
@@ -487,7 +481,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
     assert.equal(completeBatch.result.structuredContent.revision, 3);
     const exactDiscard = await mcp(311, 'tools/call', {
       name: 'editor_docx_discard',
-      arguments: { documentId: exactDocument.documentId },
+      arguments: { documentId: exactDocument.documentId, baseRevision: 3 },
     });
     assert.equal(exactDiscard.result.structuredContent.deleted, true);
 
@@ -577,7 +571,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       assert.match(blockedSave.result.structuredContent.message, /quality_check_required/);
       const discarded = await mcp(idBase + 6, 'tools/call', {
         name: 'editor_docx_discard',
-        arguments: { documentId: opened.documentId },
+        arguments: { documentId: opened.documentId, baseRevision: revision },
       });
       assert.equal(discarded.result.structuredContent.deleted, true);
     };
@@ -621,7 +615,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
 
     const discardCall = await mcp(26, 'tools/call', {
       name: 'editor_docx_discard',
-      arguments: { documentId: abandoned.documentId },
+      arguments: { documentId: abandoned.documentId, baseRevision: abandoned.revision },
     });
     assert.equal(discardCall.result.isError, false);
     assert.deepEqual(discardCall.result.structuredContent, {
@@ -643,7 +637,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
 
     const repeatedDiscardCall = await mcp(28, 'tools/call', {
       name: 'editor_docx_discard',
-      arguments: { documentId: abandoned.documentId },
+      arguments: { documentId: abandoned.documentId, baseRevision: abandoned.revision },
     });
     assert.equal(repeatedDiscardCall.result.isError, false);
     assert.equal(repeatedDiscardCall.result.structuredContent.status, 'completed');
@@ -1054,7 +1048,7 @@ test('MCP read and target streams stay bounded, complete, opaque, and revision-b
     assert.equal(staleCall.result.isError, true);
     assert.match(staleCall.result.structuredContent.message, /stale_cursor.*revision 1.*revision 2/);
 
-    const discarded = await mcp('editor_docx_discard', { documentId: opened.documentId });
+    const discarded = await mcp('editor_docx_discard', { documentId: opened.documentId, baseRevision: 2 });
     assert.equal(discarded.result.structuredContent.sessionClosed, true);
   } finally {
     await close(server);
@@ -1580,7 +1574,10 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
       body: createDocxBytes({ paragraphs: ['must not write'] }),
     });
     assert.equal(liveWrite.status, 405);
-    await callMcp(502, 'editor_docx_discard', { documentId: liveOpened.documentId });
+    await callMcp(502, 'editor_docx_discard', {
+      documentId: liveOpened.documentId,
+      baseRevision: liveApplied.revision,
+    });
 
     const unauthorized = await fetch(`${gatewayOrigin}/api/documents/${first.documentId}`);
     assert.equal(unauthorized.status, 401);
@@ -1698,20 +1695,53 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.ok(firstParagraph);
 
     const location = { paragraph: { section: firstParagraph.section, number: firstParagraph.para } };
-    const inspected = await post(`/v1/hwpx/documents/${opened.documentId}/target/inspect`, { locations: [location] });
-    assert.equal(inspected.targets.length, 1);
-
-    const command = await post(`/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
+    const commandPayload = {
       commands: [{
         commandId: 'gateway-smoke-replace',
         op: 'text.replaceParagraph',
         location,
         text: `${firstParagraph.text} API bridge`,
       }],
+    };
+    const staleApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...commandPayload, baseRevision: 999 }),
+    });
+    assert.equal(staleApply.status, 409);
+    assert.equal((await staleApply.json()).code, 'stale_revision');
+
+    const uninspectedApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...commandPayload, baseRevision: opened.revision }),
+    });
+    assert.equal(uninspectedApply.status, 409);
+    assert.equal((await uninspectedApply.json()).code, 'inspection_required');
+
+    for (const [fmt, documentId, prematurePath] of [
+      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx')],
+      ['docx', docxOpened.documentId, path.join(tempRoot, 'premature.docx')],
+    ]) {
+      const prematureSave = await fetch(`${origin}/v1/${fmt}/documents/${documentId}/documents/save-source`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseRevision: 1, outputPath: prematurePath }),
+      });
+      assert.equal(prematureSave.status, 409);
+      assert.equal((await prematureSave.json()).code, 'quality_check_required');
+    }
+
+    const inspected = await post(`/v1/hwpx/documents/${opened.documentId}/target/inspect`, { locations: [location] });
+    assert.equal(inspected.targets.length, 1);
+
+    const command = await post(`/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
+      ...commandPayload,
+      baseRevision: opened.revision,
     });
     assert.equal(command.revision, 2);
 
-    const quality = await post(`/v1/hwpx/documents/${opened.documentId}/quality/check`, {});
+    const quality = await post(`/v1/hwpx/documents/${opened.documentId}/quality/check`, { baseRevision: command.revision });
     assert.equal(quality.ok, true);
     assert.equal(quality.pageCount, structure.pageCount);
 
@@ -1725,7 +1755,9 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(renderedPage.page.nonBlank, true);
     assert.equal(renderedPage.pages.length, 1);
 
-    const exported = await post(`/v1/hwpx/documents/${opened.documentId}/documents/export-pdf`, {});
+    const exported = await post(`/v1/hwpx/documents/${opened.documentId}/documents/export-pdf`, {
+      baseRevision: command.revision,
+    });
     assert.equal(exported.renderer, 'rhwp-native');
     assert.equal(exported.mimeType, 'application/pdf');
     assert.equal(Buffer.from(exported.bytesBase64, 'base64').compare(FAKE_PDF_BYTES), 0);
@@ -1733,6 +1765,7 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     const saved = await post(`/v1/hwpx/documents/${opened.documentId}/documents/save-source`, {
       outputPath,
       filename: 'bridge-smoke.hwpx',
+      baseRevision: command.revision,
     });
     assert.equal(saved.ok, true);
     assert.match(saved.sha256, /^[a-f0-9]{64}$/);

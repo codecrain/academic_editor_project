@@ -69,7 +69,8 @@ sample or fallback document.
 `save_source` returns `artifactId`, package
 SHA-256, and visible-text SHA-256. It never exposes the server-local path.
 If work is cancelled or cannot pass quality checks, call the matching
-`editor_docx_discard` or `editor_hwpx_discard` with the open `documentId`. It
+`editor_docx_discard` or `editor_hwpx_discard` with the open `documentId` and
+its current `baseRevision`. It
 removes the isolated session and its inspection, inventory, quality, and lock
 state without saving or creating an artifact. The call is idempotent: an
 already-closed session still returns `status=completed` with `deleted=false`.
@@ -527,7 +528,16 @@ Request:
 }
 ```
 
-`baseRevision` should be supplied by callers. Current local bridge does not reject stale revisions; production should reject stale writes.
+`baseRevision` is mandatory. The REST bridge and MCP broker use the same
+revision-bound precondition state. A mismatch is rejected with HTTP 409 and
+`code=stale_revision` before any mutation.
+
+Every command whose catalog precondition is `target_inspect` requires all exact
+targets and style sources to have been inspected at the same revision. Image
+and object commands require `object/inventory` at the same revision. The
+corresponding failures are `inspection_required` and
+`object_inventory_required`. A successful apply advances the revision exactly
+once and clears inspection, inventory, and quality state.
 
 Accepted array key aliases:
 
@@ -1262,6 +1272,11 @@ HWPX save validation:
 - Render requested baseline/current pages as SVG and report that this does not
   prove Hancom Office pixel parity.
 
+`save-source` requires a clean `quality/check` recorded at the same
+`baseRevision`; otherwise it returns HTTP 409 with
+`code=quality_check_required`. Use `documents/save-checkpoint` with the current
+`baseRevision` only for an explicitly unverified recovery artifact.
+
 ## PDF Export
 
 Implemented DOCX and HWPX API:
@@ -1269,7 +1284,7 @@ Implemented DOCX and HWPX API:
 `POST /v1/{format}/documents/{id}/documents/export-pdf`
 
 ```json
-{ "filename": "edited.pdf" }
+{ "baseRevision": 4, "filename": "edited.pdf" }
 ```
 
 Response without `outputPath`:
@@ -1323,6 +1338,12 @@ output/docx-review/rendered/*/page-*.png
 
 `POST /v1/{format}/documents/{id}/quality/check`
 
+Request:
+
+```json
+{ "baseRevision": 4 }
+```
+
 Response:
 
 ```json
@@ -1341,6 +1362,8 @@ Response:
 ```
 
 Use `quality/check` after every command batch. If `ok=false`, do not save as final output unless the user explicitly accepts the issue.
+Only a clean result authorizes `save-source` and `export-pdf` for that exact
+revision. Any subsequent successful apply clears that authorization.
 
 DOCX table-capacity findings are evaluated against the JSON captured when the
 isolated session opened. An `empty-table`, `cell-overflow-risk`, or

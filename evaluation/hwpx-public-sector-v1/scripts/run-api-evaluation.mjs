@@ -66,7 +66,7 @@ const close = () => new Promise((resolve, reject) => {
 
 const address = await listen();
 const origin = `http://127.0.0.1:${address.port}`;
-const activeSessions = new Set();
+const activeSessions = new Map();
 
 async function post(pathname, payload) {
   const response = await fetch(`${origin}${pathname}`, {
@@ -108,14 +108,16 @@ async function openBytes(filename, bytes) {
     filename,
     source: { bytesBase64: bytes.toString('base64') },
   });
-  activeSessions.add(opened.documentId);
+  activeSessions.set(opened.documentId, opened.revision);
   return opened;
 }
 
 async function discard(documentId) {
   if (!documentId || !activeSessions.has(documentId)) return;
   try {
-    await post(documentPath(documentId, 'documents/discard'), {});
+    await post(documentPath(documentId, 'documents/discard'), {
+      baseRevision: activeSessions.get(documentId),
+    });
   } finally {
     activeSessions.delete(documentId);
   }
@@ -238,6 +240,7 @@ try {
     let sourceDocumentId = '';
     let reopenedDocumentId = '';
     let mcpDocumentId = '';
+    let mcpRevision = 1;
     let mcpArtifact = null;
     const checks = {
       attachments: false,
@@ -303,12 +306,16 @@ try {
       checks.inventory = true;
 
       const applied = await post(documentPath(sourceDocumentId, 'commands/apply'), {
+        baseRevision: opened.revision,
         commands: scenario.oracle.commandTemplates,
       });
+      activeSessions.set(sourceDocumentId, applied.revision);
       checks.atomicApply = applied.revision === opened.revision + 1;
       if (!checks.atomicApply) failures.push(`revision did not advance exactly once: ${opened.revision} -> ${applied.revision}`);
 
-      const quality = await post(documentPath(sourceDocumentId, 'quality/check'), {});
+      const quality = await post(documentPath(sourceDocumentId, 'quality/check'), {
+        baseRevision: applied.revision,
+      });
       checks.quality = quality.ok === true && !(quality.issues || []).some((issue) => issue.severity === 'error');
       details.qualityIssues = quality.issues || [];
       if (!checks.quality) failures.push('quality check reported an error');
@@ -331,6 +338,7 @@ try {
       }
 
       const saved = await post(documentPath(sourceDocumentId, 'documents/save-source'), {
+        baseRevision: applied.revision,
         filename: scenario.target.outputFilename,
         outputPath,
       });
@@ -458,6 +466,7 @@ try {
         bytesBase64: sourceBytes.toString('base64'),
       });
       mcpDocumentId = mcpOpened.documentId;
+      mcpRevision = mcpOpened.revision;
       for (const op of catalogOps) {
         const catalog = await mcp('editor_hwpx_command_catalog', { op });
         if (catalog.commandCount !== 1) throw new Error(`MCP catalog mismatch for ${op}`);
@@ -476,6 +485,7 @@ try {
         baseRevision: mcpOpened.revision,
         commands: scenario.oracle.commandTemplates,
       });
+      mcpRevision = mcpApplied.revision;
       const mcpQuality = await mcp('editor_hwpx_quality_check', {
         documentId: mcpDocumentId,
         baseRevision: mcpApplied.revision,
@@ -529,7 +539,10 @@ try {
         }).catch(() => undefined);
       }
       if (mcpDocumentId) {
-        await mcp('editor_hwpx_discard', { documentId: mcpDocumentId }).catch(() => undefined);
+        await mcp('editor_hwpx_discard', {
+          documentId: mcpDocumentId,
+          baseRevision: mcpRevision,
+        }).catch(() => undefined);
       }
       await discard(reopenedDocumentId).catch(() => undefined);
       await discard(sourceDocumentId).catch(() => undefined);
@@ -562,7 +575,7 @@ try {
     console.log(`${scenario.id} ${result.passed ? 'PASS' : 'FAIL'} ${totalScore} ${result.durationMs}ms${failures.length ? ` :: ${failures.join(' | ')}` : ''}`);
   }
 } finally {
-  for (const documentId of [...activeSessions]) {
+  for (const documentId of [...activeSessions.keys()]) {
     await discard(documentId).catch(() => undefined);
   }
   await close().catch(() => undefined);

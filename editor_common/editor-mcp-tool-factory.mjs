@@ -48,7 +48,10 @@ function createEditorMcpTools({
     {
       name: `${prefix}_discard`,
       description: `Close and discard an isolated ${label} edit session without saving or creating an artifact. Safe to call again after the session is already gone.`,
-      inputSchema: objectSchema({ documentId: documentIdProperty }, ['documentId']),
+      inputSchema: objectSchema({
+        documentId: documentIdProperty,
+        baseRevision: baseRevisionProperty,
+      }, ['documentId', 'baseRevision']),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     {
