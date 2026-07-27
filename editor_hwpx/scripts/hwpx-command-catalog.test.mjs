@@ -46,7 +46,7 @@ test('HWPX command catalog publishes every promoted DOCX parity operation', () =
   }
   assert.equal(
     getHwpxCommandCatalog({ op: 'text.replaceTracked' }).commands[0].capability,
-    'engine-required',
+    'available',
   );
   for (const op of promoted.filter((value) => value !== 'text.replaceTracked')) {
     assert.equal(

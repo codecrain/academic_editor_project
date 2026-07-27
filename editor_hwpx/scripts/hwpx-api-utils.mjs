@@ -28,6 +28,7 @@ import {
   validateHwpxCommands,
 } from './hwpx-command-catalog.mjs';
 import { applyHwpxStructuralCommand } from './hwpx-structural-commands.mjs';
+import { applyTrackedReplacement } from './hwpx-tracked-changes.mjs';
 import { crc32, createZip, readZip } from './hwpx-zip.mjs';
 
 export { createZip, readZip } from './hwpx-zip.mjs';
@@ -1226,6 +1227,7 @@ export class HwpxApiSession {
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
+    this.trackedChangePatches = [];
   }
 
   exportJson() {
@@ -1537,6 +1539,10 @@ export class HwpxApiSession {
       return [{ ...command, opId, op: 'replaceText', text }];
     }
 
+    if (key === 'textreplacetracked' || key === 'replacetracked') {
+      return [{ ...command, opId, op: 'replaceTracked', text }];
+    }
+
     if (key === 'listwritebullets' || key === 'listwrite' || key === 'listapplynumbering' || key === 'paragraphapplynumbering') {
       const listText = buildListText(command.items ?? command.content?.items ?? text, {
         ...command,
@@ -1673,6 +1679,34 @@ export class HwpxApiSession {
 
   commandsBatch(ops) {
     validateHwpxCommands(ops);
+    if (ops.some(op => resolveHwpxCommand(op)?.op === 'text.replaceTracked')) {
+      if (ops.length !== 1) {
+        const error = new Error(
+          'text.replaceTracked must be the only command in its batch until tracked-change-aware paragraph offsets are available.',
+        );
+        error.code = 'HWPX_TRACKED_CHANGE_BATCH_UNSUPPORTED';
+        throw error;
+      }
+      let workingBytes = Buffer.from(this.inputBytes);
+      const results = [];
+      for (const op of ops) {
+        const trial = new HwpxApiSession(workingBytes, { saveMode: this.saveMode });
+        const trialResult = trial.commandsBatchUnsafe([op]);
+        workingBytes = Buffer.from(trial.save().bytes);
+        results.push(...trialResult.results);
+      }
+      this.inputBytes = workingBytes;
+      this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
+      this.cellPatches = [];
+      this.paragraphPatches = [];
+      this.paragraphInsertPatches = [];
+      this.packagePatches = [];
+      this.shapePatches = [];
+      this.textBoxPatches = [];
+      this.trackedChangePatches = [];
+      this.revision += 1;
+      return { revision: this.revision, results };
+    }
     const classification = classifyHwpxCommands(ops);
     if (classification.mode === 'structural-export') {
       return this.commandsStructuralBatch(ops, classification);
@@ -1688,6 +1722,7 @@ export class HwpxApiSession {
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
+    this.trackedChangePatches = [];
     this.revision += 1;
     return { revision: this.revision, results: trialResult.results };
   }
@@ -1757,6 +1792,7 @@ export class HwpxApiSession {
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
+    this.trackedChangePatches = [];
     this.revision += 1;
     return {
       revision: this.revision,
@@ -1820,6 +1856,16 @@ export class HwpxApiSession {
           opId: op.opId,
         });
         results.push({ opId: op.opId, ok: true, action: 'text.replace' });
+      } else if (op.op === 'replaceTracked') {
+        replaceTextInBody(this.doc, op);
+        this.trackedChangePatches.push(op);
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'text.replaceTracked',
+          target: op.target,
+          author: op.author,
+        });
       } else if (op.op === 'layout.fitText') {
         const fit = this.fitText(op.location, op.text, op.options);
         results.push({ opId: op.opId, ok: true, changed: false, action: 'layout.fitText', fit });
@@ -2002,6 +2048,26 @@ export class HwpxApiSession {
       const reopened = new HwpDocument(new Uint8Array(saved));
       this.revision += 1;
       return { bytes: saved, revision: this.revision, validation: this.validationReport(reopened) };
+    }
+
+    if (this.trackedChangePatches.length) {
+      assert.equal(this.trackedChangePatches.length, 1, 'tracked changes are committed sequentially');
+      assert.equal(
+        this.cellPatches.length + this.paragraphPatches.length
+          + this.paragraphInsertPatches.length + this.packagePatches.length
+          + this.shapePatches.length + this.textBoxPatches.length,
+        0,
+        'tracked changes cannot share an unsafe save stage with other patch types',
+      );
+      const tracked = applyTrackedReplacement(this.inputBytes, this.trackedChangePatches[0]);
+      const reopened = new HwpDocument(new Uint8Array(tracked.bytes));
+      this.revision += 1;
+      return {
+        bytes: tracked.bytes,
+        revision: this.revision,
+        validation: this.validationReport(reopened),
+        trackedChange: tracked,
+      };
     }
 
     if (!this.cellPatches.length && !this.paragraphPatches.length && !this.paragraphInsertPatches.length && !this.packagePatches.length && !this.shapePatches.length && !this.textBoxPatches.length) {

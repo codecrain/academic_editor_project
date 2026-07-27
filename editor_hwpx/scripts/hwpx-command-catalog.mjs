@@ -76,8 +76,9 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Replace an inspected HWPX text range while preserving a native tracked-change record.',
     required: ['target', 'text', 'author'],
+    optional: ['date'],
     precondition: 'target_inspect',
-    capability: 'engine-required',
+    capability: 'available',
     fields: { target: locationField, text: 'Replacement text.', author: 'Tracked-change author name.' },
     example: {
       op: 'text.replaceTracked',
@@ -85,7 +86,10 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       text: '2026',
       author: '검토자',
     },
-    notes: ['Execution remains unavailable until the RHWP parser, model, and serializer preserve native tracked-change markup.'],
+    notes: [
+      'Native HWPX Delete/Insert markup is emitted only for a range contained in one hp:t run; unsupported cross-run ranges fail without mutation.',
+      'This operation must currently be the only command in its atomic batch because RHWP paragraph inspection does not yet collapse deleted tracked text.',
+    ],
   }),
   command({
     op: 'insertText',

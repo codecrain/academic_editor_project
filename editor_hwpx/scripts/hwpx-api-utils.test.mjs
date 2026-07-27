@@ -776,6 +776,70 @@ test('HWPX API text.replace survives preserve-package save and reopen', async ()
   );
 });
 
+test('HWPX API text.replaceTracked emits native Hancom revision markup and reopens', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/test-image.hwpx');
+  const source = new HwpxApiSession(input);
+  const candidates = source.readJson().sections[0].paragraphs
+    .filter(item => item.text.length >= 2);
+  let committed = null;
+  for (const paragraph of candidates) {
+    const trial = new HwpxApiSession(input);
+    try {
+      const result = trial.apply([{
+        op: 'text.replaceTracked',
+        target: {
+          native: {
+            section: 0,
+            para: paragraph.para,
+            offset: 0,
+            length: 2,
+          },
+        },
+        text: '추적수정',
+        author: '공공기관 검수자',
+        date: '2026-07-27T09:49:00Z',
+      }]);
+      committed = { result, bytes: trial.save().bytes };
+      break;
+    } catch (error) {
+      if (error.code !== 'HWPX_TRACKED_CHANGE_RANGE_UNSUPPORTED') throw error;
+    }
+  }
+  assert.ok(committed, 'fixture must expose at least one single-run tracked-change target');
+  assert.equal(committed.result.results[0].action, 'text.replaceTracked');
+  const entries = readZip(committed.bytes);
+  assert.match(entries.get('Contents/header.xml').toString('utf8'), /<hh:trackChange type="Insert"/);
+  assert.match(entries.get('Contents/header.xml').toString('utf8'), /<hh:trackChange type="Delete"/);
+  assert.match(entries.get('Contents/section0.xml').toString('utf8'), /<hp:deleteBegin\b/);
+  assert.match(entries.get('Contents/section0.xml').toString('utf8'), /<hp:insertBegin\b/);
+  assert.doesNotThrow(() => new HwpxApiSession(committed.bytes));
+});
+
+test('HWPX tracked-change mixed batches roll back when a later command fails', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/test-image.hwpx');
+  const session = new HwpxApiSession(input);
+  const paragraph = session.readJson().sections[0].paragraphs.find(item => item.text.length >= 2);
+  const beforeRevision = session.revision;
+
+  assert.throws(() => session.apply([
+    {
+      op: 'text.replaceTracked',
+      target: { native: { section: 0, para: paragraph.para, offset: 0, length: 1 } },
+      text: '추적',
+      author: '검수자',
+    },
+    {
+      op: 'text.replace',
+      target: { native: { section: 999, para: 0, offset: 0, length: 1 } },
+      text: '실패',
+    },
+  ]));
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(Buffer.compare(session.save().bytes, input), 0);
+});
+
 test('HWPX API paragraph replacement does not erase table cells in the same body paragraph', async () => {
   await initHwpxRuntime();
   const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
