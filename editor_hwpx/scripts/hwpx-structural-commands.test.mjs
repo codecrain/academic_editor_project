@@ -19,7 +19,9 @@ test('insertText resolves a paragraph target and returns a stable target', () =>
     op: 'insertText',
     target: { sectionIndex: 0, paragraphIndex: 2, offset: 4 },
     text: '확정',
-  });
+  }, { before: {
+    sections: [{ section: 0, paragraphs: [{ para: 2, text: '기존 문단' }] }],
+  } });
 
   assert.deepEqual(calls, [[0, 2, 4, '확정']]);
   assert.equal(result.changed, 1);
@@ -35,6 +37,7 @@ test('insertText resolves a paragraph target and returns a stable target', () =>
 test('deleteRange calls the five-argument RHWP range API', () => {
   const calls = [];
   const doc = {
+    getParagraphLength: () => 8,
     deleteRange: (...args) => {
       calls.push(args);
       return '{"ok":true,"paraIdx":3,"charOffset":2}';
@@ -132,6 +135,45 @@ test('resolveHwpxTextTarget accepts native range targets', () => {
   });
 });
 
+test('insertText rejects omitted offsets and values outside the RHWP u32 range', () => {
+  const calls = [];
+  const doc = { insertText: (...args) => calls.push(args) };
+  const invalidTargets = [
+    { sectionIndex: 0, paragraphIndex: 2 },
+    { sectionIndex: 2 ** 32, paragraphIndex: 0, offset: 0 },
+    { sectionIndex: 0, paragraphIndex: 2, offset: 2 ** 32 },
+  ];
+
+  for (const target of invalidTargets) {
+    assert.throws(
+      () => applyHwpxStructuralCommand(doc, {
+        op: 'insertText',
+        target,
+        text: '금지',
+      }),
+      error => error.code === 'HWPX_TARGET_INVALID',
+    );
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('deleteRange rejects offsets beyond the inspected paragraph before mutation', () => {
+  const calls = [];
+  const doc = { deleteRange: (...args) => calls.push(args) };
+  assert.throws(() => applyHwpxStructuralCommand(doc, {
+    op: 'deleteRange',
+    target: {
+      start: { sectionIndex: 0, paragraphIndex: 1, offset: 1 },
+      end: { sectionIndex: 0, paragraphIndex: 1, offset: 99 },
+    },
+  }, {
+    before: {
+      sections: [{ section: 0, paragraphs: [{ para: 1, text: '세글자' }] }],
+    },
+  }), error => error.code === 'HWPX_INVALID_RANGE');
+  assert.deepEqual(calls, []);
+});
+
 test('unsupported structural operations fail explicitly', () => {
   assert.throws(
     () => applyHwpxStructuralCommand({}, { op: 'unknown.structural' }),
@@ -153,8 +195,53 @@ test('native engine failures never become successful structural results', () => 
     assert.throws(
       () => applyHwpxStructuralCommand({
         insertText: () => nativeFailure,
-      }, command),
+      }, command, {
+        before: {
+          sections: [{ section: 0, paragraphs: [{ para: 0, text: '' }] }],
+        },
+      }),
       error => error.code === 'HWPX_ENGINE_RESULT_INVALID',
     );
   }
+});
+
+test('native results must be successful objects with required u32 fields', () => {
+  const command = {
+    op: 'insertText',
+    target: { sectionIndex: 0, paragraphIndex: 0, offset: 0 },
+    text: '검증',
+  };
+  const context = {
+    before: {
+      sections: [{ section: 0, paragraphs: [{ para: 0, text: '' }] }],
+    },
+  };
+  for (const invalidResult of [
+    [],
+    '{}',
+    '{"ok":true}',
+    '{"ok":true,"charOffset":-1}',
+    '{"ok":true,"charOffset":"2"}',
+  ]) {
+    assert.throws(
+      () => applyHwpxStructuralCommand({
+        insertText: () => invalidResult,
+      }, command, context),
+      error => error.code === 'HWPX_ENGINE_RESULT_INVALID',
+    );
+  }
+
+  const calls = [];
+  assert.throws(
+    () => applyHwpxStructuralCommand({
+      insertParagraph: () => '{"ok":true}',
+      insertText: (...args) => calls.push(args),
+    }, {
+      op: 'appendParagraph',
+      target: { sectionIndex: 0, paragraphIndex: 0 },
+      text: '후속 호출 금지',
+    }),
+    error => error.code === 'HWPX_ENGINE_RESULT_INVALID',
+  );
+  assert.deepEqual(calls, []);
 });

@@ -8,7 +8,7 @@ function structuralError(code, message, details = {}) {
 function nonNegativeInteger(value) {
   if (value === undefined || value === null || value === '') return null;
   const number = Number(value);
-  return Number.isInteger(number) && number >= 0 ? number : null;
+  return Number.isInteger(number) && number >= 0 && number <= 0xFFFF_FFFF ? number : null;
 }
 
 function firstInteger(...values) {
@@ -19,14 +19,19 @@ function firstInteger(...values) {
   return null;
 }
 
-function parseNativeResult(value, method) {
+function parseNativeResult(value, method, requiredU32Fields = []) {
   let parsed;
   try {
     parsed = value && typeof value === 'object'
       ? value
       : JSON.parse(String(value));
-    if (!parsed || typeof parsed !== 'object' || parsed.ok === false) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.ok !== true) {
       throw new Error('result is not successful');
+    }
+    for (const field of requiredU32Fields) {
+      if (typeof parsed[field] !== 'number' || nonNegativeInteger(parsed[field]) === null) {
+        throw new Error(`${field} is not a valid u32`);
+      }
     }
   } catch (cause) {
     throw structuralError(
@@ -49,7 +54,8 @@ function requireMethod(doc, method) {
   return doc[method].bind(doc);
 }
 
-function resolveHwpxTextTarget(value) {
+function resolveHwpxTextTarget(value, options = {}) {
+  const offsetRequired = options.offsetRequired !== false;
   const target = value?.target ?? value?.location ?? value ?? {};
   const native = target.native && typeof target.native === 'object' ? target.native : {};
   const paragraph = target.paragraph && typeof target.paragraph === 'object'
@@ -78,11 +84,10 @@ function resolveHwpxTextTarget(value) {
     target.charOffset,
     native.offset,
     native.charOffset,
-    0,
   );
   const length = firstInteger(target.length, native.length);
 
-  if (sectionIndex === null || paragraphIndex === null || offset === null) {
+  if (sectionIndex === null || paragraphIndex === null || (offsetRequired && offset === null)) {
     throw structuralError(
       'HWPX_TARGET_INVALID',
       'The HWPX text target must identify sectionIndex, paragraphIndex, and a nonnegative offset.',
@@ -92,9 +97,38 @@ function resolveHwpxTextTarget(value) {
   return {
     sectionIndex,
     paragraphIndex,
-    offset,
+    offset: offset ?? 0,
     ...(length === null ? {} : { length }),
   };
+}
+
+function inspectedParagraphLength(doc, context, target) {
+  if (typeof doc?.getParagraphLength === 'function') {
+    const length = doc.getParagraphLength(target.sectionIndex, target.paragraphIndex);
+    const normalized = nonNegativeInteger(length);
+    if (normalized !== null) return normalized;
+  }
+
+  const sections = context?.before?.sections;
+  if (Array.isArray(sections)) {
+    const section = sections.find(item =>
+      firstInteger(item?.section, item?.sectionIndex) === target.sectionIndex);
+    const paragraphs = section?.paragraphs;
+    if (Array.isArray(paragraphs)) {
+      const paragraph = paragraphs.find(item =>
+        firstInteger(item?.para, item?.paragraph, item?.paragraphIndex, item?.number)
+          === target.paragraphIndex);
+      if (typeof paragraph?.text === 'string') return [...paragraph.text].length;
+      const length = firstInteger(paragraph?.textLength, paragraph?.length);
+      if (length !== null) return length;
+    }
+  }
+
+  throw structuralError(
+    'HWPX_RANGE_INSPECTION_REQUIRED',
+    'A verified paragraph length is required before applying a text range operation.',
+    { target },
+  );
 }
 
 function publicParagraphTarget(sectionIndex, paragraphIndex, offset = 0) {
@@ -116,23 +150,30 @@ function structuralResult(command, native, target, createdTargets = []) {
   };
 }
 
-function applyInsertText(doc, command) {
+function applyInsertText(doc, command, context) {
   if (typeof command.text !== 'string' || command.text.length === 0) {
     throw structuralError('HWPX_TEXT_REQUIRED', 'insertText requires a nonempty text string.');
   }
   const target = resolveHwpxTextTarget(command);
+  const paragraphLength = inspectedParagraphLength(doc, context, target);
+  if (target.offset > paragraphLength) {
+    throw structuralError(
+      'HWPX_TARGET_INVALID',
+      'insertText offset exceeds the inspected HWPX paragraph length.',
+      { target, paragraphLength },
+    );
+  }
   const insertText = requireMethod(doc, 'insertText');
   const native = parseNativeResult(insertText(
     target.sectionIndex,
     target.paragraphIndex,
     target.offset,
     command.text,
-  ), 'insertText');
-  const newOffset = firstInteger(native.charOffset, target.offset + [...command.text].length);
+  ), 'insertText', ['charOffset']);
   return structuralResult(
     command,
     native,
-    publicParagraphTarget(target.sectionIndex, target.paragraphIndex, newOffset),
+    publicParagraphTarget(target.sectionIndex, target.paragraphIndex, native.charOffset),
   );
 }
 
@@ -159,7 +200,7 @@ function resolveDeleteRange(command) {
   };
 }
 
-function applyDeleteRange(doc, command) {
+function applyDeleteRange(doc, command, context) {
   const { start, end } = resolveDeleteRange(command);
   const sameParagraph = start.sectionIndex === end.sectionIndex
     && start.paragraphIndex === end.paragraphIndex;
@@ -170,6 +211,14 @@ function applyDeleteRange(doc, command) {
       { start, end },
     );
   }
+  const paragraphLength = inspectedParagraphLength(doc, context, start);
+  if (start.offset > paragraphLength || end.offset > paragraphLength) {
+    throw structuralError(
+      'HWPX_INVALID_RANGE',
+      'deleteRange exceeds the inspected HWPX paragraph length.',
+      { start, end, paragraphLength },
+    );
+  }
 
   const deleteRange = requireMethod(doc, 'deleteRange');
   const native = parseNativeResult(deleteRange(
@@ -178,13 +227,11 @@ function applyDeleteRange(doc, command) {
     start.offset,
     end.paragraphIndex,
     end.offset,
-  ), 'deleteRange');
-  const paragraphIndex = firstInteger(native.paraIdx, start.paragraphIndex);
-  const offset = firstInteger(native.charOffset, start.offset);
+  ), 'deleteRange', ['paraIdx', 'charOffset']);
   return structuralResult(
     command,
     native,
-    publicParagraphTarget(start.sectionIndex, paragraphIndex, offset),
+    publicParagraphTarget(start.sectionIndex, native.paraIdx, native.charOffset),
   );
 }
 
@@ -192,20 +239,21 @@ function applyAppendParagraph(doc, command) {
   if (typeof command.text !== 'string') {
     throw structuralError('HWPX_TEXT_REQUIRED', 'appendParagraph requires a text string.');
   }
-  const target = resolveHwpxTextTarget(command);
+  const target = resolveHwpxTextTarget(command, { offsetRequired: false });
   const insertParagraph = requireMethod(doc, 'insertParagraph');
   const insertText = requireMethod(doc, 'insertText');
   const requestedParagraphIndex = target.paragraphIndex + 1;
   const paragraphNative = parseNativeResult(
     insertParagraph(target.sectionIndex, requestedParagraphIndex),
     'insertParagraph',
+    ['paraIdx'],
   );
-  const paragraphIndex = firstInteger(paragraphNative.paraIdx, requestedParagraphIndex);
+  const paragraphIndex = paragraphNative.paraIdx;
   const textNative = parseNativeResult(
     insertText(target.sectionIndex, paragraphIndex, 0, command.text),
     'insertText',
+    ['charOffset'],
   );
-  const offset = firstInteger(textNative.charOffset, [...command.text].length);
   const createdTarget = {
     kind: 'paragraph',
     sectionIndex: target.sectionIndex,
@@ -214,17 +262,17 @@ function applyAppendParagraph(doc, command) {
   return structuralResult(
     command,
     { paragraph: paragraphNative, text: textNative },
-    { ...createdTarget, offset },
+    { ...createdTarget, offset: textNative.charOffset },
     [createdTarget],
   );
 }
 
-function applyHwpxStructuralCommand(doc, command, _context = {}) {
+function applyHwpxStructuralCommand(doc, command, context = {}) {
   switch (command?.op) {
     case 'insertText':
-      return applyInsertText(doc, command);
+      return applyInsertText(doc, command, context);
     case 'deleteRange':
-      return applyDeleteRange(doc, command);
+      return applyDeleteRange(doc, command, context);
     case 'appendParagraph':
       return applyAppendParagraph(doc, command);
     default:
