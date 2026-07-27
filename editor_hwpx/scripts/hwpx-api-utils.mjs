@@ -1040,7 +1040,36 @@ function structuralBatchError(code, message, details = {}) {
   return error;
 }
 
-function verifyStructuralTarget(session, target, result = null) {
+function verifyExpectedRunStyle(target, result, propertiesAt) {
+  if (!result?.expectedRunStyle || !result?.expectedRunRange) return;
+  const expected = result.expectedRunStyle;
+  const range = result.expectedRunRange;
+  const offsets = [...new Set([range.start, Math.max(range.start, range.end - 1)])];
+  const aliases = {
+    fontSizePt: ['fontSize', value => Number(value) * 100],
+  };
+  for (const offset of offsets) {
+    const properties = tryJson(() => propertiesAt(offset));
+    for (const [field, expectedValue] of Object.entries(expected)) {
+      const [actualField, transform] = aliases[field] ?? [field, value => value];
+      if (!properties || properties[actualField] !== transform(expectedValue)) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'Structural run formatting did not survive reopening exactly.',
+          {
+            target,
+            offset,
+            field,
+            expected: transform(expectedValue),
+            actual: properties?.[actualField],
+          },
+        );
+      }
+    }
+  }
+}
+
+export function verifyStructuralTarget(session, target, result = null) {
   if (!target || typeof target !== 'object') return;
   if (target.kind === 'paragraph') {
     const sectionCount = session.doc.getSectionCount();
@@ -1106,37 +1135,11 @@ function verifyStructuralTarget(session, target, result = null) {
         );
       }
     }
-    if (result?.expectedRunStyle && result?.expectedRunRange) {
-      const expected = result.expectedRunStyle;
-      const range = result.expectedRunRange;
-      const offsets = [...new Set([range.start, Math.max(range.start, range.end - 1)])];
-      const aliases = {
-        fontSizePt: ['fontSize', value => Number(value) * 100],
-      };
-      for (const offset of offsets) {
-        const properties = tryJson(() => session.doc.getCharPropertiesAt(
-          target.sectionIndex,
-          target.paragraphIndex,
-          offset,
-        ));
-        for (const [field, expectedValue] of Object.entries(expected)) {
-          const [actualField, transform] = aliases[field] ?? [field, value => value];
-          if (!properties || properties[actualField] !== transform(expectedValue)) {
-            throw structuralBatchError(
-              'HWPX_CREATED_TARGET_MISMATCH',
-              'Structural run formatting did not survive reopening exactly.',
-              {
-                target,
-                offset,
-                field,
-                expected: transform(expectedValue),
-                actual: properties?.[actualField],
-              },
-            );
-          }
-        }
-      }
-    }
+    verifyExpectedRunStyle(target, result, offset => session.doc.getCharPropertiesAt(
+      target.sectionIndex,
+      target.paragraphIndex,
+      offset,
+    ));
     return;
   }
   if (target.kind === 'table' || target.kind === 'tableCaption') {
@@ -1293,6 +1296,14 @@ function verifyStructuralTarget(session, target, result = null) {
         { target, paragraphCount },
       );
     }
+    verifyExpectedRunStyle(target, result, offset => session.doc.getCellCharPropertiesAt(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+      offset,
+    ));
     return;
   }
   if (target.kind === 'documentMetadata') {

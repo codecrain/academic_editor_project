@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -11,11 +12,13 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import {
+import * as runtimeReadiness from './hwpx-runtime-readiness.mjs';
+
+const {
   CORE_ARTIFACT_FILES,
   materializeCoreArtifact,
   validateCoreArtifact,
-} from './hwpx-runtime-readiness.mjs';
+} = runtimeReadiness;
 
 function artifactFixture(root, {
   name = '@rhwp/core',
@@ -203,6 +206,65 @@ test('failed staging copy leaves an existing destination byte-for-byte unchanged
   }
 });
 
+test('staging cleanup failure cannot mask a swap failure or prevent backup restoration', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-cleanup-rollback-'));
+  const source = path.join(root, 'source');
+  const destination = path.join(root, 'destination');
+  const methods = [
+    'insertText',
+    'insertParagraph',
+    'deleteRange',
+    'createTableEx',
+    'getCellProperties',
+    'resizeTableCells',
+    'insertTextInCell',
+    'setTableProperties',
+    'insertPicture',
+    'setPageDef',
+    'createStyle',
+    'updateStyleShapes',
+    'applyStyle',
+    'applyCellStyle',
+    'applyCharFormat',
+    'applyCharFormatInCell',
+    'applyParaFormat',
+    'applyParaFormatInCell',
+    'findOrCreateFontId',
+  ];
+  artifactFixture(source, { methods, marker: 'new-staging' });
+  artifactFixture(destination, { methods: ['existingMethod'], marker: 'old-destination' });
+  const before = new Map(CORE_ARTIFACT_FILES.map(fileName => [
+    fileName,
+    readFileSync(path.join(destination, fileName)),
+  ]));
+  const primaryFailure = Object.freeze(new Error('simulated destination swap failure'));
+  let renameCalls = 0;
+  let thrown;
+
+  try {
+    assert.throws(() => materializeCoreArtifact(source, destination, {
+      renameArtifact: (from, to) => {
+        renameCalls += 1;
+        if (renameCalls === 2) throw primaryFailure;
+        renameSync(from, to);
+      },
+      removeStaging: () => {
+        throw new Error('simulated staging cleanup failure');
+      },
+    }), error => {
+      thrown = error;
+      return error === primaryFailure;
+    });
+    assert.equal(thrown, primaryFailure);
+    for (const [fileName, bytes] of before) {
+      assert.deepEqual(readFileSync(path.join(destination, fileName)), bytes);
+    }
+    assert.equal(renameCalls, 3, 'destination move, failed swap, then backup restore');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('backup cleanup failure returns committed success with an explicit warning', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-cleanup-warning-'));
   const source = path.join(root, 'source');
@@ -248,6 +310,18 @@ test('backup cleanup failure returns committed success with an explicit warning'
   for (const warning of result.cleanupWarnings) {
     if (warning.backupPath) rmSync(warning.backupPath, { recursive: true, force: true });
   }
+});
+
+test('cleanup warnings format artifact backup evidence for startup logs', () => {
+  assert.deepEqual(runtimeReadiness.formatCoreCleanupWarnings({
+    cleanupWarnings: [{
+      code: 'HWPX_CORE_BACKUP_CLEANUP_FAILED',
+      message: 'access denied',
+      backupPath: 'C:\\runtime\\.core.backup-123',
+    }],
+  }), [
+    '[rhwp] warning: HWPX_CORE_BACKUP_CLEANUP_FAILED: access denied; backup=C:\\runtime\\.core.backup-123',
+  ]);
 });
 
 test('installed dependency is ready for every available operation and metadata remains unavailable', () => {

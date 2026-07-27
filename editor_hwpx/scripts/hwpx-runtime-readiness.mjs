@@ -133,6 +133,8 @@ function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
   let destinationMoved = false;
   let committed = false;
   const copyArtifact = options.copyArtifact ?? cpSync;
+  const renameArtifact = options.renameArtifact ?? renameSync;
+  const removeStaging = options.removeStaging ?? rmSync;
   const removeBackup = options.removeBackup ?? rmSync;
   const cleanupWarnings = [];
 
@@ -141,15 +143,36 @@ function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
     copyArtifact(source, staging, { recursive: true, errorOnExist: true });
     validateCoreArtifact(staging, options);
     if (existsSync(destination)) {
-      renameSync(destination, backup);
+      renameArtifact(destination, backup);
       destinationMoved = true;
     }
-    renameSync(staging, destination);
+    renameArtifact(staging, destination);
     committed = true;
   } catch (cause) {
-    rmSync(staging, { recursive: true, force: true });
+    const recoveryErrors = [];
     if (destinationMoved && !committed && !existsSync(destination) && existsSync(backup)) {
-      renameSync(backup, destination);
+      try {
+        renameArtifact(backup, destination);
+      } catch (recoveryCause) {
+        recoveryErrors.push({
+          phase: 'backup-restore',
+          message: recoveryCause.message,
+        });
+      }
+    }
+    try {
+      removeStaging(staging, { recursive: true, force: true });
+    } catch (recoveryCause) {
+      recoveryErrors.push({
+        phase: 'staging-cleanup',
+        message: recoveryCause.message,
+      });
+    }
+    if (recoveryErrors.length > 0
+      && cause !== null
+      && (typeof cause === 'object' || typeof cause === 'function')
+      && Object.isExtensible(cause)) {
+      cause.recoveryErrors = recoveryErrors;
     }
     throw cause;
   }
@@ -171,10 +194,16 @@ function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
   };
 }
 
+function formatCoreCleanupWarnings(result) {
+  return (result?.cleanupWarnings ?? []).map(warning =>
+    `[rhwp] warning: ${warning.code}: ${warning.message}; backup=${warning.backupPath}`);
+}
+
 export {
   CORE_ARTIFACT_FILES,
   declaredDocumentMethods,
   executableDocumentMethods,
+  formatCoreCleanupWarnings,
   materializeCoreArtifact,
   readyNativeRequirements,
   validateCoreArtifact,

@@ -14,9 +14,12 @@ The implementation is intentionally split:
   reopen validation.
 - `editor_hwpx/scripts/hwpx-command-catalog.mjs` owns the machine-readable
   public command contract.
-- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs` verifies that the installed
-  RHWP artifact exposes every native method required by a ready command before
-  Studio materializes that artifact.
+- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs` statically verifies that the
+  installed RHWP artifact declares every native method required by a ready
+  command in `rhwp.d.ts` and exposes the matching method on the executable
+  `rhwp.js` wrapper before Studio materializes that artifact. This check does
+  not initialize WASM, introspect live WASM exports, or prove command
+  semantics.
 - `editor_docx/scripts/editor-gateway.mjs` exposes `/v1/hwpx`.
 - `editor_docx/scripts/editor-mcp.mjs` exposes the `editor_hwpx_*` MCP tools.
 - `evaluation/hwpx-public-sector-v1` owns high-difficulty acceptance data and
@@ -112,6 +115,12 @@ footnote insertion traps on the supported blank-document fixture. Validation
 rejects all five operations before mutation. `table.create` remains ready
 without its former caption option; passing `caption` is rejected before
 mutation.
+
+The static declaration/wrapper check is only the first readiness gate. A
+command is included in the current 27-ready set only when installed-artifact
+tests also exercise its applicable command path and require package
+qualification, export, reopen, and operation-specific postconditions. Method
+presence in `rhwp.d.ts` or `rhwp.js` alone never promotes a command.
 
 Query `editor_hwpx_command_catalog` or
 `POST /v1/hwpx/documents/{documentId}/commands/catalog` before applying a new

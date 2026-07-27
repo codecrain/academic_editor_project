@@ -3,7 +3,10 @@ import { cpSync, existsSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { materializeCoreArtifact } from './hwpx-runtime-readiness.mjs';
+import {
+  formatCoreCleanupWarnings,
+  materializeCoreArtifact,
+} from './hwpx-runtime-readiness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(__dirname, '..');
@@ -120,6 +123,9 @@ function assertUpstreamPresent() {
 assertUpstreamPresent();
 ensureNpmInstall(sourceRoot, 'wrapper');
 const coreReadiness = copyCoreWasmPackage();
+for (const warning of formatCoreCleanupWarnings(coreReadiness)) {
+  console.warn(warning);
+}
 ensureNpmInstall(studioRoot, 'rhwp-studio');
 ensureStudioFonts();
 

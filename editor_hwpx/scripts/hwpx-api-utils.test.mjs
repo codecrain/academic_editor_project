@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { HwpxApiSession, initHwpxRuntime, readZip } from './hwpx-api-utils.mjs';
+import * as hwpxApiUtils from './hwpx-api-utils.mjs';
+
+const {
+  HwpxApiSession,
+  initHwpxRuntime,
+  readZip,
+} = hwpxApiUtils;
 
 const ESG_FIXTURE_PATH = 'editor_hwpx/samples/api-fixtures/esg-original.hwpx';
 const PUBLIC_BRIEFING_FIXTURE_PATH = 'evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-briefing.hwpx';
@@ -741,6 +747,71 @@ test('HWPX API rejects setRunStyle before revision when installed export cannot 
   }]), /not ready in the installed runtime/);
   assert.equal(session.revision, beforeRevision);
   assert.equal(Buffer.compare(session.save().bytes, beforeBytes), 0);
+});
+
+test('future setRunStyle verifier checks both paragraph range boundaries after reopen', () => {
+  const calls = [];
+  const session = {
+    doc: {
+      getSectionCount: () => 1,
+      getParagraphCount: () => 1,
+      getCharPropertiesAt: (...args) => {
+        calls.push(args);
+        return JSON.stringify({ bold: args[2] === 1 });
+      },
+    },
+  };
+
+  assert.throws(
+    () => hwpxApiUtils.verifyStructuralTarget(
+      session,
+      { kind: 'paragraph', sectionIndex: 0, paragraphIndex: 0 },
+      {
+        expectedRunStyle: { bold: true },
+        expectedRunRange: { start: 1, end: 4 },
+      },
+    ),
+    error => error?.code === 'HWPX_CREATED_TARGET_MISMATCH'
+      && error.details?.offset === 3,
+  );
+  assert.deepEqual(calls, [[0, 0, 1], [0, 0, 3]]);
+});
+
+test('future setRunStyle verifier checks both inspected table-cell range boundaries after reopen', () => {
+  const calls = [];
+  const session = {
+    doc: {
+      getCellParagraphCount: () => 1,
+      getCellCharPropertiesAt: (...args) => {
+        calls.push(args);
+        return JSON.stringify({ italic: args[5] === 2 });
+      },
+    },
+  };
+
+  assert.throws(
+    () => hwpxApiUtils.verifyStructuralTarget(
+      session,
+      {
+        kind: 'cell',
+        sectionIndex: 0,
+        paragraphIndex: 2,
+        controlIndex: 1,
+        cellIndex: 3,
+        cellParagraphIndex: 0,
+      },
+      {
+        expectedRunStyle: { italic: true },
+        expectedRunRange: { start: 2, end: 6 },
+      },
+    ),
+    error => error?.code === 'HWPX_CREATED_TARGET_MISMATCH'
+      && error.details?.offset === 5,
+  );
+  assert.deepEqual(calls, [
+    [0, 2, 1, 3, 0, 2],
+    [0, 2, 1, 3, 0, 5],
+  ]);
 });
 
 test('HWPX API appendParagraph clones inspected style and text through qualification and reopen', async () => {

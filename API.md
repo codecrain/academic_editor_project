@@ -641,6 +641,13 @@ describes their execution path, not a missing implementation.
 can clone inspected paragraph and run style IDs exactly while still passing
 package qualification and reopen verification.
 
+Runtime artifact validation statically compares the `HwpDocument` method
+surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
+initialize WASM or introspect live WASM exports, so method presence is not
+semantic readiness. The 27-ready set is additionally gated by pinned
+installed-artifact command tests that require the applicable mutation,
+package qualification, export, reopen, and operation-specific postconditions.
+
 ## Text Commands
 
 Replace one paragraph:
