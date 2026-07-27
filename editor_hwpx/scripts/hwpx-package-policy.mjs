@@ -40,6 +40,32 @@ const STRUCTURAL_ENTRY_PATTERNS = [
   /^Preview\//i,
 ];
 
+const PROTECTED_XML_OBJECTS = new Set([
+  'p',
+  'tbl',
+  'pic',
+  'ole',
+  'chart',
+  'video',
+  'container',
+  'rect',
+  'ellipse',
+  'arc',
+  'polygon',
+  'curve',
+  'line',
+  'connectline',
+  'group',
+  'equation',
+  'footnote',
+  'endnote',
+  'header',
+  'footer',
+  'fieldbegin',
+  'fieldend',
+  'bookmark',
+]);
+
 class HwpxPackagePolicyError extends Error {
   constructor(code, message, details = {}) {
     super(message);
@@ -188,6 +214,28 @@ function canonicalMediaType(value) {
   return mediaType;
 }
 
+function inspectStructuralReferences(entries) {
+  const objectCounts = {};
+  const binaryReferenceCounts = {};
+  const xmlEntries = [...entries]
+    .filter(([name]) =>
+      /^Contents\/(?:header|section\d+|masterpage\d+)\.xml$/i.test(name));
+  for (const [, bytes] of xmlEntries) {
+    const xml = bytes.toString('utf8');
+    for (const match of xml.matchAll(/<(?:[\w.-]+:)?([A-Za-z][\w.-]*)\b/g)) {
+      const localName = match[1].toLowerCase();
+      if (PROTECTED_XML_OBJECTS.has(localName)) {
+        objectCounts[localName] = (objectCounts[localName] ?? 0) + 1;
+      }
+    }
+    for (const match of xml.matchAll(/\b(?:binItemIDRef|binaryItemIDRef)="([^"]+)"/gi)) {
+      const reference = match[1];
+      binaryReferenceCounts[reference] = (binaryReferenceCounts[reference] ?? 0) + 1;
+    }
+  }
+  return { objectCounts, binaryReferenceCounts };
+}
+
 export function classifyHwpxCommands(commands) {
   if (!Array.isArray(commands)) {
     throw policyError('HWPX_COMMAND_BATCH_INVALID', 'commands must be an array.');
@@ -220,11 +268,13 @@ export function inspectHwpxPackage(bytes) {
     inventoryEntries.map(entry => [entry.name, entry]),
   );
   const contentXml = entries.get('Contents/content.hpf')?.toString('utf8') ?? '';
+  const structuralReferences = inspectStructuralReferences(entries);
   return {
     entries: inventoryEntries,
     entriesByName,
     manifestItems: parseContentManifest(contentXml),
     mimetype: entries.get('mimetype')?.toString('ascii') ?? null,
+    structuralReferences,
   };
 }
 
@@ -316,6 +366,41 @@ export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
       'HWPX_PACKAGE_MANIFEST_DANGLING',
       'The candidate content manifest references missing embedded entries.',
       { entries: danglingManifest },
+    );
+  }
+
+  const lostObjectReferences = [];
+  for (const [kind, sourceCount] of Object.entries(
+    source.structuralReferences.objectCounts,
+  )) {
+    const candidateCount = candidate.structuralReferences.objectCounts[kind] ?? 0;
+    if (candidateCount < sourceCount) {
+      lostObjectReferences.push({
+        kind,
+        source: sourceCount,
+        candidate: candidateCount,
+      });
+    }
+  }
+  for (const [reference, sourceCount] of Object.entries(
+    source.structuralReferences.binaryReferenceCounts,
+  )) {
+    const candidateCount =
+      candidate.structuralReferences.binaryReferenceCounts[reference] ?? 0;
+    if (candidateCount < sourceCount) {
+      lostObjectReferences.push({
+        kind: 'binary-reference',
+        reference,
+        source: sourceCount,
+        candidate: candidateCount,
+      });
+    }
+  }
+  if (lostObjectReferences.length > 0) {
+    throw policyError(
+      'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS',
+      'The candidate lost structural XML objects or embedded binary references.',
+      { objects: lostObjectReferences },
     );
   }
 

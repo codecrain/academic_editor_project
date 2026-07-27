@@ -153,6 +153,28 @@ test('qualification rejects embedded object loss and caller-forged deltas', () =
     }),
     error => error.code === 'HWPX_PACKAGE_ENTRY_LOSS',
   );
+
+  const referencedSourceEntries = readZip(packageBytes([
+    ['BinData/image1.png', Buffer.from('same-image')],
+  ], [
+    { id: 'image1', href: 'BinData/image1.png', mediaType: 'image/png' },
+  ]));
+  referencedSourceEntries.set('Contents/section0.xml', Buffer.from(
+    '<hs:sec xmlns:hs="urn:test" xmlns:hp="urn:shape"><hp:pic><hp:img binItemIDRef="image1"/></hp:pic><hp:pic><hp:img binItemIDRef="image1"/></hp:pic></hs:sec>',
+  ));
+  const referencedCandidateEntries = new Map(referencedSourceEntries);
+  referencedCandidateEntries.set('Contents/section0.xml', Buffer.from(
+    '<hs:sec xmlns:hs="urn:test" xmlns:hp="urn:shape"><hp:pic><hp:img binItemIDRef="image1"/></hp:pic></hs:sec>',
+  ));
+  assert.throws(
+    () => qualifyHwpxCandidate(
+      createZip([...referencedSourceEntries]),
+      createZip([...referencedCandidateEntries]),
+    ),
+    error => error.code === 'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS'
+      && error.details.objects.some(item =>
+        item.kind === 'pic' && item.source === 2 && item.candidate === 1),
+  );
 });
 
 test('qualification rejects required entry loss, media-type drift, and undeclared collisions', () => {
