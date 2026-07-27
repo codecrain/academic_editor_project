@@ -647,25 +647,81 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
   const session = new HwpxApiSession(input);
-  const result = session.commandsBatch([{
-    commandId: 'actual-table',
-    op: 'table.create',
-    target: { paragraph: { section: 0, number: 0 } },
-    rows: 2,
-    columns: 2,
-    width: 12_000,
-    height: 6_000,
-    cellTexts: ['A', 'B', 'C', 'D'],
-    caption: 'Actual table',
-  }]);
+  const result = session.commandsBatch([
+    {
+      commandId: 'actual-table',
+      op: 'table.create',
+      target: { paragraph: { section: 0, number: 0 } },
+      rows: 2,
+      columns: 2,
+      width: 12_000,
+      height: 6_000,
+      cellTexts: ['A', 'B', 'C', 'D'],
+      caption: 'Actual table',
+    },
+    {
+      commandId: 'actual-cell-style',
+      op: 'applyStyle',
+      target: {
+        sectionIndex: 0,
+        paragraphIndex: 1,
+        controlIndex: 0,
+        cellIndex: 0,
+        cellParagraphIndex: 0,
+      },
+      styleId: 0,
+    },
+  ]);
 
   assert.equal(result.qualification.ok, true);
   assert.equal(result.results[0].target.kind, 'table');
+  assert.equal(result.results[1].target.kind, 'cell');
   const reopened = new HwpxApiSession(session.save().bytes);
   const table = reopened.readJson().tables.find(item =>
     item.dims.rowCount === 2 && item.dims.colCount === 2);
   assert.ok(table);
   assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
+});
+
+test('HWPX API reopens and verifies every non-text structural target kind', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const commands = [
+    {
+      op: 'setPageSetup',
+      sectionIndex: 0,
+      width: 59_528,
+      height: 84_189,
+      orientation: 'portrait',
+      margins: { top: 5_669, right: 5_669, bottom: 5_669, left: 5_669 },
+    },
+    {
+      op: 'setHeaderFooter',
+      target: { sectionIndex: 0 },
+      type: 'footer',
+      applyTo: 'both',
+      text: 'Atomic footer',
+      align: 'center',
+    },
+    {
+      op: 'insertFootnote',
+      target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+      text: 'Atomic footnote',
+    },
+    {
+      op: 'defineStyle',
+      name: 'Atomic Style',
+      kind: 'paragraph',
+      properties: { bold: true, align: 'center' },
+    },
+  ];
+
+  for (const command of commands) {
+    const session = new HwpxApiSession(input);
+    const result = session.commandsBatch([command]);
+    assert.equal(result.qualification.ok, true, command.op);
+    assert.equal(result.results.length, 1, command.op);
+  }
 });
 
 test('HWPX API public-sector structural export preserves objects or rolls back atomically', async () => {

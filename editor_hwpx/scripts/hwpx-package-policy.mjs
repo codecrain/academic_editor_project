@@ -43,6 +43,8 @@ const STRUCTURAL_ENTRY_PATTERNS = [
 const PROTECTED_XML_OBJECTS = new Set([
   'p',
   'tbl',
+  'tr',
+  'tc',
   'pic',
   'ole',
   'chart',

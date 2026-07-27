@@ -175,6 +175,24 @@ test('qualification rejects embedded object loss and caller-forged deltas', () =
       && error.details.objects.some(item =>
         item.kind === 'pic' && item.source === 2 && item.candidate === 1),
   );
+
+  const tableSourceEntries = readZip(packageBytes());
+  tableSourceEntries.set('Contents/section0.xml', Buffer.from(
+    '<hs:sec xmlns:hs="urn:test" xmlns:hp="urn:shape"><hp:tbl><hp:tr><hp:tc><hp:p/></hp:tc><hp:tc><hp:p/></hp:tc></hp:tr></hp:tbl><hp:p/></hs:sec>',
+  ));
+  const tableCandidateEntries = new Map(tableSourceEntries);
+  tableCandidateEntries.set('Contents/section0.xml', Buffer.from(
+    '<hs:sec xmlns:hs="urn:test" xmlns:hp="urn:shape"><hp:tbl><hp:tr><hp:tc><hp:p/></hp:tc></hp:tr></hp:tbl><hp:p/><hp:p/></hs:sec>',
+  ));
+  assert.throws(
+    () => qualifyHwpxCandidate(
+      createZip([...tableSourceEntries]),
+      createZip([...tableCandidateEntries]),
+    ),
+    error => error.code === 'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS'
+      && error.details.objects.some(item =>
+        item.kind === 'tc' && item.source === 2 && item.candidate === 1),
+  );
 });
 
 test('qualification rejects required entry loss, media-type drift, and undeclared collisions', () => {

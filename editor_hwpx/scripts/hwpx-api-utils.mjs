@@ -1032,7 +1032,7 @@ function structuralBatchError(code, message, details = {}) {
   return error;
 }
 
-function verifyStructuralTarget(session, target) {
+function verifyStructuralTarget(session, target, result = null) {
   if (!target || typeof target !== 'object') return;
   if (target.kind === 'paragraph') {
     const sectionCount = session.doc.getSectionCount();
@@ -1073,7 +1073,102 @@ function verifyStructuralTarget(session, target) {
         { target },
       );
     }
+    return;
   }
+  if (target.kind === 'section') {
+    const pageDef = tryJson(() => session.doc.getPageDef(target.sectionIndex));
+    if (!pageDef) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural section target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'headerFooter') {
+    const applyTo = { both: 0, even: 1, odd: 2 }[target.applyTo];
+    const headerFooter = tryJson(() => session.doc.getHeaderFooter(
+      target.sectionIndex,
+      target.type === 'header',
+      applyTo,
+    ));
+    if (!headerFooter || headerFooter.exists !== true) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural header or footer target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'footnote') {
+    const footnote = tryJson(() => session.doc.getFootnoteInfo(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+    ));
+    if (!footnote) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural footnote target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'style') {
+    const style = tryJson(() => session.doc.getStyleDetail(target.styleId));
+    if (!style) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural named style was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'cell') {
+    let paragraphCount = null;
+    try {
+      paragraphCount = session.doc.getCellParagraphCount(
+        target.sectionIndex,
+        target.paragraphIndex,
+        target.controlIndex,
+        target.cellIndex,
+      );
+    } catch {
+      paragraphCount = null;
+    }
+    if (!Number.isInteger(paragraphCount)
+      || target.cellParagraphIndex >= paragraphCount) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural table-cell target was not found after reopening the candidate.',
+        { target, paragraphCount },
+      );
+    }
+    return;
+  }
+  if (target.kind === 'documentMetadata') {
+    const metadata = tryJson(() => session.doc.getDocumentMetadata());
+    const expected = result?.native?.metadata;
+    const mismatch = !metadata || !expected || Object.entries(expected)
+      .some(([key, value]) => metadata[key] !== value);
+    if (mismatch) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'Structural document metadata did not survive reopening the candidate.',
+        { target, expected, metadata },
+      );
+    }
+    return;
+  }
+  throw structuralBatchError(
+    'HWPX_TARGET_VERIFICATION_UNSUPPORTED',
+    'The structural candidate returned a target kind without a reopen verifier.',
+    { target },
+  );
 }
 
 function verifyStructuralCommit(session, results) {
@@ -1094,9 +1189,9 @@ function verifyStructuralCommit(session, results) {
     );
   }
   for (const result of results) {
-    verifyStructuralTarget(session, result.target);
+    verifyStructuralTarget(session, result.target, result);
     for (const target of result.createdTargets ?? []) {
-      verifyStructuralTarget(session, target);
+      verifyStructuralTarget(session, target, result);
     }
   }
 }
