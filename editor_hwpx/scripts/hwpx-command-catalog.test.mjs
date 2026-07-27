@@ -64,15 +64,45 @@ test('HWPX promoted contracts expose optional fields and enforced enums', () => 
   assert.deepEqual(pageSetup.enum.orientation, ['portrait', 'landscape']);
 
   const headerFooter = getHwpxCommandCatalog({ op: 'setHeaderFooter' }).commands[0];
+  assert.ok(headerFooter.required.includes('target'));
+  assert.ok(!headerFooter.required.includes('sectionIndex'));
   assert.deepEqual(headerFooter.enum.type, ['header', 'footer']);
   assert.deepEqual(headerFooter.enum.applyTo, ['both', 'odd', 'even']);
 
+  assert.doesNotThrow(() => validateHwpxCommands([{
+    op: 'setPageSetup',
+    sectionIndex: 0,
+    width: 59528,
+    height: 84189,
+    orientation: 'landscape',
+  }]));
+  assert.doesNotThrow(() => validateHwpxCommands([{
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'footer',
+    text: '정상 꼬리말',
+    align: 'center',
+  }]));
+  assert.throws(() => validateHwpxCommands([{
+    op: 'setPageSetup',
+    sectionIndex: 0,
+    width: 59528,
+    height: 84189,
+    orientation: 'diagonal',
+  }]), /orientation must be one of: portrait, landscape/);
   assert.throws(() => validateHwpxCommands([{
     op: 'setHeaderFooter',
-    sectionIndex: 0,
+    target: { sectionIndex: 0 },
     type: 'sidebar',
     text: '잘못된 유형',
   }]), /type must be one of: header, footer/);
+  assert.throws(() => validateHwpxCommands([{
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'footer',
+    text: '잘못된 정렬',
+    align: 'justify',
+  }]), /align must be one of: left, center, right/);
 });
 
 test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {
@@ -105,6 +135,10 @@ test('HWPX stable target keys cover paragraphs and table cells', () => {
   assert.equal(
     stableHwpxTargetKey({ tableId: 'tbl_4', cell: { number: 3 } }),
     'table:tbl_4/cell:3',
+  );
+  assert.equal(
+    stableHwpxTargetKey({ sectionIndex: 2, paragraphIndex: 7 }),
+    'paragraph:2:7',
   );
   assert.equal(stableHwpxTargetKey({ tableId: 'tbl_4' }), '');
 });

@@ -467,7 +467,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     op: 'setHeaderFooter',
     category: 'package',
     description: 'Create or replace an HWPX header or footer in one section.',
-    required: ['sectionIndex', 'type', 'text'],
+    required: ['target', 'type', 'text'],
     optional: ['applyTo', 'align'],
     capability: 'adapter-required',
     enum: {
@@ -476,13 +476,13 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       align: ['left', 'center', 'right'],
     },
     fields: {
-      sectionIndex: 'Zero-based section index.',
+      target: 'Section target such as { sectionIndex: 0 }.',
       type: 'header or footer.',
       text: 'Header or footer text.',
       applyTo: 'both, odd, or even pages.',
       align: 'left, center, or right.',
     },
-    example: { op: 'setHeaderFooter', sectionIndex: 0, type: 'footer', text: '공공기관 내부검토용', align: 'center' },
+    example: { op: 'setHeaderFooter', target: { sectionIndex: 0 }, type: 'footer', text: '공공기관 내부검토용', align: 'center' },
   }),
   command({
     op: 'insertFootnote',
@@ -602,9 +602,17 @@ function stableHwpxTargetKey(value) {
     const column = nonNegativeInteger(cell.column ?? cell.col);
     return row !== null && column !== null ? `table:${tableId}/row:${row}/column:${column}` : '';
   }
-  const paragraph = target.paragraph && typeof target.paragraph === 'object' ? target.paragraph : native;
-  const number = nonNegativeInteger(paragraph.number ?? paragraph.paragraph ?? paragraph.para ?? paragraph.index);
-  const section = nonNegativeInteger(paragraph.section ?? 0);
+  const paragraph = target.paragraph && typeof target.paragraph === 'object'
+    ? target.paragraph
+    : Object.keys(native).length > 0 ? native : target;
+  const number = nonNegativeInteger(
+    paragraph.number
+      ?? paragraph.paragraph
+      ?? paragraph.paragraphIndex
+      ?? paragraph.para
+      ?? paragraph.index,
+  );
+  const section = nonNegativeInteger(paragraph.section ?? paragraph.sectionIndex ?? 0);
   return number !== null && section !== null ? `paragraph:${section}:${number}` : '';
 }
 
