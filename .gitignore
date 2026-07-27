@@ -17,6 +17,7 @@ build/
 dist/
 coverage/
 output/
+.worktrees/
 **/.tmp-render/
 **/target/
 **/node_shrinkpack/*.tar
