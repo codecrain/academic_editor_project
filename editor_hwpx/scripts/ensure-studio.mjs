@@ -4,8 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  assertCoreArtifactParity,
   formatCoreCleanupWarnings,
   materializeCoreArtifact,
+  validateCoreArtifact,
 } from './hwpx-runtime-readiness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -72,12 +74,16 @@ function ensureNpmInstall(root, label) {
   run(npmCommand(), args, { cwd: root });
 }
 
-function copyCoreWasmPackage() {
-  const coreRoot = path.resolve(sourceRoot, 'node_modules', '@rhwp', 'core');
-  if (!existsSync(coreRoot)) {
-    throw new Error('Missing @rhwp/core. Run npm install in editor_hwpx first.');
-  }
-  return materializeCoreArtifact(coreRoot, pkgRoot);
+function syncSourceBuiltCorePackage() {
+  validateCoreArtifact(pkgRoot, { catalog: [] });
+  const destinations = [
+    path.resolve(sourceRoot, 'node_modules', '@rhwp', 'core'),
+    path.resolve(studioRoot, 'node_modules', '@rhwp', 'core'),
+  ];
+  const results = destinations.map((destination) =>
+    materializeCoreArtifact(pkgRoot, destination, { catalog: [] }));
+  assertCoreArtifactParity([pkgRoot, ...destinations]);
+  return results;
 }
 
 function ensureStudioFonts() {
@@ -122,11 +128,13 @@ function assertUpstreamPresent() {
 
 assertUpstreamPresent();
 ensureNpmInstall(sourceRoot, 'wrapper');
-const coreReadiness = copyCoreWasmPackage();
-for (const warning of formatCoreCleanupWarnings(coreReadiness)) {
-  console.warn(warning);
-}
 ensureNpmInstall(studioRoot, 'rhwp-studio');
+const coreReadiness = syncSourceBuiltCorePackage();
+for (const result of coreReadiness) {
+  for (const warning of formatCoreCleanupWarnings(result)) {
+    console.warn(warning);
+  }
+}
 ensureStudioFonts();
 
 if (shouldBuild()) {
@@ -135,5 +143,5 @@ if (shouldBuild()) {
 
 const wasm = path.resolve(pkgRoot, 'rhwp_bg.wasm');
 console.log(
-  `[rhwp] ready: core=${coreReadiness.artifact}, studio=${studioRoot}, wasm=${Math.round(statSync(wasm).size / 1024)}KB`,
+  `[rhwp] ready: core=source-built@1.93.1, studio=${studioRoot}, wasm=${Math.round(statSync(wasm).size / 1024)}KB`,
 );

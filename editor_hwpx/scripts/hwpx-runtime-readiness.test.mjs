@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   mkdtempSync,
   mkdirSync,
@@ -324,16 +325,34 @@ test('cleanup warnings format artifact backup evidence for startup logs', () => 
   ]);
 });
 
-test('installed dependency is ready for every available operation and metadata remains unavailable', () => {
-  const installed = path.resolve(
+test('source-built runtime exposes promoted native methods on three byte-identical surfaces', () => {
+  const sourceRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '..',
-    'node_modules',
-    '@rhwp',
-    'core',
   );
-  const readiness = validateCoreArtifact(installed);
-  assert.equal(readiness.ok, true);
-  assert.ok(!readiness.methods.includes('setDocumentMetadata'));
-  assert.ok(!readiness.methods.includes('getDocumentMetadata'));
+  const roots = [
+    path.join(sourceRoot, 'pkg'),
+    path.join(sourceRoot, 'node_modules', '@rhwp', 'core'),
+    path.join(sourceRoot, 'rhwp-studio', 'node_modules', '@rhwp', 'core'),
+  ];
+  const readiness = roots.map((root) => validateCoreArtifact(root));
+  for (const result of readiness) {
+    assert.equal(result.ok, true);
+    for (const method of [
+      'setDocumentMetadata',
+      'getDocumentMetadata',
+      'createHeaderFooter',
+      'insertFootnote',
+    ]) {
+      assert.ok(result.methods.includes(method), `${result.artifactRoot} must expose ${method}`);
+    }
+  }
+  const hashes = roots.map((root) => Object.fromEntries(
+    CORE_ARTIFACT_FILES.map((fileName) => [
+      fileName,
+      createHash('sha256').update(readFileSync(path.join(root, fileName))).digest('hex'),
+    ]),
+  ));
+  assert.deepEqual(hashes[1], hashes[0]);
+  assert.deepEqual(hashes[2], hashes[0]);
 });

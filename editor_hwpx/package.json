@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "ensure": "node scripts/ensure-studio.mjs",
-    "build": "node scripts/ensure-studio.mjs --build",
+    "build:core": "node scripts/build-core-runtime.mjs",
+    "build": "npm run build:core && node scripts/ensure-studio.mjs --build",
     "dev": "node scripts/start-studio.mjs dev",
     "preview": "node scripts/start-studio.mjs preview",
     "start": "node scripts/start-studio.mjs preview",

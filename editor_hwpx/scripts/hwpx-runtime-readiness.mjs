@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
@@ -122,6 +123,38 @@ function validateCoreArtifact(artifactRoot, options = {}) {
   };
 }
 
+function coreArtifactHashes(artifactRoot) {
+  const root = path.resolve(artifactRoot);
+  validateCoreArtifact(root, { catalog: [] });
+  return Object.fromEntries(CORE_ARTIFACT_FILES.map((fileName) => [
+    fileName,
+    createHash('sha256').update(readFileSync(path.join(root, fileName))).digest('hex'),
+  ]));
+}
+
+function assertCoreArtifactParity(artifactRoots) {
+  if (!Array.isArray(artifactRoots) || artifactRoots.length < 2) {
+    throw new Error('At least two RHWP artifact roots are required for parity validation.');
+  }
+  const surfaces = artifactRoots.map((artifactRoot) => ({
+    artifactRoot: path.resolve(artifactRoot),
+    hashes: coreArtifactHashes(artifactRoot),
+  }));
+  const canonical = surfaces[0];
+  for (const surface of surfaces.slice(1)) {
+    for (const fileName of CORE_ARTIFACT_FILES) {
+      if (surface.hashes[fileName] !== canonical.hashes[fileName]) {
+        throw readinessError(
+          'HWPX_CORE_ARTIFACT_DRIFT',
+          `${fileName} differs between ${canonical.artifactRoot} and ${surface.artifactRoot}.`,
+          { fileName, canonical, surface },
+        );
+      }
+    }
+  }
+  return { ok: true, canonical: canonical.artifactRoot, surfaces };
+}
+
 function materializeCoreArtifact(sourceRoot, destinationRoot, options = {}) {
   const source = path.resolve(sourceRoot);
   const destination = path.resolve(destinationRoot);
@@ -201,6 +234,8 @@ function formatCoreCleanupWarnings(result) {
 
 export {
   CORE_ARTIFACT_FILES,
+  assertCoreArtifactParity,
+  coreArtifactHashes,
   declaredDocumentMethods,
   executableDocumentMethods,
   formatCoreCleanupWarnings,

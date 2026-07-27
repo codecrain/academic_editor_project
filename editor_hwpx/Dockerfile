@@ -1,4 +1,4 @@
-FROM rust:latest
+FROM rust:1.93.1-bookworm
 
 # wasm 타겟 및 wasm-pack 설치
 RUN rustup target add wasm32-unknown-unknown \

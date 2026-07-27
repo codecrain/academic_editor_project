@@ -97,6 +97,16 @@ samples/issue836/
 /rhwp-studio/node_modules/
 /rhwp-studio/dist/
 
+# Canonical source-built runtime. Keep only the four executable contract
+# surfaces and package identity; all other generated pkg files stay ignored.
+!/pkg/
+/pkg/*
+!/pkg/package.json
+!/pkg/rhwp.js
+!/pkg/rhwp.d.ts
+!/pkg/rhwp_bg.wasm
+!/pkg/rhwp_bg.wasm.d.ts
+
 # Academic Editor vendors this upstream source tree directly. Keep source
 # fixtures visible to the parent public repository while leaving generated
 # runtime artifacts ignored above.
