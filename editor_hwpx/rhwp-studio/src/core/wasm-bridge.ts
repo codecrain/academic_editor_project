@@ -81,6 +81,7 @@ export class WasmBridge {
   private initialized = false;
   private _fileName = 'document.hwpx';
   private _currentFileHandle: FileSystemFileHandleLike | null = null;
+  private _sourceBytes = new Uint8Array();
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -122,6 +123,7 @@ export class WasmBridge {
       this.doc = null;
     }
     this._currentFileHandle = null;
+    this._sourceBytes = new Uint8Array();
   }
 
   loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
@@ -136,6 +138,7 @@ export class WasmBridge {
       this.doc.convertToEditable();
       this.ensureParagraphStableIds();
       this.doc.setFileName(this._fileName);
+      this._sourceBytes = new Uint8Array(data);
       const info: DocumentInfo = JSON.parse(this.doc.getDocumentInfo());
       console.log(`[WasmBridge] 문서 로드: ${info.pageCount}페이지`);
 
@@ -158,6 +161,7 @@ export class WasmBridge {
       }
       this._fileName = 'document.hwp';
       this._currentFileHandle = null;
+      this._sourceBytes = new Uint8Array();
       throw error;
     }
   }
@@ -210,6 +214,7 @@ export class WasmBridge {
     this.ensureParagraphStableIds();
     this._fileName = '새 문서.hwpx';
     this._currentFileHandle = null;
+    this._sourceBytes = new Uint8Array();
     this.doc.setFileName(this._fileName);
     console.log(`[WasmBridge] 새 문서 생성: ${info.pageCount}페이지`);
     return info;
@@ -230,6 +235,10 @@ export class WasmBridge {
 
   set currentFileHandle(handle: FileSystemFileHandleLike | null) {
     this._currentFileHandle = handle;
+  }
+
+  get sourceBytes(): Uint8Array {
+    return new Uint8Array(this._sourceBytes);
   }
 
   get isNewDocument(): boolean {

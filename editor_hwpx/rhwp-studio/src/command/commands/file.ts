@@ -15,6 +15,7 @@ import {
   type FileSystemFileHandleLike,
   type FileSystemWindowLike,
 } from '@/command/file-system-access';
+import { assertHwpxSaveIntegrity } from '@/core/hwpx-save-integrity';
 
 /** [Task #833] 사용자 명시 cancel 에러 검출.
  * - AbortError: showSaveFilePicker / showOpenFilePicker 다이얼로그 취소
@@ -104,6 +105,16 @@ function exportDocumentForSave(services: CommandServices, format: SaveFormat): E
   };
 }
 
+async function assertSafeHwpxExport(
+  services: CommandServices,
+  sourceFormat: string,
+  format: SaveFormat,
+  bytes: Uint8Array,
+): Promise<void> {
+  if (sourceFormat !== 'hwpx' || format !== 'hwpx') return;
+  await assertHwpxSaveIntegrity(services.wasm.sourceBytes, bytes);
+}
+
 export type SaveCurrentDocumentResult = 'saved' | 'cancelled' | 'failed';
 
 export async function saveCurrentDocument(services: CommandServices): Promise<SaveCurrentDocumentResult> {
@@ -112,6 +123,7 @@ export async function saveCurrentDocument(services: CommandServices): Promise<Sa
     const format = defaultSaveFormat(sourceFormat, services.wasm.fileName);
     const saveName = saveFileName(services.wasm.fileName, format);
     const exported = exportDocumentForSave(services, format);
+    await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
     console.log(
       `[file:save] source=${sourceFormat}, format=${format}, ` +
       `reflowed=${exported.reflowedParagraphs}, ${exported.bytes.length} bytes`,
@@ -339,6 +351,7 @@ export const fileCommands: CommandDef[] = [
 
             const format = saveFormatForFileName(handle.name, defaultFormat);
             const exported = exportDocumentForSave(services, format);
+            await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
             await writeBlobToHandle(handle, exported.blob);
             services.wasm.currentFileHandle = handle;
             services.wasm.fileName = saveFileName(handle.name, format);
@@ -363,6 +376,7 @@ export const fileCommands: CommandDef[] = [
         if (!result) return;
         const format = saveFormatForFileName(result, defaultFormat);
         const exported = exportDocumentForSave(services, format);
+        await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
         const downloadName = saveFileName(result, format);
         services.wasm.fileName = downloadName;
 

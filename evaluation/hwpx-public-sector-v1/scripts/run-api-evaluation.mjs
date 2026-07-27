@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createGatewayServer } from '../../../editor_docx/scripts/editor-gateway.mjs';
+import { inspectHwpxPackage } from '../../../editor_hwpx/scripts/hwpx-package-policy.mjs';
+import {
+  findIntroducedDirectIdentifiers,
+  visibleDocumentText,
+} from './evaluation-hard-gates.mjs';
 
 const datasetRoot = path.resolve('evaluation/hwpx-public-sector-v1');
 const attachmentsPayload = JSON.parse(await fs.readFile(path.join(datasetRoot, 'attachments.json'), 'utf8'));
@@ -29,6 +34,10 @@ if (!['full', 'sample', 'none'].includes(renderMode)) {
 }
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const binaryEntryInventory = (bytes) => inspectHwpxPackage(bytes).entries
+  .filter((entry) => /^BinData\//i.test(entry.name))
+  .map(({ name, size, sha256: entrySha256 }) => ({ name, size, sha256: entrySha256 }))
+  .sort((left, right) => left.name.localeCompare(right.name));
 const resultsRoot = path.join(datasetRoot, 'results');
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hwpx-public-sector-eval-'));
 await fs.mkdir(resultsRoot, { recursive: true });
@@ -76,6 +85,20 @@ async function post(pathname, payload) {
     throw new Error(`${pathname} HTTP ${response.status}: ${json.message || text}`);
   }
   return json;
+}
+
+let mcpRequestId = 0;
+async function mcp(name, args) {
+  const response = await post('/mcp', {
+    jsonrpc: '2.0',
+    id: ++mcpRequestId,
+    method: 'tools/call',
+    params: { name, arguments: args },
+  });
+  if (response?.result?.isError) {
+    throw new Error(`MCP ${name}: ${response.result.structuredContent?.message || 'tool failed'}`);
+  }
+  return response?.result?.structuredContent ?? {};
 }
 
 const documentPath = (documentId, action) => `/v1/hwpx/documents/${encodeURIComponent(documentId)}/${action}`;
@@ -214,6 +237,8 @@ try {
     const outputPath = path.join(tempRoot, scenario.target.outputFilename);
     let sourceDocumentId = '';
     let reopenedDocumentId = '';
+    let mcpDocumentId = '';
+    let mcpArtifact = null;
     const checks = {
       attachments: false,
       open: false,
@@ -228,6 +253,9 @@ try {
       content: false,
       structure: false,
       style: false,
+      binaryIdentity: false,
+      privacy: false,
+      mcp: false,
     };
     const failures = [];
     const details = {};
@@ -246,6 +274,8 @@ try {
         tableCount: baselineJson.tables?.length ?? 0,
         paragraphCount: baselineJson.sections?.reduce((sum, section) => sum + section.paragraphCount, 0) ?? 0,
         objects: objectCounts(baselineInventory),
+        binaryFiles: [...(baselineInventory.binaryFiles || [])].sort(),
+        binaryEntries: binaryEntryInventory(sourceBytes),
       };
 
       const catalogOps = [...new Set(scenario.oracle.commandTemplates.map((command) => command.op))];
@@ -319,6 +349,8 @@ try {
         tableCount: currentJson.tables?.length ?? 0,
         paragraphCount: currentJson.sections?.reduce((sum, section) => sum + section.paragraphCount, 0) ?? 0,
         objects: objectCounts(currentInventory),
+        binaryFiles: [...(currentInventory.binaryFiles || [])].sort(),
+        binaryEntries: binaryEntryInventory(savedBytes),
       };
 
       const expectedChecks = [];
@@ -357,6 +389,21 @@ try {
 
       const invariants = scenario.oracle.invariants;
       const pageDelta = Math.abs(details.current.pageCount - details.baseline.pageCount);
+      const requestedBinaryChanges = new Set(
+        scenario.oracle.commandTemplates
+          .filter((command) => command.op === 'image.replace' || command.op === 'image.generateAndReplace')
+          .map((command) => command.imageName)
+          .filter(Boolean),
+      );
+      const currentBinaryByName = new Map(
+        details.current.binaryEntries.map((entry) => [entry.name, entry]),
+      );
+      const unchangedBinaryEntries = details.baseline.binaryEntries
+        .filter((entry) => !requestedBinaryChanges.has(entry.name))
+        .every((entry) => {
+          const current = currentBinaryByName.get(entry.name);
+          return current?.size === entry.size && current.sha256 === entry.sha256;
+        });
       const structurePredicates = [
         pageDelta <= invariants.maxPageCountDelta,
         !invariants.preserveTableCount || details.current.tableCount === details.baseline.tableCount,
@@ -364,10 +411,22 @@ try {
         !invariants.preserveImageCount || details.current.objects.images === details.baseline.objects.images,
         details.current.objects.sections === details.baseline.objects.sections,
         details.current.objects.xmlFiles === details.baseline.objects.xmlFiles,
+        JSON.stringify(details.current.binaryFiles) === JSON.stringify(details.baseline.binaryFiles),
+        unchangedBinaryEntries,
       ];
       checks.structure = structurePredicates.every(Boolean);
+      checks.binaryIdentity = structurePredicates.at(-1);
       details.structure = { pageDelta, predicates: structurePredicates };
       if (!checks.structure) failures.push('one or more page/table/object/package invariants failed');
+      if (!checks.binaryIdentity) failures.push('binary package entry identities changed');
+
+      const introducedIdentifiers = findIntroducedDirectIdentifiers(
+        visibleDocumentText(baselineJson),
+        visibleDocumentText(currentJson),
+      );
+      checks.privacy = introducedIdentifiers.length === 0;
+      details.introducedDirectIdentifiers = introducedIdentifiers;
+      if (!checks.privacy) failures.push('output introduced direct personal identifiers not present in the source');
 
       const styleCommand = scenario.oracle.commandTemplates.find((command) => command.op === 'style.applyText');
       if (styleCommand) {
@@ -393,9 +452,85 @@ try {
         checks.style = true;
       }
       if (!checks.style) failures.push('style clone fingerprint did not match after reopen');
+
+      const mcpOpened = await mcp('editor_hwpx_open', {
+        filename: path.basename(sourcePath),
+        bytesBase64: sourceBytes.toString('base64'),
+      });
+      mcpDocumentId = mcpOpened.documentId;
+      for (const op of catalogOps) {
+        const catalog = await mcp('editor_hwpx_command_catalog', { op });
+        if (catalog.commandCount !== 1) throw new Error(`MCP catalog mismatch for ${op}`);
+      }
+      if (locations.length) {
+        await mcp('editor_hwpx_target_inspect', {
+          documentId: mcpDocumentId,
+          locations,
+        });
+      }
+      if (needsInventory) {
+        await mcp('editor_hwpx_object_inventory', { documentId: mcpDocumentId });
+      }
+      const mcpApplied = await mcp('editor_hwpx_apply', {
+        documentId: mcpDocumentId,
+        baseRevision: mcpOpened.revision,
+        commands: scenario.oracle.commandTemplates,
+      });
+      const mcpQuality = await mcp('editor_hwpx_quality_check', {
+        documentId: mcpDocumentId,
+        baseRevision: mcpApplied.revision,
+      });
+      if (mcpQuality.ok !== true) throw new Error('MCP quality check did not pass');
+      const mcpPages = renderPagesForScenario(scenario, ordinal);
+      if (mcpPages.length) {
+        const mcpRendered = await mcp('editor_hwpx_render_pages', {
+          documentId: mcpDocumentId,
+          baseRevision: mcpApplied.revision,
+          pages: mcpPages,
+          includeBaseline: true,
+        });
+        if (!mcpPages.every((page) => (
+          mcpRendered.baseline?.pages?.some((entry) => entry.page === page && entry.nonBlank)
+          && mcpRendered.current?.pages?.some((entry) => entry.page === page && entry.nonBlank)
+        ))) {
+          throw new Error('MCP render verification returned a blank or missing page');
+        }
+      }
+      mcpArtifact = await mcp('editor_hwpx_save_source', {
+        documentId: mcpDocumentId,
+        baseRevision: mcpApplied.revision,
+        filename: scenario.target.outputFilename,
+      });
+      mcpDocumentId = '';
+      const mcpRead = await mcp('editor_hwpx_artifact_read', {
+        artifactId: mcpArtifact.artifactId,
+        expectedSha256: mcpArtifact.sha256,
+      });
+      const mcpSavedBytes = Buffer.from(mcpRead.bytesBase64, 'base64');
+      if (!hasPrefix(mcpSavedBytes, [0x50, 0x4b]) || sha256(mcpSavedBytes) !== mcpArtifact.sha256) {
+        throw new Error('MCP saved artifact failed HWPX signature or hash verification');
+      }
+      if (!mcpSavedBytes.equals(savedBytes) || mcpArtifact.sha256 !== saved.sha256) {
+        throw new Error('REST and MCP produced different HWPX bytes for the same command batch');
+      }
+      await mcp('editor_hwpx_artifact_delete', {
+        artifactId: mcpArtifact.artifactId,
+        expectedSha256: mcpArtifact.sha256,
+      });
+      mcpArtifact = null;
+      checks.mcp = true;
     } catch (error) {
       failures.push(error instanceof Error ? error.message : String(error));
     } finally {
+      if (mcpArtifact) {
+        await mcp('editor_hwpx_artifact_delete', {
+          artifactId: mcpArtifact.artifactId,
+          expectedSha256: mcpArtifact.sha256,
+        }).catch(() => undefined);
+      }
+      if (mcpDocumentId) {
+        await mcp('editor_hwpx_discard', { documentId: mcpDocumentId }).catch(() => undefined);
+      }
       await discard(reopenedDocumentId).catch(() => undefined);
       await discard(sourceDocumentId).catch(() => undefined);
       await fs.rm(outputPath, { force: true }).catch(() => undefined);
@@ -409,7 +544,8 @@ try {
     const apiScore = checks.attachments && checks.open && checks.catalog
       && checks.inspect && checks.atomicApply && checks.quality ? 10 : 0;
     const totalScore = contentScore + layoutScore + styleScore + objectScore + packageScore + apiScore;
-    const hardFailure = !checks.reopen || !checks.atomicApply || !checks.structure;
+    const hardFailure = !checks.reopen || !checks.atomicApply || !checks.structure
+      || !checks.binaryIdentity || !checks.privacy || !checks.mcp;
     const result = {
       scenarioId: scenario.id,
       mode: scenario.mode,
