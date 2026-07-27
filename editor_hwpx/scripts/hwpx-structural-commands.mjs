@@ -19,19 +19,23 @@ function firstInteger(...values) {
   return null;
 }
 
-function parseNativeResult(value, method, requiredU32Fields = []) {
+function firstSpecifiedInteger(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && value !== '') {
+      return nonNegativeInteger(value);
+    }
+  }
+  return null;
+}
+
+function parseNativeObject(value, method) {
   let parsed;
   try {
     parsed = value && typeof value === 'object'
       ? value
       : JSON.parse(String(value));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || parsed.ok !== true) {
-      throw new Error('result is not successful');
-    }
-    for (const field of requiredU32Fields) {
-      if (typeof parsed[field] !== 'number' || nonNegativeInteger(parsed[field]) === null) {
-        throw new Error(`${field} is not a valid u32`);
-      }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('result is not an object');
     }
   } catch (cause) {
     throw structuralError(
@@ -39,6 +43,27 @@ function parseNativeResult(value, method, requiredU32Fields = []) {
       `${method} returned an invalid RHWP result.`,
       { method, value: String(value), cause: cause.message },
     );
+  }
+  return parsed;
+}
+
+function parseNativeResult(value, method, requiredU32Fields = []) {
+  const parsed = parseNativeObject(value, method);
+  if (parsed.ok !== true) {
+    throw structuralError(
+      'HWPX_ENGINE_RESULT_INVALID',
+      `${method} returned an unsuccessful RHWP result.`,
+      { method, value: String(value) },
+    );
+  }
+  for (const field of requiredU32Fields) {
+    if (typeof parsed[field] !== 'number' || nonNegativeInteger(parsed[field]) === null) {
+      throw structuralError(
+        'HWPX_ENGINE_RESULT_INVALID',
+        `${method} omitted a required RHWP u32 field: ${field}.`,
+        { method, field, value: String(value) },
+      );
+    }
   }
   return parsed;
 }
@@ -61,7 +86,7 @@ function resolveHwpxTextTarget(value, options = {}) {
   const paragraph = target.paragraph && typeof target.paragraph === 'object'
     ? target.paragraph
     : {};
-  const sectionIndex = firstInteger(
+  const sectionIndex = firstSpecifiedInteger(
     target.sectionIndex,
     target.section,
     paragraph.sectionIndex,
@@ -69,7 +94,7 @@ function resolveHwpxTextTarget(value, options = {}) {
     native.sectionIndex,
     native.section,
   );
-  const paragraphIndex = firstInteger(
+  const paragraphIndex = firstSpecifiedInteger(
     target.paragraphIndex,
     target.para,
     paragraph.paragraphIndex,
@@ -79,13 +104,13 @@ function resolveHwpxTextTarget(value, options = {}) {
     native.paragraph,
     native.para,
   );
-  const offset = firstInteger(
+  const offset = firstSpecifiedInteger(
     target.offset,
     target.charOffset,
     native.offset,
     native.charOffset,
   );
-  const length = firstInteger(target.length, native.length);
+  const length = firstSpecifiedInteger(target.length, native.length);
 
   if (sectionIndex === null || paragraphIndex === null || (offsetRequired && offset === null)) {
     throw structuralError(
@@ -196,7 +221,10 @@ function resolveDeleteRange(command) {
   }
   return {
     start,
-    end: { ...start, offset: start.offset + start.length },
+    end: {
+      ...start,
+      offset: nonNegativeInteger(start.offset + start.length),
+    },
   };
 }
 
@@ -204,7 +232,7 @@ function applyDeleteRange(doc, command, context) {
   const { start, end } = resolveDeleteRange(command);
   const sameParagraph = start.sectionIndex === end.sectionIndex
     && start.paragraphIndex === end.paragraphIndex;
-  if (!sameParagraph || end.offset <= start.offset) {
+  if (!sameParagraph || end.offset === null || end.offset <= start.offset) {
     throw structuralError(
       'HWPX_INVALID_RANGE',
       'deleteRange must be a forward, nonempty range inside one HWPX paragraph.',
@@ -243,6 +271,13 @@ function applyAppendParagraph(doc, command) {
   const insertParagraph = requireMethod(doc, 'insertParagraph');
   const insertText = requireMethod(doc, 'insertText');
   const requestedParagraphIndex = target.paragraphIndex + 1;
+  if (nonNegativeInteger(requestedParagraphIndex) === null) {
+    throw structuralError(
+      'HWPX_TARGET_INVALID',
+      'appendParagraph cannot derive a valid RHWP paragraph index after the target.',
+      { target },
+    );
+  }
   const paragraphNative = parseNativeResult(
     insertParagraph(target.sectionIndex, requestedParagraphIndex),
     'insertParagraph',
@@ -267,6 +302,728 @@ function applyAppendParagraph(doc, command) {
   );
 }
 
+function positiveInteger(value, maximum = 0xFFFF_FFFF) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 && number <= maximum ? number : null;
+}
+
+function resolveSectionIndex(doc, value) {
+  const sectionIndex = firstSpecifiedInteger(value);
+  if (sectionIndex === null) {
+    throw structuralError('HWPX_SECTION_INVALID', 'A valid RHWP section index is required.');
+  }
+  if (typeof doc?.getSectionCount === 'function') {
+    const sectionCount = nonNegativeInteger(doc.getSectionCount());
+    if (sectionCount === null || sectionIndex >= sectionCount) {
+      throw structuralError(
+        'HWPX_SECTION_INVALID',
+        'The requested HWPX section does not exist.',
+        { sectionIndex, sectionCount },
+      );
+    }
+  }
+  return sectionIndex;
+}
+
+function nativeTableTarget(sectionIndex, paragraphIndex, controlIndex) {
+  return {
+    kind: 'table',
+    sectionIndex,
+    paragraphIndex,
+    controlIndex,
+  };
+}
+
+function resolveHwpxTableTarget(command, context) {
+  const target = command.target ?? command.location ?? {};
+  const direct = target.native && typeof target.native === 'object' ? target.native : target;
+  let sectionIndex = firstSpecifiedInteger(direct.sectionIndex, direct.section);
+  let paragraphIndex = firstSpecifiedInteger(
+    direct.paragraphIndex,
+    direct.paragraph,
+    direct.para,
+  );
+  let controlIndex = firstSpecifiedInteger(
+    direct.controlIndex,
+    direct.control,
+    direct.controlIdx,
+  );
+  const tableId = target.tableId ?? target.id;
+  if ((sectionIndex === null || paragraphIndex === null || controlIndex === null) && tableId) {
+    const table = context?.before?.tables?.find(item => item?.id === tableId);
+    const native = table?.native ?? table ?? {};
+    sectionIndex = firstSpecifiedInteger(native.sectionIndex, native.section);
+    paragraphIndex = firstSpecifiedInteger(
+      native.paragraphIndex,
+      native.paragraph,
+      native.para,
+    );
+    controlIndex = firstSpecifiedInteger(
+      native.controlIndex,
+      native.control,
+      native.controlIdx,
+    );
+  }
+  if (sectionIndex === null || paragraphIndex === null || controlIndex === null) {
+    throw structuralError(
+      'HWPX_TABLE_TARGET_INVALID',
+      'The HWPX table target must resolve to section, paragraph, and control indices.',
+      { target },
+    );
+  }
+  return { sectionIndex, paragraphIndex, controlIndex };
+}
+
+function applyCreateTable(doc, command, context) {
+  const rows = positiveInteger(command.rows, 0xFFFF);
+  const columns = positiveInteger(command.columns, 256);
+  if (rows === null || columns === null) {
+    throw structuralError(
+      'HWPX_TABLE_DIMENSIONS_INVALID',
+      'table.create rows and columns must be positive RHWP table dimensions.',
+      { rows: command.rows, columns: command.columns },
+    );
+  }
+  const target = resolveHwpxTextTarget(command, { offsetRequired: false });
+  const charOffset = inspectedParagraphLength(doc, context, target);
+  const options = {
+    sectionIdx: target.sectionIndex,
+    paraIdx: target.paragraphIndex,
+    charOffset,
+    rowCount: rows,
+    colCount: columns,
+    treatAsChar: false,
+  };
+  if (command.width !== undefined) {
+    const width = positiveInteger(command.width);
+    if (width === null || width < columns) {
+      throw structuralError(
+        'HWPX_TABLE_DIMENSIONS_INVALID',
+        'table.create width must be large enough to allocate every column.',
+        { width: command.width, columns },
+      );
+    }
+    const base = Math.floor(width / columns);
+    options.colWidths = Array.from(
+      { length: columns },
+      (_, index) => base + (index < width % columns ? 1 : 0),
+    );
+  }
+  if (command.height !== undefined && positiveInteger(command.height) === null) {
+    throw structuralError(
+      'HWPX_TABLE_DIMENSIONS_INVALID',
+      'table.create height must be a positive HWP-unit value.',
+      { height: command.height },
+    );
+  }
+  if (command.height !== undefined && Number(command.height) < rows * 200) {
+    throw structuralError(
+      'HWPX_TABLE_DIMENSIONS_INVALID',
+      'table.create height must allocate at least 200 HWP units per row.',
+      { height: command.height, rows },
+    );
+  }
+  const cellCount = rows * columns;
+  if (command.cellTexts !== undefined
+    && (!Array.isArray(command.cellTexts)
+      || command.cellTexts.length > cellCount
+      || command.cellTexts.some(text => typeof text !== 'string'))) {
+    throw structuralError(
+      'HWPX_TABLE_CELL_TEXTS_INVALID',
+      'table.create cellTexts must be a row-major string array no larger than the table.',
+      { cellCount },
+    );
+  }
+  if (command.caption !== undefined
+    && (typeof command.caption !== 'string' || command.caption.length === 0)) {
+    throw structuralError(
+      'HWPX_CAPTION_TEXT_REQUIRED',
+      'table.create caption must be a nonempty string.',
+    );
+  }
+  const getCellProperties = command.height === undefined
+    ? null
+    : requireMethod(doc, 'getCellProperties');
+  const resizeTableCells = command.height === undefined
+    ? null
+    : requireMethod(doc, 'resizeTableCells');
+  const insertTextInCell = command.cellTexts?.some(text => text.length > 0)
+    ? requireMethod(doc, 'insertTextInCell')
+    : null;
+  if (command.caption !== undefined) {
+    requireMethod(doc, 'setTableProperties');
+    requireMethod(doc, 'insertTextInCell');
+  }
+  const createTableEx = requireMethod(doc, 'createTableEx');
+  const tableNative = parseNativeResult(
+    createTableEx(JSON.stringify(options)),
+    'createTableEx',
+    ['paraIdx', 'controlIdx'],
+  );
+  const createdTarget = nativeTableTarget(
+    target.sectionIndex,
+    tableNative.paraIdx,
+    tableNative.controlIdx,
+  );
+  const native = { table: tableNative };
+  const createdTargets = [createdTarget];
+
+  if (command.height !== undefined) {
+    const desiredBaseHeight = Math.floor(command.height / rows);
+    const heightRemainder = command.height % rows;
+    const updates = [];
+    for (let cellIndex = 0; cellIndex < cellCount; cellIndex += 1) {
+      const properties = parseNativeObject(
+        getCellProperties(
+          createdTarget.sectionIndex,
+          createdTarget.paragraphIndex,
+          createdTarget.controlIndex,
+          cellIndex,
+        ),
+        'getCellProperties',
+      );
+      const currentHeight = positiveInteger(properties.height);
+      if (currentHeight === null) {
+        throw structuralError(
+          'HWPX_ENGINE_RESULT_INVALID',
+          'getCellProperties omitted a positive cell height.',
+          { cellIndex, value: properties.height },
+        );
+      }
+      const row = Math.floor(cellIndex / columns);
+      const desiredHeight = desiredBaseHeight + (row < heightRemainder ? 1 : 0);
+      updates.push({
+        cellIdx: cellIndex,
+        heightDelta: desiredHeight - currentHeight,
+      });
+    }
+    native.resize = parseNativeResult(
+      resizeTableCells(
+        createdTarget.sectionIndex,
+        createdTarget.paragraphIndex,
+        createdTarget.controlIndex,
+        JSON.stringify(updates),
+      ),
+      'resizeTableCells',
+    );
+  }
+
+  if (command.cellTexts !== undefined) {
+    native.cells = [];
+    for (const [cellIndex, text] of command.cellTexts.entries()) {
+      if (text.length === 0) continue;
+      native.cells.push(parseNativeResult(
+        insertTextInCell(
+          createdTarget.sectionIndex,
+          createdTarget.paragraphIndex,
+          createdTarget.controlIndex,
+          cellIndex,
+          0,
+          0,
+          text,
+        ),
+        'insertTextInCell',
+        ['charOffset'],
+      ));
+    }
+  }
+
+  if (command.caption !== undefined) {
+    const captionResult = applyInsertTableCaption(doc, {
+      op: 'table.insertCaption',
+      target: createdTarget,
+      text: command.caption,
+      position: 'before',
+    }, context);
+    native.caption = captionResult.native;
+    createdTargets.push(captionResult.target);
+  }
+  return structuralResult(command, native, createdTarget, createdTargets);
+}
+
+function applyInsertTableCaption(doc, command, context) {
+  if (typeof command.text !== 'string' || command.text.length === 0) {
+    throw structuralError('HWPX_CAPTION_TEXT_REQUIRED', 'table.insertCaption requires text.');
+  }
+  const position = command.position ?? 'before';
+  if (!['before', 'after'].includes(position)) {
+    throw structuralError(
+      'HWPX_CAPTION_POSITION_INVALID',
+      'table.insertCaption position must be before or after.',
+      { position },
+    );
+  }
+  const table = resolveHwpxTableTarget(command, context);
+  const setTableProperties = requireMethod(doc, 'setTableProperties');
+  const insertTextInCell = requireMethod(doc, 'insertTextInCell');
+  if (typeof doc?.getTableProperties === 'function') {
+    const properties = parseNativeObject(
+      doc.getTableProperties(
+        table.sectionIndex,
+        table.paragraphIndex,
+        table.controlIndex,
+      ),
+      'getTableProperties',
+    );
+    if (properties.hasCaption === true) {
+      throw structuralError(
+        'HWPX_CAPTION_ALREADY_EXISTS',
+        'The selected HWPX table already has a native caption.',
+        { table },
+      );
+    }
+  }
+  const captionNative = parseNativeResult(
+    setTableProperties(
+      table.sectionIndex,
+      table.paragraphIndex,
+      table.controlIndex,
+      JSON.stringify({
+        hasCaption: true,
+        captionDirection: position === 'before' ? 2 : 3,
+      }),
+    ),
+    'setTableProperties',
+    ['captionCharOffset'],
+  );
+  const textNative = parseNativeResult(
+    insertTextInCell(
+      table.sectionIndex,
+      table.paragraphIndex,
+      table.controlIndex,
+      65534,
+      0,
+      captionNative.captionCharOffset,
+      command.text,
+    ),
+    'insertTextInCell',
+    ['charOffset'],
+  );
+  return structuralResult(command, {
+    caption: captionNative,
+    text: textNative,
+  }, {
+    kind: 'tableCaption',
+    ...table,
+  });
+}
+
+const IMAGE_MIME_TO_EXTENSION = new Map([
+  ['image/png', 'png'],
+  ['image/jpeg', 'jpg'],
+  ['image/jpg', 'jpg'],
+  ['image/gif', 'gif'],
+  ['image/bmp', 'bmp'],
+]);
+
+function decodeImageBytes(command) {
+  if (command.bytes instanceof Uint8Array) {
+    const bytes = Buffer.from(command.bytes);
+    if (bytes.length > 0) return bytes;
+  }
+  if (typeof command.bytesBase64 === 'string') {
+    const encoded = command.bytesBase64.trim();
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+      throw structuralError('HWPX_IMAGE_REQUIRED', 'Image bytesBase64 is invalid.');
+    }
+    const bytes = Buffer.from(encoded, 'base64');
+    if (bytes.length > 0
+      && bytes.toString('base64').replace(/=+$/, '') === encoded.replace(/=+$/, '')) {
+      return bytes;
+    }
+  }
+  if (typeof command.filePath === 'string' && command.filePath.length > 0) {
+    const bytes = readFileSync(command.filePath);
+    if (bytes.length > 0) return bytes;
+  }
+  throw structuralError(
+    'HWPX_IMAGE_REQUIRED',
+    'image.insertAfterParagraph requires nonempty bytes, bytesBase64, or filePath.',
+  );
+}
+
+function sniffImage(bytes, declaredMimeType, filePath) {
+  const declaredExtension = IMAGE_MIME_TO_EXTENSION.get(
+    String(declaredMimeType ?? '').toLowerCase(),
+  );
+  let signatureExtension = null;
+  if (bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
+    signatureExtension = 'png';
+  } else if (bytes[0] === 0xFF && bytes[1] === 0xD8) {
+    signatureExtension = 'jpg';
+  } else if (bytes.subarray(0, 3).toString('ascii') === 'GIF') {
+    signatureExtension = 'gif';
+  } else if (bytes.subarray(0, 2).toString('ascii') === 'BM') {
+    signatureExtension = 'bmp';
+  }
+  if (declaredExtension && signatureExtension && declaredExtension !== signatureExtension) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'The declared image MIME type does not match the binary signature.',
+      { declaredExtension, signatureExtension },
+    );
+  }
+  let extension = declaredExtension;
+  if (!extension && filePath) {
+    const candidate = extname(filePath).slice(1).toLowerCase();
+    if (['png', 'jpg', 'jpeg', 'gif', 'bmp'].includes(candidate)) {
+      extension = candidate === 'jpeg' ? 'jpg' : candidate;
+    }
+  }
+  extension ??= signatureExtension;
+  if (!extension) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'RHWP image insertion supports PNG, JPEG, GIF, and BMP inputs.',
+    );
+  }
+
+  let width;
+  let height;
+  if (extension === 'png' && bytes.length >= 24) {
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else if (extension === 'gif' && bytes.length >= 10) {
+    width = bytes.readUInt16LE(6);
+    height = bytes.readUInt16LE(8);
+  } else if (extension === 'bmp' && bytes.length >= 26) {
+    width = Math.abs(bytes.readInt32LE(18));
+    height = Math.abs(bytes.readInt32LE(22));
+  } else if (extension === 'jpg') {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xFF) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      const length = bytes.readUInt16BE(offset + 2);
+      if (length < 2 || offset + 2 + length > bytes.length) break;
+      if ([0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+        0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF].includes(marker)) {
+        height = bytes.readUInt16BE(offset + 5);
+        width = bytes.readUInt16BE(offset + 7);
+        break;
+      }
+      offset += 2 + length;
+    }
+  }
+  if (!positiveInteger(width) || !positiveInteger(height)) {
+    throw structuralError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'The image dimensions could not be read safely.',
+      { extension },
+    );
+  }
+  return { extension, width, height };
+}
+
+function applyInsertImage(doc, command) {
+  const bytes = decodeImageBytes(command);
+  const image = sniffImage(bytes, command.mimeType, command.filePath);
+  if (command.caption !== undefined
+    && (typeof command.caption !== 'string' || command.caption.length === 0)) {
+    throw structuralError(
+      'HWPX_IMAGE_CAPTION_INVALID',
+      'image.insertAfterParagraph caption must be a nonempty string.',
+    );
+  }
+  const target = resolveHwpxTextTarget(command, { offsetRequired: false });
+  const requestedParagraphIndex = target.paragraphIndex + 1;
+  if (nonNegativeInteger(requestedParagraphIndex) === null) {
+    throw structuralError(
+      'HWPX_TARGET_INVALID',
+      'image.insertAfterParagraph cannot derive a paragraph after the target.',
+      { target },
+    );
+  }
+  let requestedWidth = command.width;
+  let requestedHeight = command.height;
+  if (requestedWidth === undefined && requestedHeight === undefined) {
+    requestedWidth = image.width * 75;
+    requestedHeight = image.height * 75;
+  } else if (requestedWidth === undefined) {
+    requestedWidth = Math.round(Number(requestedHeight) * image.width / image.height);
+  } else if (requestedHeight === undefined) {
+    requestedHeight = Math.round(Number(requestedWidth) * image.height / image.width);
+  }
+  const width = positiveInteger(requestedWidth);
+  const height = positiveInteger(requestedHeight);
+  if (width === null || height === null) {
+    throw structuralError(
+      'HWPX_IMAGE_DIMENSIONS_INVALID',
+      'Image width and height must be positive HWP-unit values.',
+      { width: command.width, height: command.height },
+    );
+  }
+  const insertParagraph = requireMethod(doc, 'insertParagraph');
+  const insertPicture = requireMethod(doc, 'insertPicture');
+  const insertText = command.caption === undefined ? null : requireMethod(doc, 'insertText');
+  const paragraphNative = parseNativeResult(
+    insertParagraph(target.sectionIndex, requestedParagraphIndex),
+    'insertParagraph',
+    ['paraIdx'],
+  );
+  const pictureNative = parseNativeResult(
+    insertPicture(
+      target.sectionIndex,
+      paragraphNative.paraIdx,
+      0,
+      '',
+      new Uint8Array(bytes),
+      width,
+      height,
+      image.width,
+      image.height,
+      image.extension,
+      String(command.altText ?? ''),
+      null,
+      null,
+    ),
+    'insertPicture',
+    ['paraIdx', 'controlIdx'],
+  );
+  const createdTarget = {
+    kind: 'image',
+    sectionIndex: target.sectionIndex,
+    paragraphIndex: pictureNative.paraIdx,
+    controlIndex: pictureNative.controlIdx,
+  };
+  const createdTargets = [createdTarget];
+  let captionNative = null;
+  if (command.caption !== undefined) {
+    const captionParagraphIndex = pictureNative.paraIdx + 1;
+    if (nonNegativeInteger(captionParagraphIndex) === null) {
+      throw structuralError(
+        'HWPX_TARGET_INVALID',
+        'The image caption paragraph index exceeds the RHWP u32 range.',
+        { pictureNative },
+      );
+    }
+    const paragraph = parseNativeResult(
+      insertParagraph(target.sectionIndex, captionParagraphIndex),
+      'insertParagraph',
+      ['paraIdx'],
+    );
+    const text = parseNativeResult(
+      insertText(target.sectionIndex, paragraph.paraIdx, 0, command.caption),
+      'insertText',
+      ['charOffset'],
+    );
+    const captionTarget = {
+      kind: 'paragraph',
+      sectionIndex: target.sectionIndex,
+      paragraphIndex: paragraph.paraIdx,
+    };
+    createdTargets.push(captionTarget);
+    captionNative = { paragraph, text };
+  }
+  return structuralResult(command, {
+    paragraph: paragraphNative,
+    picture: pictureNative,
+    caption: captionNative,
+  }, createdTarget, createdTargets);
+}
+
+function applyPageSetup(doc, command) {
+  const sectionIndex = resolveSectionIndex(doc, command.sectionIndex);
+  const width = positiveInteger(command.width);
+  const height = positiveInteger(command.height);
+  if (width === null || height === null) {
+    throw structuralError(
+      'HWPX_PAGE_SETUP_INVALID',
+      'setPageSetup width and height must be positive HWP-unit values.',
+    );
+  }
+  if (command.orientation !== undefined
+    && !['portrait', 'landscape'].includes(command.orientation)) {
+    throw structuralError(
+      'HWPX_PAGE_SETUP_INVALID',
+      'setPageSetup orientation must be portrait or landscape.',
+    );
+  }
+  const payload = { width, height };
+  const marginMap = {
+    top: 'marginTop',
+    right: 'marginRight',
+    bottom: 'marginBottom',
+    left: 'marginLeft',
+    header: 'marginHeader',
+    footer: 'marginFooter',
+    gutter: 'marginGutter',
+  };
+  for (const [publicName, nativeName] of Object.entries(marginMap)) {
+    if (command.margins?.[publicName] !== undefined) {
+      const margin = nonNegativeInteger(command.margins[publicName]);
+      if (margin === null) {
+        throw structuralError(
+          'HWPX_PAGE_SETUP_INVALID',
+          `setPageSetup margins.${publicName} must be a nonnegative HWP-unit value.`,
+        );
+      }
+      payload[nativeName] = margin;
+    }
+  }
+  if (command.orientation !== undefined) {
+    payload.landscape = command.orientation === 'landscape';
+  }
+  if ((payload.marginLeft ?? 0) + (payload.marginRight ?? 0) >= width
+    || (payload.marginTop ?? 0) + (payload.marginBottom ?? 0) >= height) {
+    throw structuralError(
+      'HWPX_PAGE_SETUP_INVALID',
+      'setPageSetup page margins must leave a positive body area.',
+      { width, height, margins: command.margins },
+    );
+  }
+  const setPageDef = requireMethod(doc, 'setPageDef');
+  const native = parseNativeResult(
+    setPageDef(sectionIndex, JSON.stringify(payload)),
+    'setPageDef',
+    ['pageCount'],
+  );
+  return structuralResult(command, native, {
+    kind: 'section',
+    sectionIndex,
+  });
+}
+
+const HEADER_FOOTER_APPLY_TO = new Map([
+  ['both', 0],
+  ['even', 1],
+  ['odd', 2],
+]);
+
+function applyHeaderFooter(doc, command) {
+  if (!['header', 'footer'].includes(command.type)) {
+    throw structuralError(
+      'HWPX_HEADER_FOOTER_TYPE_INVALID',
+      'setHeaderFooter type must be header or footer.',
+      { type: command.type },
+    );
+  }
+  if (typeof command.text !== 'string') {
+    throw structuralError(
+      'HWPX_HEADER_FOOTER_TEXT_REQUIRED',
+      'setHeaderFooter requires a text string.',
+    );
+  }
+  const applyToName = command.applyTo ?? 'both';
+  const applyTo = HEADER_FOOTER_APPLY_TO.get(applyToName);
+  if (applyTo === undefined) {
+    throw structuralError(
+      'HWPX_HEADER_FOOTER_APPLY_INVALID',
+      'setHeaderFooter applyTo must be both, odd, or even.',
+    );
+  }
+  const align = command.align ?? 'left';
+  if (!['left', 'center', 'right'].includes(align)) {
+    throw structuralError(
+      'HWPX_HEADER_FOOTER_ALIGN_INVALID',
+      'setHeaderFooter align must be left, center, or right.',
+    );
+  }
+  const sectionIndex = resolveSectionIndex(doc, command.target?.sectionIndex);
+  const isHeader = command.type === 'header';
+  const createHeaderFooter = requireMethod(doc, 'createHeaderFooter');
+  const insertTextInHeaderFooter = requireMethod(doc, 'insertTextInHeaderFooter');
+  const applyParaFormatInHf = requireMethod(doc, 'applyParaFormatInHf');
+  let replaced = null;
+  if (typeof doc?.getHeaderFooter === 'function') {
+    const existing = parseNativeResult(
+      doc.getHeaderFooter(sectionIndex, isHeader, applyTo),
+      'getHeaderFooter',
+    );
+    if (existing.exists === true) {
+      const deleteHeaderFooter = requireMethod(doc, 'deleteHeaderFooter');
+      replaced = parseNativeResult(
+        deleteHeaderFooter(sectionIndex, isHeader, applyTo),
+        'deleteHeaderFooter',
+      );
+    }
+  }
+  const controlNative = parseNativeResult(
+    createHeaderFooter(sectionIndex, isHeader, applyTo),
+    'createHeaderFooter',
+    ['paraIndex', 'controlIndex'],
+  );
+  const textNative = parseNativeResult(
+    insertTextInHeaderFooter(sectionIndex, isHeader, applyTo, 0, 0, command.text),
+    'insertTextInHeaderFooter',
+    ['charOffset'],
+  );
+  const alignNative = parseNativeResult(
+    applyParaFormatInHf(
+      sectionIndex,
+      isHeader,
+      applyTo,
+      0,
+      JSON.stringify({ alignment: align }),
+    ),
+    'applyParaFormatInHf',
+  );
+  return structuralResult(command, {
+    replaced,
+    control: controlNative,
+    text: textNative,
+    alignment: alignNative,
+  }, {
+    kind: 'headerFooter',
+    sectionIndex,
+    paragraphIndex: controlNative.paraIndex,
+    controlIndex: controlNative.controlIndex,
+    type: command.type,
+    applyTo: applyToName,
+  });
+}
+
+function applyInsertFootnote(doc, command, context) {
+  if (typeof command.text !== 'string' || command.text.trim().length === 0) {
+    throw structuralError(
+      'HWPX_FOOTNOTE_TEXT_REQUIRED',
+      'insertFootnote requires a nonblank footnote body.',
+    );
+  }
+  const target = resolveHwpxTextTarget(command);
+  const paragraphLength = inspectedParagraphLength(doc, context, target);
+  if (target.offset > paragraphLength) {
+    throw structuralError(
+      'HWPX_TARGET_INVALID',
+      'insertFootnote offset exceeds the inspected HWPX paragraph length.',
+      { target, paragraphLength },
+    );
+  }
+  const insertFootnote = requireMethod(doc, 'insertFootnote');
+  const insertTextInFootnote = requireMethod(doc, 'insertTextInFootnote');
+  const controlNative = parseNativeResult(
+    insertFootnote(target.sectionIndex, target.paragraphIndex, target.offset),
+    'insertFootnote',
+    ['paraIdx', 'controlIdx', 'footnoteNumber'],
+  );
+  const textNative = parseNativeResult(
+    insertTextInFootnote(
+      target.sectionIndex,
+      controlNative.paraIdx,
+      controlNative.controlIdx,
+      0,
+      2,
+      command.text,
+    ),
+    'insertTextInFootnote',
+    ['charOffset'],
+  );
+  const createdTarget = {
+    kind: 'footnote',
+    sectionIndex: target.sectionIndex,
+    paragraphIndex: controlNative.paraIdx,
+    controlIndex: controlNative.controlIdx,
+    footnoteNumber: controlNative.footnoteNumber,
+  };
+  return structuralResult(command, {
+    control: controlNative,
+    text: textNative,
+  }, createdTarget, [createdTarget]);
+}
+
 function applyHwpxStructuralCommand(doc, command, context = {}) {
   switch (command?.op) {
     case 'insertText':
@@ -275,6 +1032,18 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyDeleteRange(doc, command, context);
     case 'appendParagraph':
       return applyAppendParagraph(doc, command);
+    case 'table.create':
+      return applyCreateTable(doc, command, context);
+    case 'table.insertCaption':
+      return applyInsertTableCaption(doc, command, context);
+    case 'image.insertAfterParagraph':
+      return applyInsertImage(doc, command, context);
+    case 'setPageSetup':
+      return applyPageSetup(doc, command);
+    case 'setHeaderFooter':
+      return applyHeaderFooter(doc, command);
+    case 'insertFootnote':
+      return applyInsertFootnote(doc, command, context);
     default:
       throw structuralError(
         'HWPX_STRUCTURAL_OP_UNSUPPORTED',
@@ -289,3 +1058,5 @@ export {
   resolveHwpxTextTarget,
   structuralError,
 };
+import { readFileSync } from 'node:fs';
+import { extname } from 'node:path';

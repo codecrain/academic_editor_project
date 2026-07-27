@@ -157,6 +157,38 @@ test('insertText rejects omitted offsets and values outside the RHWP u32 range',
   assert.deepEqual(calls, []);
 });
 
+test('target aliases cannot hide invalid preferred fields or overflow derived indices', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 1,
+    insertText: (...args) => calls.push(['insertText', ...args]),
+    insertParagraph: (...args) => calls.push(['insertParagraph', ...args]),
+  };
+
+  assert.throws(
+    () => applyHwpxStructuralCommand(doc, {
+      op: 'insertText',
+      target: {
+        sectionIndex: 2 ** 32,
+        section: 0,
+        paragraphIndex: 0,
+        offset: 0,
+      },
+      text: '금지',
+    }),
+    error => error.code === 'HWPX_TARGET_INVALID',
+  );
+  assert.throws(
+    () => applyHwpxStructuralCommand(doc, {
+      op: 'appendParagraph',
+      target: { sectionIndex: 0, paragraphIndex: 0xFFFF_FFFF },
+      text: '금지',
+    }),
+    error => error.code === 'HWPX_TARGET_INVALID',
+  );
+  assert.deepEqual(calls, []);
+});
+
 test('deleteRange rejects offsets beyond the inspected paragraph before mutation', () => {
   const calls = [];
   const doc = { deleteRange: (...args) => calls.push(args) };
@@ -243,5 +275,500 @@ test('native results must be successful objects with required u32 fields', () =>
     }),
     error => error.code === 'HWPX_ENGINE_RESULT_INVALID',
   );
+  assert.deepEqual(calls, []);
+});
+
+test('table.create calls createTableEx at the inspected paragraph end and returns a native table target', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 5,
+    createTableEx: (json) => {
+      calls.push(JSON.parse(json));
+      return '{"ok":true,"paraIdx":2,"controlIdx":0}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'table.create',
+    target: { sectionIndex: 0, paragraphIndex: 1 },
+    rows: 3,
+    columns: 4,
+  });
+
+  assert.deepEqual(calls, [{
+    sectionIdx: 0,
+    paraIdx: 1,
+    charOffset: 5,
+    rowCount: 3,
+    colCount: 4,
+    treatAsChar: false,
+  }]);
+  assert.deepEqual(result.target, {
+    kind: 'table',
+    sectionIndex: 0,
+    paragraphIndex: 2,
+    controlIndex: 0,
+  });
+  assert.deepEqual(result.createdTargets, [result.target]);
+});
+
+test('table.insertCaption creates a native caption and writes its text through the caption cell', () => {
+  const calls = [];
+  const doc = {
+    setTableProperties: (...args) => {
+      calls.push(['setTableProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true,"captionCharOffset":4}';
+    },
+    insertTextInCell: (...args) => {
+      calls.push(['insertTextInCell', ...args]);
+      return '{"ok":true,"charOffset":13}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'table.insertCaption',
+    target: { tableId: 'tbl_0' },
+    text: '평가 결과',
+    position: 'before',
+  }, {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        native: { section: 1, paragraph: 3, control: 2 },
+      }],
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['setTableProperties', 1, 3, 2, { hasCaption: true, captionDirection: 2 }],
+    ['insertTextInCell', 1, 3, 2, 65534, 0, 4, '평가 결과'],
+  ]);
+  assert.deepEqual(result.target, {
+    kind: 'tableCaption',
+    sectionIndex: 1,
+    paragraphIndex: 3,
+    controlIndex: 2,
+  });
+});
+
+test('table.insertCaption rejects an existing native caption before mutation', () => {
+  const calls = [];
+  const doc = {
+    getTableProperties: () => '{"hasCaption":true,"captionDirection":2}',
+    setTableProperties: (...args) => calls.push(args),
+    insertTextInCell: (...args) => calls.push(args),
+  };
+  assert.throws(() => applyHwpxStructuralCommand(doc, {
+    op: 'table.insertCaption',
+    target: {
+      native: { section: 0, paragraph: 1, control: 2 },
+    },
+    text: '중복 금지',
+  }), error => error.code === 'HWPX_CAPTION_ALREADY_EXISTS');
+  assert.deepEqual(calls, []);
+});
+
+test('table.create applies advertised width, height, cell text, and caption options', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 2,
+    createTableEx: (json) => {
+      calls.push(['createTableEx', JSON.parse(json)]);
+      return '{"ok":true,"paraIdx":2,"controlIdx":0}';
+    },
+    getCellProperties: (...args) => {
+      calls.push(['getCellProperties', ...args]);
+      return '{"width":2000,"height":282}';
+    },
+    resizeTableCells: (...args) => {
+      calls.push(['resizeTableCells', ...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true}';
+    },
+    insertTextInCell: (...args) => {
+      calls.push(['insertTextInCell', ...args]);
+      return '{"ok":true,"charOffset":1}';
+    },
+    getTableProperties: () => '{"hasCaption":false}',
+    setTableProperties: (...args) => {
+      calls.push(['setTableProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true,"captionCharOffset":4}';
+    },
+  };
+  applyHwpxStructuralCommand(doc, {
+    op: 'table.create',
+    target: { sectionIndex: 0, paragraphIndex: 1 },
+    rows: 2,
+    columns: 2,
+    width: 4000,
+    height: 2000,
+    cellTexts: ['가', '나', '', '라'],
+    caption: '평가표',
+  });
+
+  assert.deepEqual(calls[0], ['createTableEx', {
+    sectionIdx: 0,
+    paraIdx: 1,
+    charOffset: 2,
+    rowCount: 2,
+    colCount: 2,
+    treatAsChar: false,
+    colWidths: [2000, 2000],
+  }]);
+  assert.deepEqual(calls.slice(1, 5), [
+    ['getCellProperties', 0, 2, 0, 0],
+    ['getCellProperties', 0, 2, 0, 1],
+    ['getCellProperties', 0, 2, 0, 2],
+    ['getCellProperties', 0, 2, 0, 3],
+  ]);
+  assert.deepEqual(calls[5], ['resizeTableCells', 0, 2, 0, [
+    { cellIdx: 0, heightDelta: 718 },
+    { cellIdx: 1, heightDelta: 718 },
+    { cellIdx: 2, heightDelta: 718 },
+    { cellIdx: 3, heightDelta: 718 },
+  ]]);
+  assert.deepEqual(calls.slice(6, 9), [
+    ['insertTextInCell', 0, 2, 0, 0, 0, 0, '가'],
+    ['insertTextInCell', 0, 2, 0, 1, 0, 0, '나'],
+    ['insertTextInCell', 0, 2, 0, 3, 0, 0, '라'],
+  ]);
+  assert.deepEqual(calls.slice(9), [
+    ['setTableProperties', 0, 2, 0, { hasCaption: true, captionDirection: 2 }],
+    ['insertTextInCell', 0, 2, 0, 65534, 0, 4, '평가표'],
+  ]);
+});
+
+test('image.insertAfterParagraph registers decoded bytes in a new paragraph', () => {
+  const calls = [];
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const doc = {
+    insertParagraph: (...args) => {
+      calls.push(['insertParagraph', ...args]);
+      return '{"ok":true,"paraIdx":4,"newParagraphCount":6}';
+    },
+    insertPicture: (...args) => {
+      calls.push(['insertPicture', ...args]);
+      return '{"ok":true,"paraIdx":4,"controlIdx":0}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'image.insertAfterParagraph',
+    target: { sectionIndex: 0, paragraphIndex: 2 },
+    bytesBase64: png.toString('base64'),
+    mimeType: 'image/png',
+    altText: '기관 로고',
+  });
+
+  assert.deepEqual(calls[0], ['insertParagraph', 0, 3]);
+  assert.equal(calls[1][0], 'insertPicture');
+  assert.deepEqual(calls[1].slice(1, 5), [0, 4, 0, '']);
+  assert.deepEqual(Buffer.from(calls[1][5]), png);
+  assert.deepEqual(calls[1].slice(6), [75, 75, 1, 1, 'png', '기관 로고', null, null]);
+  assert.deepEqual(result.target, {
+    kind: 'image',
+    sectionIndex: 0,
+    paragraphIndex: 4,
+    controlIndex: 0,
+  });
+});
+
+test('image.insertAfterParagraph preserves aspect ratio and creates its advertised caption paragraph', () => {
+  const calls = [];
+  const pngHeader = Buffer.alloc(24);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(pngHeader, 0);
+  pngHeader.writeUInt32BE(2, 16);
+  pngHeader.writeUInt32BE(1, 20);
+  const doc = {
+    insertParagraph: (...args) => {
+      calls.push(['insertParagraph', ...args]);
+      const paraIdx = args[1];
+      return JSON.stringify({ ok: true, paraIdx, newParagraphCount: paraIdx + 2 });
+    },
+    insertPicture: (...args) => {
+      calls.push(['insertPicture', ...args]);
+      return '{"ok":true,"paraIdx":3,"controlIdx":1}';
+    },
+    insertText: (...args) => {
+      calls.push(['insertText', ...args]);
+      return '{"ok":true,"charOffset":5}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'image.insertAfterParagraph',
+    target: { sectionIndex: 0, paragraphIndex: 2 },
+    bytes: pngHeader,
+    width: 300,
+    caption: '그림 1',
+  });
+
+  assert.deepEqual(calls[0], ['insertParagraph', 0, 3]);
+  assert.deepEqual(calls[1].slice(6, 10), [300, 150, 2, 1]);
+  assert.deepEqual(calls.slice(2), [
+    ['insertParagraph', 0, 4],
+    ['insertText', 0, 4, 0, '그림 1'],
+  ]);
+  assert.deepEqual(result.createdTargets, [
+    {
+      kind: 'image',
+      sectionIndex: 0,
+      paragraphIndex: 3,
+      controlIndex: 1,
+    },
+    {
+      kind: 'paragraph',
+      sectionIndex: 0,
+      paragraphIndex: 4,
+    },
+  ]);
+});
+
+test('setPageSetup maps public fields to the RHWP PageDef payload', () => {
+  const calls = [];
+  const doc = {
+    getSectionCount: () => 2,
+    setPageDef: (section, json) => {
+      calls.push([section, JSON.parse(json)]);
+      return '{"ok":true,"pageCount":7}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'setPageSetup',
+    sectionIndex: 1,
+    width: 59528,
+    height: 84189,
+    orientation: 'landscape',
+    margins: {
+      top: 5669,
+      right: 4252,
+      bottom: 5669,
+      left: 4252,
+      header: 2835,
+      footer: 2835,
+      gutter: 0,
+    },
+  });
+
+  assert.deepEqual(calls, [[1, {
+    width: 59528,
+    height: 84189,
+    marginTop: 5669,
+    marginRight: 4252,
+    marginBottom: 5669,
+    marginLeft: 4252,
+    marginHeader: 2835,
+    marginFooter: 2835,
+    marginGutter: 0,
+    landscape: true,
+  }]]);
+  assert.equal(result.native.pageCount, 7);
+});
+
+test('setHeaderFooter creates, writes, and aligns the requested native control', () => {
+  const calls = [];
+  const doc = {
+    getSectionCount: () => 1,
+    createHeaderFooter: (...args) => {
+      calls.push(['createHeaderFooter', ...args]);
+      return '{"ok":true,"kind":"footer","applyTo":2,"paraIndex":0,"controlIndex":3}';
+    },
+    insertTextInHeaderFooter: (...args) => {
+      calls.push(['insertTextInHeaderFooter', ...args]);
+      return '{"ok":true,"charOffset":9}';
+    },
+    applyParaFormatInHf: (...args) => {
+      calls.push(['applyParaFormatInHf', ...args.slice(0, 4), JSON.parse(args[4])]);
+      return '{"ok":true}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'footer',
+    applyTo: 'odd',
+    text: '내부검토용',
+    align: 'center',
+  });
+
+  assert.deepEqual(calls, [
+    ['createHeaderFooter', 0, false, 2],
+    ['insertTextInHeaderFooter', 0, false, 2, 0, 0, '내부검토용'],
+    ['applyParaFormatInHf', 0, false, 2, 0, { alignment: 'center' }],
+  ]);
+  assert.deepEqual(result.target, {
+    kind: 'headerFooter',
+    sectionIndex: 0,
+    paragraphIndex: 0,
+    controlIndex: 3,
+    type: 'footer',
+    applyTo: 'odd',
+  });
+});
+
+test('insertFootnote creates the reference and writes the native footnote body', () => {
+  const calls = [];
+  const doc = {
+    getParagraphLength: () => 10,
+    insertFootnote: (...args) => {
+      calls.push(['insertFootnote', ...args]);
+      return '{"ok":true,"paraIdx":2,"controlIdx":4,"footnoteNumber":1}';
+    },
+    insertTextInFootnote: (...args) => {
+      calls.push(['insertTextInFootnote', ...args]);
+      return '{"ok":true,"charOffset":8}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'insertFootnote',
+    target: { sectionIndex: 0, paragraphIndex: 2, offset: 5 },
+    text: '기준일 주석',
+  });
+
+  assert.deepEqual(calls, [
+    ['insertFootnote', 0, 2, 5],
+    ['insertTextInFootnote', 0, 2, 4, 0, 2, '기준일 주석'],
+  ]);
+  assert.deepEqual(result.target, {
+    kind: 'footnote',
+    sectionIndex: 0,
+    paragraphIndex: 2,
+    controlIndex: 4,
+    footnoteNumber: 1,
+  });
+});
+
+test('object and page adapters reject invalid inputs before any RHWP mutation', () => {
+  const calls = [];
+  const doc = new Proxy({
+    getSectionCount: () => 1,
+  }, {
+    get(target, property) {
+      if (property in target) return target[property];
+      return (...args) => calls.push([property, ...args]);
+    },
+  });
+
+  const invalidCommands = [
+    {
+      command: {
+        op: 'table.create',
+        target: { sectionIndex: 0, paragraphIndex: 0 },
+        rows: 0,
+        columns: 2,
+      },
+      code: 'HWPX_TABLE_DIMENSIONS_INVALID',
+    },
+    {
+      command: {
+        op: 'image.insertAfterParagraph',
+        target: { sectionIndex: 0, paragraphIndex: 0 },
+      },
+      code: 'HWPX_IMAGE_REQUIRED',
+    },
+    {
+      command: {
+        op: 'setPageSetup',
+        sectionIndex: 4,
+        width: 10,
+        height: 10,
+      },
+      code: 'HWPX_SECTION_INVALID',
+    },
+    {
+      command: {
+        op: 'setHeaderFooter',
+        target: { sectionIndex: 0 },
+        type: 'side-note',
+        text: '금지',
+      },
+      code: 'HWPX_HEADER_FOOTER_TYPE_INVALID',
+    },
+    {
+      command: {
+        op: 'insertFootnote',
+        target: { sectionIndex: 0, paragraphIndex: 0, offset: 0 },
+        text: '   ',
+      },
+      code: 'HWPX_FOOTNOTE_TEXT_REQUIRED',
+    },
+  ];
+
+  for (const { command, code } of invalidCommands) {
+    assert.throws(
+      () => applyHwpxStructuralCommand(doc, command),
+      error => error.code === code,
+    );
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('multi-step adapters verify every required method and geometry before first mutation', () => {
+  const captionCalls = [];
+  assert.throws(() => applyHwpxStructuralCommand({
+    setTableProperties: (...args) => captionCalls.push(args),
+  }, {
+    op: 'table.insertCaption',
+    target: { native: { section: 0, paragraph: 1, control: 0 } },
+    text: '금지',
+  }), error => error.code === 'HWPX_ENGINE_METHOD_UNAVAILABLE');
+  assert.deepEqual(captionCalls, []);
+
+  const headerCalls = [];
+  assert.throws(() => applyHwpxStructuralCommand({
+    getSectionCount: () => 1,
+    getHeaderFooter: () => '{"ok":true,"exists":true}',
+    deleteHeaderFooter: (...args) => {
+      headerCalls.push(args);
+      return '{"ok":true}';
+    },
+  }, {
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'header',
+    text: '금지',
+  }), error => error.code === 'HWPX_ENGINE_METHOD_UNAVAILABLE');
+  assert.deepEqual(headerCalls, []);
+
+  const pageCalls = [];
+  assert.throws(() => applyHwpxStructuralCommand({
+    getSectionCount: () => 1,
+    setPageDef: (...args) => pageCalls.push(args),
+  }, {
+    op: 'setPageSetup',
+    sectionIndex: 0,
+    width: 1000,
+    height: 1000,
+    margins: { left: 600, right: 500, top: 10, bottom: 10 },
+  }), error => error.code === 'HWPX_PAGE_SETUP_INVALID');
+  assert.deepEqual(pageCalls, []);
+
+  const tableCalls = [];
+  assert.throws(() => applyHwpxStructuralCommand({
+    getParagraphLength: () => 1,
+    createTableEx: (...args) => tableCalls.push(args),
+  }, {
+    op: 'table.create',
+    target: { sectionIndex: 0, paragraphIndex: 0 },
+    rows: 2,
+    columns: 2,
+    height: 399,
+  }), error => error.code === 'HWPX_TABLE_DIMENSIONS_INVALID');
+  assert.deepEqual(tableCalls, []);
+});
+
+test('image insertion rejects declared MIME that conflicts with the binary signature', () => {
+  const calls = [];
+  const pngHeader = Buffer.alloc(24);
+  Buffer.from('89504e470d0a1a0a', 'hex').copy(pngHeader, 0);
+  pngHeader.writeUInt32BE(1, 16);
+  pngHeader.writeUInt32BE(1, 20);
+  assert.throws(() => applyHwpxStructuralCommand({
+    insertParagraph: (...args) => calls.push(args),
+    insertPicture: (...args) => calls.push(args),
+  }, {
+    op: 'image.insertAfterParagraph',
+    target: { sectionIndex: 0, paragraphIndex: 0 },
+    bytes: pngHeader,
+    mimeType: 'image/jpeg',
+  }), error => error.code === 'HWPX_IMAGE_FORMAT_UNSUPPORTED');
   assert.deepEqual(calls, []);
 });
