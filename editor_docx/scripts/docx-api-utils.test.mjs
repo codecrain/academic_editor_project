@@ -62,6 +62,16 @@ function createUniformMultiRunParagraphDocx() {
   return session.save().bytes;
 }
 
+function createBookmarkedParagraphDocx() {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Bookmarked title'] }));
+  session.documentXml = session.documentXml.replace(
+    /(<w:p>)([\s\S]*?)(<\/w:p>)/,
+    '$1<w:bookmarkStart w:id="7" w:name="_ContractBookmark"/>$2<w:bookmarkEnd w:id="7"/>$3',
+  );
+  session.dirtyDocument = true;
+  return session.save().bytes;
+}
+
 test('DOCX API preserve save returns original bytes when no commands run', () => {
   const input = readFileSync('editor_docx/test/data/template.docx');
   const session = new DocxApiSession(input);
@@ -532,6 +542,49 @@ test('DOCX paragraph replacement collapses visually uniform runs without model-a
   const updated = reopened.inspectTarget({ paragraph: { number: 0 } });
   assert.equal(updated.currentText, 'A complete replacement abstract.');
   assert.equal(updated.runs.length, 1);
+});
+
+test('DOCX paragraph and range replacement preserve zero-width structural markers', () => {
+  for (const command of [
+    {
+      op: 'text.replaceParagraph',
+      location: { paragraph: { number: 0 } },
+      text: 'Replaced bookmarked title',
+    },
+    {
+      op: 'text.replace',
+      target: { native: { para: 0, offset: 0, length: 'Bookmarked title'.length } },
+      text: 'Range-replaced bookmarked title',
+    },
+  ]) {
+    const session = new DocxApiSession(createBookmarkedParagraphDocx());
+    const baseline = session.readJson();
+    session.apply([command]);
+    const saved = session.save().bytes;
+    const reopened = new DocxApiSession(saved);
+
+    assert.match(reopened.documentXml, /<w:bookmarkStart w:id="7" w:name="_ContractBookmark"\/>/);
+    assert.match(reopened.documentXml, /<w:bookmarkEnd w:id="7"\/>/);
+    assert.equal(reopened.readJson().integrityGraph.bookmarkStarts, 1);
+    assert.equal(reopened.readJson().integrityGraph.bookmarkEnds, 1);
+    assert.equal(session.qualityCheck({ baselineJson: baseline }).ok, true);
+  }
+});
+
+test('DOCX quality check fails closed when a structural marker disappears', () => {
+  const session = new DocxApiSession(createBookmarkedParagraphDocx());
+  const baseline = session.readJson();
+  session.documentXml = session.documentXml.replace(
+    /<w:bookmarkStart w:id="7" w:name="_ContractBookmark"\/>/,
+    '',
+  );
+  session.dirtyDocument = true;
+
+  const report = session.qualityCheck({ baselineJson: baseline });
+
+  assert.equal(report.ok, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'structural-marker-loss'));
+  assert.ok(report.issues.some((issue) => issue.code === 'unbalanced-bookmarks'));
 });
 
 test('DOCX paragraph replacement requires explicit segments and preserves every mixed-style run', () => {

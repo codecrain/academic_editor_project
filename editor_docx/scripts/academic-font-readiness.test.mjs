@@ -103,7 +103,7 @@ test('academic font startup assertion rejects an incomplete installation manifes
 test('native startup and sh.start deployment both gate runtime launch on academic font readiness', () => {
   const starter = readProjectFile('editor_docx/scripts/start-editor.mjs');
   const doctor = readProjectFile('editor_docx/scripts/doctor-native-editor.mjs');
-  const deploy = readProjectFile('editor_docx/scripts/deploy-native-editor.sh');
+  const deploy = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
 
   const nativeStart = starter.slice(starter.indexOf('async function startNative'));
   assert.match(nativeStart, /assertAcademicFontReadiness\(\)/);

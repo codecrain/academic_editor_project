@@ -11,11 +11,11 @@ const CHECKED_SCRIPTS = [
   'editor_docx/scripts/status-editor.mjs',
   'editor_docx/scripts/smoke-editor.mjs',
   'editor_server/editor-gateway.mjs',
-  'editor_docx/scripts/dev-check.mjs',
+  'editor_common/scripts/dev-check.mjs',
   'editor_docx/scripts/dev-source-editor.mjs',
   'editor_docx/scripts/doctor-native-editor.mjs',
   'editor_docx/scripts/audit-native-editor-runtime.mjs',
-  'editor_docx/scripts/export-source-offer.mjs',
+  'editor_common/scripts/export-source-offer.mjs',
   'editor_docx/scripts/build-native-editor.mjs',
   'editor_docx/scripts/install-native-editor.mjs',
   'editor_docx/scripts/install-native-artifact.mjs',
@@ -153,12 +153,12 @@ function stopCreatedRuntime(before, after) {
 }
 
 function quickChecks() {
-  run(process.execPath, ['editor_docx/scripts/verify-public-safety.mjs']);
+  run(process.execPath, ['editor_common/scripts/verify-public-safety.mjs']);
   run(process.execPath, [
     '--test',
     'editor_docx/scripts/start-editor.test.mjs',
-    'editor_docx/scripts/export-source-offer.test.mjs',
-    'editor_docx/scripts/dev-tools.test.mjs',
+    'editor_common/scripts/export-source-offer.test.mjs',
+    'editor_common/scripts/dev-tools.test.mjs',
     'editor_server/editor-gateway.test.mjs',
     'editor_common/editor-api-command-contract.test.mjs',
   ]);

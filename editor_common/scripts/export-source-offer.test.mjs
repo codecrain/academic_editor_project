@@ -10,7 +10,7 @@ test('export-source-offer writes reproducible public source evidence without sec
   const outputPath = path.join(tempDir, 'offer.txt');
 
   try {
-    const result = spawnSync(process.execPath, ['editor_docx/scripts/export-source-offer.mjs', '--output', outputPath], {
+    const result = spawnSync(process.execPath, ['editor_common/scripts/export-source-offer.mjs', '--output', outputPath], {
       cwd: path.resolve('.'),
       encoding: 'utf8',
       env: {
@@ -37,7 +37,7 @@ test('export-source-offer reads git metadata from its own repository', () => {
   const outputPath = path.join(tempDir, 'offer.txt');
 
   try {
-    const result = spawnSync(process.execPath, [path.resolve('editor_docx/scripts/export-source-offer.mjs'), '--output', outputPath], {
+    const result = spawnSync(process.execPath, [path.resolve('editor_common/scripts/export-source-offer.mjs'), '--output', outputPath], {
       cwd: tempDir,
       encoding: 'utf8',
       env: {

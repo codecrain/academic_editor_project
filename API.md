@@ -355,6 +355,15 @@ Current shared response shape:
     "pictures": [],
     "charts": []
   },
+  "integrityGraph": {
+    "bookmarkStarts": 2,
+    "bookmarkEnds": 2,
+    "commentReferences": 1,
+    "footnoteReferences": 0,
+    "endnoteReferences": 0,
+    "fieldCharacters": 4,
+    "hyperlinks": 3
+  },
   "editableTargets": {
     "paragraphs": [],
     "cells": []
@@ -374,7 +383,7 @@ editableTargets.cells[]
 objectGraph.images[]
 ```
 
-Currently both DOCX and HWPX utilities also return `sections`, `styleGraph`, `layoutGraph`, and `warnings`; callers should use them when present but must not use them as the only target source.
+Currently both DOCX and HWPX utilities also return `sections`, `styleGraph`, `layoutGraph`, and `warnings`; callers should use them when present but must not use them as the only target source. DOCX additionally returns `integrityGraph` counters for zero-width structures and references such as bookmarks, comments, notes, fields, and hyperlinks.
 
 LLM use:
 - `blocks[]` gives paragraph anchors.
@@ -1372,10 +1381,13 @@ isolated session opened. An `empty-table`, `cell-overflow-risk`, or
 `cell-line-overflow-risk` warning at the same stable table/cell location is
 reported as `severity=info`, `preexisting=true`, and
 `baselineSeverity=warning` only when every risk ratio is unchanged or lower.
-For DOCX, new or worsened capacity warnings block finalization. For HWPX,
-warnings are returned for review but do not block when package, object, reopen,
-and render gates pass. Errors are never downgraded and always block save/PDF
-finalization.
+For DOCX, new or worsened capacity warnings block finalization. DOCX also
+compares `integrityGraph` with the session-opening baseline: lost structural
+markers or changed start/end balance produce `structural-marker-loss` or
+`unbalanced-*` errors. Paragraph and range replacements preserve those
+zero-width structures through save and reopen. For HWPX, warnings are returned
+for review but do not block when package, object, reopen, and render gates pass.
+Errors are never downgraded and always block save/PDF finalization.
 
 `POST /v1/{format}/documents/{id}/quality/render-compare`
 

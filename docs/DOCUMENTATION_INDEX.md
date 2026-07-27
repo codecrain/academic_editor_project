@@ -35,8 +35,10 @@ contract gates so such drift is treated as a test failure.
 ## Source and product boundary
 
 `editor_docx/` and `editor_hwpx/` are separate editor engines. They do not
-import each other's implementation. They share only the format-neutral modules
-under `editor_common/` and the server transport under `editor_server/`.
+import each other's implementation. Engine code shares only the format-neutral
+modules under `editor_common/` and the server transport under `editor_server/`.
+Repository-wide orchestration belongs in `editor_common/scripts/`; it may start,
+stop, deploy, or verify both engines without becoming part of either engine.
 Compatibility entrypoints under each engine are thin re-exports; they do not
 duplicate gateway or MCP implementation.
 

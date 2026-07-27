@@ -424,6 +424,87 @@ function tagXml(xml, tagName) {
   return selfClosing ? selfClosing[0] : '';
 }
 
+const PARAGRAPH_RANGE_START_TAGS = new Set([
+  'bookmarkStart',
+  'commentRangeStart',
+  'permStart',
+  'moveFromRangeStart',
+  'moveToRangeStart',
+  'customXmlInsRangeStart',
+  'customXmlDelRangeStart',
+  'customXmlMoveFromRangeStart',
+  'customXmlMoveToRangeStart',
+]);
+const PARAGRAPH_RANGE_END_TAGS = new Set([
+  'bookmarkEnd',
+  'commentRangeEnd',
+  'permEnd',
+  'moveFromRangeEnd',
+  'moveToRangeEnd',
+  'customXmlInsRangeEnd',
+  'customXmlDelRangeEnd',
+  'customXmlMoveFromRangeEnd',
+  'customXmlMoveToRangeEnd',
+]);
+
+function paragraphStructuralFragments(xml) {
+  const prefix = [];
+  const suffix = [];
+  for (const match of String(xml || '').matchAll(/<w:([A-Za-z][A-Za-z0-9]*)\b[^>]*\/>/g)) {
+    if (PARAGRAPH_RANGE_START_TAGS.has(match[1])) {
+      prefix.push(match[0]);
+    } else if (PARAGRAPH_RANGE_END_TAGS.has(match[1])) {
+      suffix.push(match[0]);
+    }
+  }
+  for (const match of String(xml || '').matchAll(/<w:r\b[\s\S]*?<\/w:r>/g)) {
+    if (/<w:(?:commentReference|footnoteReference|endnoteReference)\b/.test(match[0])) {
+      suffix.push(match[0]);
+    }
+  }
+  return { prefix: prefix.join(''), suffix: suffix.join('') };
+}
+
+function restoreParagraphStructuralFragments(replacement, template) {
+  const fragments = paragraphStructuralFragments(template);
+  let next = String(replacement || '');
+  if (fragments.prefix) {
+    const pPr = tagXml(next, 'pPr');
+    next = pPr
+      ? next.replace(pPr, `${pPr}${fragments.prefix}`)
+      : next.replace(/<w:p\b[^>]*>/, (open) => `${open}${fragments.prefix}`);
+  }
+  if (fragments.suffix) {
+    const close = next.lastIndexOf('</w:p>');
+    assert.ok(close >= 0, 'replacement paragraph closing tag not found');
+    next = `${next.slice(0, close)}${fragments.suffix}${next.slice(close)}`;
+  }
+  return next;
+}
+
+function structuralIntegrityGraph(documentXml) {
+  const count = (tagName) => (
+    String(documentXml || '').match(new RegExp(`<w:${tagName}\\b`, 'g')) ?? []
+  ).length;
+  return {
+    bookmarkStarts: count('bookmarkStart'),
+    bookmarkEnds: count('bookmarkEnd'),
+    commentRangeStarts: count('commentRangeStart'),
+    commentRangeEnds: count('commentRangeEnd'),
+    permissionStarts: count('permStart'),
+    permissionEnds: count('permEnd'),
+    moveFromRangeStarts: count('moveFromRangeStart'),
+    moveFromRangeEnds: count('moveFromRangeEnd'),
+    moveToRangeStarts: count('moveToRangeStart'),
+    moveToRangeEnds: count('moveToRangeEnd'),
+    commentReferences: count('commentReference'),
+    footnoteReferences: count('footnoteReference'),
+    endnoteReferences: count('endnoteReference'),
+    fieldCharacters: count('fldChar'),
+    hyperlinks: count('hyperlink'),
+  };
+}
+
 function removeTagXml(xml, tagName) {
   return xml
     .replace(new RegExp(`<w:${tagName}\\b[\\s\\S]*?<\\/w:${tagName}>`, 'g'), '')
@@ -1186,6 +1267,7 @@ export class DocxApiSession {
         })),
       },
       objectGraph,
+      integrityGraph: structuralIntegrityGraph(this.documentXml),
       editableTargets: editableTargets(sections, tables),
       warnings: [],
     };
@@ -1860,6 +1942,7 @@ export class DocxApiSession {
       const rPrXml = visibleTemplateRun?.rPrXml ?? tagXml(template, 'rPr');
       replacement = paragraphsXmlFromText(text, { pPrXml, rPrXml });
     }
+    replacement = restoreParagraphStructuralFragments(replacement, template);
     this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${replacement}${this.documentXml.slice(paragraph.end)}`;
     this.dirtyDocument = true;
   }
@@ -1923,7 +2006,10 @@ export class DocxApiSession {
       ? `<w:ins w:id="${revisionId + 1}" w:author="${author}" w:date="${date}">${textRunXml(insertedText, rPrXml)}</w:ins>`
       : '';
     const paragraphOpen = paragraph.xml.match(/^<w:p\b[^>]*>/)?.[0] ?? '<w:p>';
-    const replacement = `${paragraphOpen}${pPrXml}${textRunXml(beforeText, rPrXml)}${deletionXml}${insertionXml}${textRunXml(afterText, rPrXml)}</w:p>`;
+    const replacement = restoreParagraphStructuralFragments(
+      `${paragraphOpen}${pPrXml}${textRunXml(beforeText, rPrXml)}${deletionXml}${insertionXml}${textRunXml(afterText, rPrXml)}</w:p>`,
+      paragraph.xml,
+    );
     this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${replacement}${this.documentXml.slice(paragraph.end)}`;
     this.ensureTrackedChangesEnabled();
     this.dirtyDocument = true;
@@ -2341,6 +2427,45 @@ export class DocxApiSession {
               location: currentCell.location,
               before: baselineCell.styleFingerprint.hash,
               after: currentCell.styleFingerprint.hash,
+            });
+          }
+        }
+      }
+      const baselineIntegrity = options.baselineJson.integrityGraph;
+      const currentIntegrity = json.integrityGraph;
+      if (baselineIntegrity && currentIntegrity) {
+        const lost = Object.fromEntries(
+          Object.keys(baselineIntegrity)
+            .filter((key) => Number(currentIntegrity[key] ?? 0) < Number(baselineIntegrity[key] ?? 0))
+            .map((key) => [key, {
+              before: Number(baselineIntegrity[key] ?? 0),
+              after: Number(currentIntegrity[key] ?? 0),
+            }]),
+        );
+        if (Object.keys(lost).length) {
+          issues.push({
+            severity: 'error',
+            code: 'structural-marker-loss',
+            message: 'Zero-width document structures or references were removed from the baseline.',
+            lost,
+          });
+        }
+        for (const [label, startKey, endKey] of [
+          ['bookmarks', 'bookmarkStarts', 'bookmarkEnds'],
+          ['comment-ranges', 'commentRangeStarts', 'commentRangeEnds'],
+          ['permissions', 'permissionStarts', 'permissionEnds'],
+          ['move-from-ranges', 'moveFromRangeStarts', 'moveFromRangeEnds'],
+          ['move-to-ranges', 'moveToRangeStarts', 'moveToRangeEnds'],
+        ]) {
+          const baselineBalance = Number(baselineIntegrity[startKey] ?? 0) - Number(baselineIntegrity[endKey] ?? 0);
+          const currentBalance = Number(currentIntegrity[startKey] ?? 0) - Number(currentIntegrity[endKey] ?? 0);
+          if (currentBalance !== baselineBalance) {
+            issues.push({
+              severity: 'error',
+              code: `unbalanced-${label}`,
+              message: `${label} start/end balance changed from baseline.`,
+              before: baselineBalance,
+              after: currentBalance,
             });
           }
         }

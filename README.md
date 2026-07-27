@@ -25,10 +25,13 @@ the open-source tree.
 
 DOCX and HWPX are separate editor engines. `editor_docx/` owns the
 Collabora/WOPI implementation and `editor_hwpx/` owns RHWP Studio and HWPX
-package mutation. They share only the format-neutral modules in
+package mutation. Engine code shares only the format-neutral modules in
 `editor_common/` and the HTTP/MCP/WOPI transport in `editor_server/`.
-Compatibility scripts under each engine are thin re-exports of that shared
-server; no engine imports the other engine's implementation.
+Repository-wide start, stop, deployment, compliance, and development checks
+live under `editor_common/scripts/`; those tools orchestrate both engines but
+do not merge their implementations. Compatibility scripts under each engine
+are thin re-exports of the shared server, and no engine imports the other
+engine's implementation.
 
 Current documentation starts at [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
 The complete transport contract is [API.md](API.md), and the reproducible HWPX

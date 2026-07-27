@@ -278,7 +278,7 @@ async function main() {
         ok: process.platform === 'linux',
         value: process.platform,
       },
-      publicSafety: run(process.execPath, [path.join('editor_docx', 'scripts', 'verify-public-safety.mjs')]),
+      publicSafety: run(process.execPath, [path.join('editor_common', 'scripts', 'verify-public-safety.mjs')]),
       doctor: run(process.execPath, [path.join('editor_docx', 'scripts', 'doctor-native-editor.mjs'), '--require-installed'], {
         env: {
           ...process.env,

@@ -98,7 +98,7 @@ test('source image preparation supports both legacy and current upstream docker 
 });
 
 test('dev check cleans up only runtimes created by the check', () => {
-  const devCheck = readProjectFile('editor_docx/scripts/dev-check.mjs');
+  const devCheck = readProjectFile('editor_common/scripts/dev-check.mjs');
   assert.match(devCheck, /snapshotRuntime\(\)/);
   assert.match(devCheck, /if \(!before\.dockerExists && after\.dockerExists\)/);
   assert.match(devCheck, /if \(!before\.pm2Exists && after\.pm2Exists\)/);
@@ -119,10 +119,10 @@ test('smoke check validates discovery, browser rendering, and websocket upgrades
 test('package exposes fast dev and source hot-loop commands', () => {
   const pkg = JSON.parse(readProjectFile('package.json'));
   assert.equal(pkg.license, 'MPL-2.0');
-  assert.equal(pkg.scripts.dev, 'node editor_docx/scripts/start-local-editors.mjs');
-  assert.equal(pkg.scripts.stop, 'node editor_docx/scripts/stop-local-editors.mjs');
-  assert.equal(pkg.scripts['dev:check'], 'node editor_docx/scripts/dev-check.mjs');
-  assert.equal(pkg.scripts['dev:check:runtime'], 'node editor_docx/scripts/dev-check.mjs --runtime');
+  assert.equal(pkg.scripts.dev, 'node editor_common/scripts/start-local-editors.mjs');
+  assert.equal(pkg.scripts.stop, 'node editor_common/scripts/stop-local-editors.mjs');
+  assert.equal(pkg.scripts['dev:check'], 'node editor_common/scripts/dev-check.mjs');
+  assert.equal(pkg.scripts['dev:check:runtime'], 'node editor_common/scripts/dev-check.mjs --runtime');
   assert.equal(pkg.scripts['dev:source:run'], 'node editor_docx/scripts/dev-source-editor.mjs run');
   assert.equal(pkg.scripts['deploy:dev'], 'bash sh.start_dev');
   assert.equal(pkg.scripts['deploy:prod'], 'bash sh.start');
@@ -132,7 +132,7 @@ test('package exposes fast dev and source hot-loop commands', () => {
 });
 
 test('local dev starts DOCX and HWPX on stable subpaths', () => {
-  const localDev = readProjectFile('editor_docx/scripts/start-local-editors.mjs');
+  const localDev = readProjectFile('editor_common/scripts/start-local-editors.mjs');
   const rhwpStart = readProjectFile('editor_hwpx/scripts/start-studio.mjs');
   const rhwpEnsure = readProjectFile('editor_hwpx/scripts/ensure-studio.mjs');
 
@@ -149,7 +149,7 @@ test('local dev starts DOCX and HWPX on stable subpaths', () => {
 test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   const prod = readProjectFile('sh.start');
   const dev = readProjectFile('sh.start_dev');
-  const helper = readProjectFile('editor_docx/scripts/deploy-native-editor.sh');
+  const helper = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
 
   assert.match(prod, /EDITOR_REQUIRE_PUBLIC_URL/);
   assert.match(prod, /http:\/\/175\.193\.85\.86:11004/);

@@ -176,7 +176,7 @@ test('runtime and evaluation entrypoints reference only the canonical shared ser
   const checkedFiles = [
     path.resolve('editor_docx/scripts/docx-command-catalog.test.mjs'),
     path.resolve('editor_docx/scripts/live-paper-command-matrix.mjs'),
-    path.resolve('editor_docx/scripts/start-local-editors.mjs'),
+    path.resolve('editor_common/scripts/start-local-editors.mjs'),
     path.resolve('evaluation/docs-workspace-v1/start-isolated-gateway.mjs'),
   ];
   for (const file of checkedFiles) {
