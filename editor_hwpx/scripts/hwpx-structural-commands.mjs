@@ -263,13 +263,165 @@ function applyDeleteRange(doc, command, context) {
   );
 }
 
-function applyAppendParagraph(doc, command) {
+function resolveAppendParagraphStyleSource(doc, styleSource, context) {
+  const sourceCommand = { target: styleSource };
+  if (isCellStyleTarget(sourceCommand)) {
+    if (styleSource?.tableId) {
+      const tables = context?.before?.tables?.filter(item => item?.id === styleSource.tableId) ?? [];
+      if (tables.length !== 1) {
+        throw structuralError(
+          'HWPX_STYLE_SOURCE_UNRESOLVED',
+          'appendParagraph styleSource must resolve to exactly one inspected table.',
+          { styleSource, matches: tables.length },
+        );
+      }
+      const requestedCell = firstSpecifiedInteger(
+        styleSource.cell?.number,
+        styleSource.tableCell?.number,
+        styleSource.cellIndex,
+      );
+      const cells = tables[0].cells?.filter(item =>
+        firstSpecifiedInteger(
+          item?.native?.cellIndex,
+          item?.cellIndex,
+          item?.location?.cell?.number,
+        ) === requestedCell) ?? [];
+      if (cells.length !== 1) {
+        throw structuralError(
+          'HWPX_STYLE_SOURCE_UNRESOLVED',
+          'appendParagraph styleSource must resolve to exactly one inspected table cell.',
+          { styleSource, matches: cells.length },
+        );
+      }
+    }
+    let target;
+    try {
+      target = resolveHwpxCellTarget(sourceCommand, context);
+    } catch (cause) {
+      throw structuralError(
+        'HWPX_STYLE_SOURCE_UNRESOLVED',
+        'appendParagraph table-cell styleSource could not be resolved.',
+        { styleSource, cause: cause.message },
+      );
+    }
+    const getCellStyleAt = requireMethod(doc, 'getCellStyleAt');
+    const getCellParaPropertiesAt = requireMethod(doc, 'getCellParaPropertiesAt');
+    const getCellCharPropertiesAt = requireMethod(doc, 'getCellCharPropertiesAt');
+    const style = parseNativeObject(getCellStyleAt(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+    ), 'getCellStyleAt');
+    const styleId = nonNegativeInteger(style.id);
+    if (styleId === null || styleId > 0xFF) {
+      throw structuralError(
+        'HWPX_STYLE_SOURCE_UNRESOLVED',
+        'appendParagraph table-cell styleSource did not return a valid style ID.',
+        { styleSource, style },
+      );
+    }
+    const paragraphProperties = parseNativeObject(getCellParaPropertiesAt(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+    ), 'getCellParaPropertiesAt');
+    const characterProperties = parseNativeObject(getCellCharPropertiesAt(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      target.cellParagraphIndex,
+      0,
+    ), 'getCellCharPropertiesAt');
+    return {
+      ...target,
+      styleId,
+      paragraphProperties,
+      characterProperties,
+    };
+  }
+
+  let target;
+  try {
+    target = resolveHwpxTextTarget(sourceCommand, { offsetRequired: false });
+  } catch (cause) {
+    throw structuralError(
+      'HWPX_STYLE_SOURCE_UNRESOLVED',
+      'appendParagraph paragraph styleSource could not be resolved.',
+      { styleSource, cause: cause.message },
+    );
+  }
+  const sections = context?.before?.sections;
+  if (Array.isArray(sections)) {
+    const matches = sections.flatMap(section =>
+      Array.isArray(section?.paragraphs) ? section.paragraphs : [])
+      .filter(paragraph =>
+        firstSpecifiedInteger(paragraph?.section, paragraph?.sectionIndex) === target.sectionIndex
+        && firstSpecifiedInteger(
+          paragraph?.para,
+          paragraph?.paragraph,
+          paragraph?.paragraphIndex,
+          paragraph?.number,
+        ) === target.paragraphIndex);
+    if (matches.length !== 1) {
+      throw structuralError(
+        'HWPX_STYLE_SOURCE_UNRESOLVED',
+        'appendParagraph styleSource must resolve to exactly one inspected paragraph.',
+        { styleSource, matches: matches.length },
+      );
+    }
+  }
+  const getStyleAt = requireMethod(doc, 'getStyleAt');
+  const getParaPropertiesAt = requireMethod(doc, 'getParaPropertiesAt');
+  const getCharPropertiesAt = requireMethod(doc, 'getCharPropertiesAt');
+  const style = parseNativeObject(
+    getStyleAt(target.sectionIndex, target.paragraphIndex),
+    'getStyleAt',
+  );
+  const styleId = nonNegativeInteger(style.id);
+  if (styleId === null || styleId > 0xFF) {
+    throw structuralError(
+      'HWPX_STYLE_SOURCE_UNRESOLVED',
+      'appendParagraph paragraph styleSource did not return a valid style ID.',
+      { styleSource, style },
+    );
+  }
+  return {
+    kind: 'paragraph',
+    sectionIndex: target.sectionIndex,
+    paragraphIndex: target.paragraphIndex,
+    styleId,
+    paragraphProperties: parseNativeObject(
+      getParaPropertiesAt(target.sectionIndex, target.paragraphIndex),
+      'getParaPropertiesAt',
+    ),
+    characterProperties: parseNativeObject(
+      getCharPropertiesAt(target.sectionIndex, target.paragraphIndex, 0),
+      'getCharPropertiesAt',
+    ),
+  };
+}
+
+function applyAppendParagraph(doc, command, context) {
   if (typeof command.text !== 'string') {
     throw structuralError('HWPX_TEXT_REQUIRED', 'appendParagraph requires a text string.');
   }
   const target = resolveHwpxTextTarget(command, { offsetRequired: false });
   const insertParagraph = requireMethod(doc, 'insertParagraph');
   const insertText = requireMethod(doc, 'insertText');
+  const applyStyle = command.styleSource === undefined
+    ? null
+    : requireMethod(doc, 'applyStyle');
+  const applyParaFormat = command.styleSource === undefined
+    ? null
+    : requireMethod(doc, 'applyParaFormat');
+  const applyCharFormat = command.styleSource === undefined || command.text.length === 0
+    ? null
+    : requireMethod(doc, 'applyCharFormat');
   const requestedParagraphIndex = target.paragraphIndex + 1;
   if (nonNegativeInteger(requestedParagraphIndex) === null) {
     throw structuralError(
@@ -278,28 +430,89 @@ function applyAppendParagraph(doc, command) {
       { target },
     );
   }
+  const styleSource = command.styleSource === undefined
+    ? null
+    : resolveAppendParagraphStyleSource(doc, command.styleSource, context);
+  const paragraphStyle = styleSource === null
+    ? null
+    : { ...styleSource.paragraphProperties };
+  if (paragraphStyle) delete paragraphStyle.paraShapeId;
+  const characterStyle = styleSource === null || command.text.length === 0
+    ? null
+    : { ...styleSource.characterProperties };
+  if (characterStyle) delete characterStyle.charShapeId;
   const paragraphNative = parseNativeResult(
     insertParagraph(target.sectionIndex, requestedParagraphIndex),
     'insertParagraph',
     ['paraIdx'],
   );
   const paragraphIndex = paragraphNative.paraIdx;
+  const styleNative = styleSource === null
+    ? null
+    : parseNativeResult(
+      applyStyle(target.sectionIndex, paragraphIndex, styleSource.styleId),
+      'applyStyle',
+    );
+  const paragraphFormatNative = styleSource === null
+    ? null
+    : parseNativeResult(
+      applyParaFormat(
+        target.sectionIndex,
+        paragraphIndex,
+        JSON.stringify(paragraphStyle),
+      ),
+      'applyParaFormat',
+    );
   const textNative = parseNativeResult(
     insertText(target.sectionIndex, paragraphIndex, 0, command.text),
     'insertText',
     ['charOffset'],
   );
+  const characterFormatNative = characterStyle === null
+    ? null
+    : parseNativeResult(
+      applyCharFormat(
+        target.sectionIndex,
+        paragraphIndex,
+        0,
+        [...command.text].length,
+        JSON.stringify(characterStyle),
+      ),
+      'applyCharFormat',
+    );
   const createdTarget = {
     kind: 'paragraph',
     sectionIndex: target.sectionIndex,
     paragraphIndex,
   };
-  return structuralResult(
+  return {
+    ...structuralResult(
     command,
-    { paragraph: paragraphNative, text: textNative },
+    {
+      paragraph: paragraphNative,
+      ...(styleNative === null ? {} : {
+        style: {
+          ...styleNative,
+          source: styleSource,
+          styleId: styleSource.styleId,
+          paragraphFormat: paragraphFormatNative,
+          characterFormat: characterFormatNative,
+        },
+      }),
+      text: textNative,
+    },
     { ...createdTarget, offset: textNative.charOffset },
     [createdTarget],
-  );
+    ),
+    expectedText: command.text,
+    ...(styleSource === null ? {} : { expectedStyleId: styleSource.styleId }),
+    ...(styleSource?.paragraphProperties?.paraShapeId === undefined
+      ? {}
+      : { expectedParaShapeId: styleSource.paragraphProperties.paraShapeId }),
+    ...(styleSource?.characterProperties?.charShapeId === undefined
+      ? {}
+      : { expectedCharShapeId: styleSource.characterProperties.charShapeId }),
+  };
 }
 
 function positiveInteger(value, maximum = 0xFFFF_FFFF) {
@@ -1570,7 +1783,7 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
     case 'deleteRange':
       return applyDeleteRange(doc, command, context);
     case 'appendParagraph':
-      return applyAppendParagraph(doc, command);
+      return applyAppendParagraph(doc, command, context);
     case 'table.create':
       return applyCreateTable(doc, command, context);
     case 'table.insertCaption':

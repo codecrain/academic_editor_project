@@ -14,6 +14,40 @@ import {
 test('HWPX command catalog exposes unique canonical operations and categories', () => {
   const catalog = getHwpxCommandCatalog();
   assert.equal(catalog.sourceFormat, 'hwpx');
+  assert.deepEqual(HWPX_COMMAND_OPS, [
+    'text.replaceParagraph',
+    'text.insertAfterParagraph',
+    'text.replace',
+    'text.replaceTracked',
+    'insertText',
+    'deleteRange',
+    'appendParagraph',
+    'table.writeCell',
+    'table.writeRichCell',
+    'table.writeCells',
+    'table.applyCellStyle',
+    'table.create',
+    'table.insertCaption',
+    'style.applyText',
+    'paragraph.applyStyle',
+    'style.clone',
+    'applyStyle',
+    'setRunStyle',
+    'setParagraphStyle',
+    'list.writeBullets',
+    'list.applyNumbering',
+    'layout.fitText',
+    'image.replace',
+    'image.insertAfterParagraph',
+    'image.generateAndReplace',
+    'setDocumentMetadata',
+    'defineStyle',
+    'setPageSetup',
+    'setHeaderFooter',
+    'insertFootnote',
+    'object.deleteTextBoxByText',
+    'object.replaceTextBoxText',
+  ]);
   assert.equal(catalog.commandCount, HWPX_COMMAND_OPS.length);
   assert.equal(new Set(HWPX_COMMAND_OPS).size, HWPX_COMMAND_OPS.length);
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('text'));
@@ -21,7 +55,7 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('image'));
 });
 
-test('HWPX command catalog publishes every promoted DOCX parity operation', () => {
+test('HWPX command catalog separates readiness from execution for structural operations', () => {
   const promoted = [
     'text.replaceTracked',
     'insertText',
@@ -44,15 +78,44 @@ test('HWPX command catalog publishes every promoted DOCX parity operation', () =
     assert.ok(HWPX_COMMAND_OPS.includes(op), `${op} must be public`);
     assert.equal(getHwpxCommandCatalog({ op }).commandCount, 1);
   }
-  assert.equal(
-    getHwpxCommandCatalog({ op: 'text.replaceTracked' }).commands[0].capability,
-    'available',
-  );
-  for (const op of promoted.filter((value) => value !== 'text.replaceTracked')) {
-    assert.equal(
-      getHwpxCommandCatalog({ op }).commands[0].capability,
-      'adapter-required',
+  const tracked = getHwpxCommandCatalog({ op: 'text.replaceTracked' }).commands[0];
+  assert.equal(tracked.readiness, 'available');
+  assert.equal(tracked.execution, 'tracked-package-transform');
+  const unavailable = new Set([
+    'setDocumentMetadata',
+    'setHeaderFooter',
+    'insertFootnote',
+  ]);
+  for (const op of promoted.filter(value =>
+    value !== 'text.replaceTracked' && !unavailable.has(value))) {
+    const entry = getHwpxCommandCatalog({ op }).commands[0];
+    assert.equal(entry.readiness, 'available', op);
+    assert.equal(entry.capability, 'available', op);
+    assert.ok(
+      ['structural-adapter', 'preserve-package-adapter'].includes(entry.execution),
+      op,
     );
+    if (entry.execution === 'structural-adapter') {
+      assert.ok(entry.nativeMethods.length > 0, op);
+    }
+  }
+  const metadata = getHwpxCommandCatalog({ op: 'setDocumentMetadata' }).commands[0];
+  assert.equal(metadata.readiness, 'unavailable');
+  assert.equal(metadata.capability, 'unavailable');
+  assert.equal(metadata.execution, 'structural-adapter');
+  assert.deepEqual(metadata.nativeMethods, [
+    'setDocumentMetadata',
+    'getDocumentMetadata',
+  ]);
+  assert.throws(() => validateHwpxCommands([{
+    op: 'setDocumentMetadata',
+    title: '공공기관 업무보고',
+  }]), /not ready in the installed runtime/);
+  for (const op of ['setHeaderFooter', 'insertFootnote']) {
+    const entry = getHwpxCommandCatalog({ op }).commands[0];
+    assert.equal(entry.readiness, 'unavailable', op);
+    assert.equal(entry.execution, 'structural-adapter', op);
+    assert.ok(entry.notes.length > 0, op);
   }
 });
 
@@ -76,13 +139,6 @@ test('HWPX promoted contracts expose optional fields and enforced enums', () => 
     height: 84189,
     orientation: 'landscape',
   }]));
-  assert.doesNotThrow(() => validateHwpxCommands([{
-    op: 'setHeaderFooter',
-    target: { sectionIndex: 0 },
-    type: 'footer',
-    text: '정상 꼬리말',
-    align: 'center',
-  }]));
   assert.throws(() => validateHwpxCommands([{
     op: 'setPageSetup',
     sectionIndex: 0,
@@ -90,19 +146,7 @@ test('HWPX promoted contracts expose optional fields and enforced enums', () => 
     height: 84189,
     orientation: 'diagonal',
   }]), /orientation must be one of: portrait, landscape/);
-  assert.throws(() => validateHwpxCommands([{
-    op: 'setHeaderFooter',
-    target: { sectionIndex: 0 },
-    type: 'sidebar',
-    text: '잘못된 유형',
-  }]), /type must be one of: header, footer/);
-  assert.throws(() => validateHwpxCommands([{
-    op: 'setHeaderFooter',
-    target: { sectionIndex: 0 },
-    type: 'footer',
-    text: '잘못된 정렬',
-    align: 'justify',
-  }]), /align must be one of: left, center, right/);
+  assert.deepEqual(headerFooter.enum.align, ['left', 'center', 'right']);
 });
 
 test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {
@@ -182,5 +226,22 @@ test('HWPX promoted target operations require stable inspection targets', () => 
   assert.deepEqual(
     requiredInspectionTargets(commands, entries).map((target) => target.key),
     ['paragraph:0:1', 'paragraph:0:2'],
+  );
+});
+
+test('appendParagraph inspection includes its optional paragraph or cell style source', () => {
+  const command = {
+    op: 'appendParagraph',
+    target: { paragraph: { section: 0, number: 2 } },
+    styleSource: { tableId: 'tbl_0', cell: { number: 1 } },
+    text: '복제 서식 문단',
+  };
+  const entries = validateHwpxCommands([command]);
+  assert.deepEqual(
+    requiredInspectionTargets([command], entries).map(target => [target.role, target.key]),
+    [
+      ['target', 'paragraph:0:2'],
+      ['styleSource', 'table:tbl_0/cell:1'],
+    ],
   );
 });

@@ -8,7 +8,10 @@ const command = ({
   anyOf = [],
   aliases = [],
   precondition = 'none',
-  capability = 'available',
+  readiness = 'available',
+  execution = 'preserve-package',
+  nativeMethods = [],
+  capability = readiness,
   enum: enumValues = {},
   fields = {},
   example,
@@ -23,6 +26,9 @@ const command = ({
   anyOf: Object.freeze(anyOf.map((group) => Object.freeze([...group]))),
   aliases: Object.freeze([...aliases]),
   precondition,
+  readiness,
+  execution,
+  nativeMethods: Object.freeze([...nativeMethods]),
   capability,
   enum: Object.freeze(Object.fromEntries(
     Object.entries(enumValues).map(([field, values]) => [field, Object.freeze([...values])]),
@@ -78,7 +84,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'text', 'author'],
     optional: ['date'],
     precondition: 'target_inspect',
-    capability: 'available',
+    execution: 'tracked-package-transform',
     fields: { target: locationField, text: 'Replacement text.', author: 'Tracked-change author name.' },
     example: {
       op: 'text.replaceTracked',
@@ -98,7 +104,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'text'],
     aliases: ['text.insert'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['insertText'],
     fields: { target: locationField, text: 'Text to insert.' },
     example: {
       op: 'insertText',
@@ -113,7 +120,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target'],
     aliases: ['text.delete'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['deleteRange'],
     fields: { target: locationField },
     example: {
       op: 'deleteRange',
@@ -128,7 +136,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     optional: ['styleSource'],
     aliases: ['paragraph.append'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'preserve-package-adapter',
     fields: { target: locationField, text: 'New paragraph text.', styleSource: styleSourceField },
     example: {
       op: 'appendParagraph',
@@ -214,7 +222,14 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'rows', 'columns'],
     optional: ['width', 'height', 'cellTexts', 'caption'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: [
+      'createTableEx',
+      'getCellProperties',
+      'resizeTableCells',
+      'insertTextInCell',
+      'setTableProperties',
+    ],
     fields: {
       target: locationField,
       rows: 'Positive integer row count.',
@@ -238,7 +253,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'text'],
     optional: ['position'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['setTableProperties', 'insertTextInCell'],
     enum: { position: ['before', 'after'] },
     fields: { target: locationField, text: 'Complete caption text.', position: 'before or after; default before.' },
     example: {
@@ -297,7 +313,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'styleId'],
     aliases: ['paragraph.applyNamedStyle'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['applyStyle', 'applyCellStyle'],
     fields: { target: locationField, styleId: 'Existing style ID returned by inspection or defineStyle.' },
     example: { op: 'applyStyle', target: { paragraph: { section: 0, number: 1 } }, styleId: 12 },
   }),
@@ -308,7 +325,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'style'],
     aliases: ['style.setRunStyle'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: [
+      'applyCharFormat',
+      'applyCharFormatInCell',
+      'findOrCreateFontId',
+    ],
     fields: { target: locationField, style: 'Character format such as bold, italic, font size, color, and font family.' },
     example: { op: 'setRunStyle', target: { paragraph: { section: 0, number: 1 } }, style: { bold: true, fontSizePt: 12 } },
   }),
@@ -319,7 +341,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target', 'style'],
     aliases: ['style.setParagraphStyle'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['applyParaFormat', 'applyParaFormatInCell'],
     fields: { target: locationField, style: 'Paragraph format such as alignment, spacing, margins, and line spacing.' },
     example: { op: 'setParagraphStyle', target: { paragraph: { section: 0, number: 1 } }, style: { align: 'center' } },
   }),
@@ -391,7 +414,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     anyOf: [['bytesBase64', 'bytes', 'filePath']],
     aliases: ['image.insert', 'object.insertImage'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['insertParagraph', 'insertPicture', 'insertText'],
     fields: {
       target: locationField,
       bytesBase64: 'Base64-encoded image bytes.',
@@ -426,7 +450,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Set HWPX package metadata.',
     optional: ['title', 'subject', 'author', 'keywords', 'description'],
     anyOf: [['title', 'subject', 'author', 'keywords', 'description']],
-    capability: 'adapter-required',
+    readiness: 'unavailable',
+    execution: 'structural-adapter',
+    nativeMethods: ['setDocumentMetadata', 'getDocumentMetadata'],
+    notes: [
+      'The repository source implements this adapter, but no published @rhwp/core artifact through 0.8.2 exposes the required metadata methods.',
+    ],
     fields: {
       title: 'Document title.',
       subject: 'Document subject.',
@@ -441,7 +470,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'package',
     description: 'Create a named HWPX paragraph or character style.',
     required: ['name', 'kind', 'properties'],
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['createStyle', 'updateStyleShapes'],
     enum: { kind: ['paragraph', 'character'] },
     fields: {
       name: 'Unique style name.',
@@ -456,7 +486,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Set HWPX page size, orientation, and margins for one section.',
     required: ['sectionIndex', 'width', 'height'],
     optional: ['orientation', 'margins'],
-    capability: 'adapter-required',
+    execution: 'structural-adapter',
+    nativeMethods: ['setPageDef'],
     enum: { orientation: ['portrait', 'landscape'] },
     fields: {
       sectionIndex: 'Zero-based section index.',
@@ -473,7 +504,17 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Create or replace an HWPX header or footer in one section.',
     required: ['target', 'type', 'text'],
     optional: ['applyTo', 'align'],
-    capability: 'adapter-required',
+    readiness: 'unavailable',
+    execution: 'structural-adapter',
+    nativeMethods: [
+      'createHeaderFooter',
+      'insertTextInHeaderFooter',
+      'applyParaFormatInHf',
+      'deleteHeaderFooter',
+    ],
+    notes: [
+      'The pinned published @rhwp/core@0.7.15 surface exposes these methods, but header/footer content does not survive structural export and reopen.',
+    ],
     enum: {
       type: ['header', 'footer'],
       applyTo: ['both', 'odd', 'even'],
@@ -494,7 +535,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Insert a footnote reference at an inspected HWPX text target and create its footnote body.',
     required: ['target', 'text'],
     precondition: 'target_inspect',
-    capability: 'adapter-required',
+    readiness: 'unavailable',
+    execution: 'structural-adapter',
+    nativeMethods: ['insertFootnote', 'insertTextInFootnote'],
+    notes: [
+      'The pinned published @rhwp/core@0.7.15 traps during footnote insertion on the supported blank-document fixture.',
+    ],
     fields: { target: locationField, text: 'Footnote body text.' },
     example: {
       op: 'insertFootnote',
@@ -655,6 +701,7 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
     optional(commandValue.styleSource, 'styleSource');
   } else if (SINGLE_TARGET_INSPECTION_OPS.has(entry.op)) {
     add(commandValue.target ?? commandValue.location, 'target');
+    if (entry.op === 'appendParagraph') optional(commandValue.styleSource, 'styleSource');
   } else if (entry.op === 'table.applyCellStyle') {
     add(commandValue.target ?? commandValue.location, 'target');
     optional(commandValue.styleSource ?? commandValue.source, 'styleSource');
@@ -690,6 +737,11 @@ function validateHwpxCommands(commands) {
     const entry = resolveHwpxCommand(value);
     if (!entry) {
       throw new Error(`Unsupported HWPX command op: ${String(value.op || `${value.group || ''}.${value.action || ''}` || '<missing>')}. Call editor_hwpx_command_catalog first.`);
+    }
+    if (entry.readiness !== 'available') {
+      throw new Error(
+        `HWPX command ${entry.op} is not ready in the installed runtime (${entry.readiness}).`,
+      );
     }
     const missing = entry.required.filter((field) => {
       if (field === 'op') return !meaningful(value.op) && !(meaningful(value.group) && meaningful(value.action));

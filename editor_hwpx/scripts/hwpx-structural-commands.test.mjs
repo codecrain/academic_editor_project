@@ -124,6 +124,158 @@ test('appendParagraph inserts after the target and reports the created paragraph
   assert.equal(result.native.text.charOffset, 6);
 });
 
+test('appendParagraph clones a paragraph style source before writing text', () => {
+  const calls = [];
+  const doc = {
+    getStyleAt: (...args) => {
+      calls.push(['getStyleAt', ...args]);
+      return '{"id":7,"name":"보고서 본문"}';
+    },
+    getParaPropertiesAt: (...args) => {
+      calls.push(['getParaPropertiesAt', ...args]);
+      return '{"alignment":"left","paraShapeId":11}';
+    },
+    getCharPropertiesAt: (...args) => {
+      calls.push(['getCharPropertiesAt', ...args]);
+      return '{"fontSize":1000,"bold":false,"charShapeId":13}';
+    },
+    insertParagraph: (...args) => {
+      calls.push(['insertParagraph', ...args]);
+      return '{"ok":true,"paraIdx":3,"newParagraphCount":4}';
+    },
+    applyStyle: (...args) => {
+      calls.push(['applyStyle', ...args]);
+      return '{"ok":true}';
+    },
+    applyParaFormat: (...args) => {
+      calls.push(['applyParaFormat', ...args.slice(0, 2), JSON.parse(args[2])]);
+      return '{"ok":true}';
+    },
+    applyCharFormat: (...args) => {
+      calls.push(['applyCharFormat', ...args.slice(0, 4), JSON.parse(args[4])]);
+      return '{"ok":true}';
+    },
+    insertText: (...args) => {
+      calls.push(['insertText', ...args]);
+      return '{"ok":true,"charOffset":5}';
+    },
+  };
+
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'appendParagraph',
+    target: { paragraph: { section: 0, number: 1 } },
+    styleSource: { paragraph: { section: 0, number: 2 } },
+    text: '신규 문단',
+  });
+
+  assert.deepEqual(calls, [
+    ['getStyleAt', 0, 2],
+    ['getParaPropertiesAt', 0, 2],
+    ['getCharPropertiesAt', 0, 2, 0],
+    ['insertParagraph', 0, 2],
+    ['applyStyle', 0, 3, 7],
+    ['applyParaFormat', 0, 3, { alignment: 'left' }],
+    ['insertText', 0, 3, 0, '신규 문단'],
+    ['applyCharFormat', 0, 3, 0, 5, { fontSize: 1000, bold: false }],
+  ]);
+  assert.equal(result.native.style.ok, true);
+  assert.equal(result.native.style.source.kind, 'paragraph');
+  assert.equal(result.native.style.styleId, 7);
+  assert.equal(result.expectedText, '신규 문단');
+  assert.equal(result.expectedStyleId, 7);
+  assert.equal(result.expectedParaShapeId, 11);
+  assert.equal(result.expectedCharShapeId, 13);
+});
+
+test('appendParagraph clones an inspected table-cell paragraph style source', () => {
+  const calls = [];
+  const doc = {
+    getCellStyleAt: (...args) => {
+      calls.push(['getCellStyleAt', ...args]);
+      return '{"id":4,"name":"표 본문"}';
+    },
+    getCellParaPropertiesAt: (...args) => {
+      calls.push(['getCellParaPropertiesAt', ...args]);
+      return '{"alignment":"center","paraShapeId":21}';
+    },
+    getCellCharPropertiesAt: (...args) => {
+      calls.push(['getCellCharPropertiesAt', ...args]);
+      return '{"fontSize":900,"bold":true,"charShapeId":22}';
+    },
+    insertParagraph: () => '{"ok":true,"paraIdx":6,"newParagraphCount":7}',
+    applyStyle: (...args) => {
+      calls.push(['applyStyle', ...args]);
+      return '{"ok":true}';
+    },
+    applyParaFormat: (...args) => {
+      calls.push(['applyParaFormat', ...args.slice(0, 2), JSON.parse(args[2])]);
+      return '{"ok":true}';
+    },
+    applyCharFormat: (...args) => {
+      calls.push(['applyCharFormat', ...args.slice(0, 4), JSON.parse(args[4])]);
+      return '{"ok":true}';
+    },
+    insertText: () => '{"ok":true,"charOffset":4}',
+  };
+  const context = {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        native: { section: 1, paragraph: 3, control: 0 },
+        cells: [{
+          native: {
+            section: 1,
+            paragraph: 3,
+            control: 0,
+            cellIndex: 2,
+            cellParagraphIndex: 1,
+          },
+          location: { cell: { number: 2 } },
+        }],
+      }],
+    },
+  };
+
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'appendParagraph',
+    target: { paragraph: { section: 1, number: 5 } },
+    styleSource: { tableId: 'tbl_0', cell: { number: 2 }, cellParagraphIndex: 1 },
+    text: '표 서식',
+  }, context);
+
+  assert.deepEqual(calls, [
+    ['getCellStyleAt', 1, 3, 0, 2, 1],
+    ['getCellParaPropertiesAt', 1, 3, 0, 2, 1],
+    ['getCellCharPropertiesAt', 1, 3, 0, 2, 1, 0],
+    ['applyStyle', 1, 6, 4],
+    ['applyParaFormat', 1, 6, { alignment: 'center' }],
+    ['applyCharFormat', 1, 6, 0, 4, { fontSize: 900, bold: true }],
+  ]);
+  assert.equal(result.expectedStyleId, 4);
+});
+
+test('appendParagraph rejects unresolved or ambiguous style sources before mutation', () => {
+  const mutations = [];
+  const doc = {
+    getStyleAt: () => '{"name":"missing id"}',
+    getParaPropertiesAt: () => '{"alignment":"left","paraShapeId":1}',
+    getCharPropertiesAt: () => '{"fontSize":1000,"charShapeId":1}',
+    insertParagraph: (...args) => mutations.push(['insertParagraph', ...args]),
+    applyStyle: (...args) => mutations.push(['applyStyle', ...args]),
+    applyParaFormat: (...args) => mutations.push(['applyParaFormat', ...args]),
+    applyCharFormat: (...args) => mutations.push(['applyCharFormat', ...args]),
+    insertText: (...args) => mutations.push(['insertText', ...args]),
+  };
+
+  assert.throws(() => applyHwpxStructuralCommand(doc, {
+    op: 'appendParagraph',
+    target: { paragraph: { section: 0, number: 1 } },
+    styleSource: { paragraph: { section: 0, number: 2 } },
+    text: '실패',
+  }), error => error.code === 'HWPX_STYLE_SOURCE_UNRESOLVED');
+  assert.deepEqual(mutations, []);
+});
+
 test('resolveHwpxTextTarget accepts native range targets', () => {
   assert.deepEqual(resolveHwpxTextTarget({
     native: { section: 3, para: 7, offset: 9, length: 4 },

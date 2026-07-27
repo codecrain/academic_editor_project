@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import initHwpx, { HwpDocument } from '../pkg/rhwp.js';
+import initHwpx, { HwpDocument } from '@rhwp/core';
 import {
   buildListText as coreBuildListText,
   commandId as coreCommandId,
@@ -41,7 +41,14 @@ let hwpxReady = null;
 export async function initHwpxRuntime() {
   globalThis.measureTextWidth ??= (text) => String(text ?? '').length * 560;
   hwpxReady ??= initHwpx({
-    module_or_path: readFileSync(path.join(repoRoot, 'editor_hwpx', 'pkg', 'rhwp_bg.wasm')),
+    module_or_path: readFileSync(path.join(
+      repoRoot,
+      'editor_hwpx',
+      'node_modules',
+      '@rhwp',
+      'core',
+      'rhwp_bg.wasm',
+    )),
   });
   return hwpxReady;
 }
@@ -1045,6 +1052,60 @@ function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
+    if (result?.expectedText !== undefined) {
+      const text = readBodyParagraphText(
+        session.doc,
+        target.sectionIndex,
+        target.paragraphIndex,
+      );
+      if (text !== result.expectedText) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural paragraph did not preserve its requested text after reopening.',
+          { target, expectedText: result.expectedText, text },
+        );
+      }
+    }
+    if (result?.expectedStyleId !== undefined) {
+      const style = tryJson(() => session.doc.getStyleAt(
+        target.sectionIndex,
+        target.paragraphIndex,
+      ));
+      if (!style || style.id !== result.expectedStyleId) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural paragraph did not preserve its cloned style after reopening.',
+          { target, expectedStyleId: result.expectedStyleId, style },
+        );
+      }
+    }
+    if (result?.expectedParaShapeId !== undefined) {
+      const paragraphStyle = tryJson(() => session.doc.getParaPropertiesAt(
+        target.sectionIndex,
+        target.paragraphIndex,
+      ));
+      if (!paragraphStyle || paragraphStyle.paraShapeId !== result.expectedParaShapeId) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural paragraph did not preserve its cloned paragraph shape after reopening.',
+          { target, expectedParaShapeId: result.expectedParaShapeId, paragraphStyle },
+        );
+      }
+    }
+    if (result?.expectedCharShapeId !== undefined && result?.expectedText?.length > 0) {
+      const characterStyle = tryJson(() => session.doc.getCharPropertiesAt(
+        target.sectionIndex,
+        target.paragraphIndex,
+        0,
+      ));
+      if (!characterStyle || characterStyle.charShapeId !== result.expectedCharShapeId) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural paragraph did not preserve its cloned character shape after reopening.',
+          { target, expectedCharShapeId: result.expectedCharShapeId, characterStyle },
+        );
+      }
+    }
     return;
   }
   if (target.kind === 'table' || target.kind === 'tableCaption') {
@@ -1535,6 +1596,18 @@ export class HwpxApiSession {
       }];
     }
 
+    if (key === 'appendparagraph' || key === 'paragraphappend') {
+      const paragraph = normalizeParagraphLocation(location);
+      return [{
+        ...command,
+        opId,
+        op: 'insertParagraphAfter',
+        target: { native: paragraph },
+        text,
+        styleSource: command.styleSource,
+      }];
+    }
+
     if (key === 'replacetext' || key === 'textreplace') {
       return [{ ...command, opId, op: 'replaceText', text }];
     }
@@ -1762,7 +1835,9 @@ export class HwpxApiSession {
       flushStructural();
       const patchResult = working.commandsBatchUnsafe([op]);
       results.push(...patchResult.results);
+      const sourceBytes = Buffer.from(working.inputBytes);
       const saved = working.save();
+      qualifications.push(qualifyHwpxCandidate(sourceBytes, saved.bytes));
       working = new HwpxApiSession(saved.bytes, {
         saveMode: 'preserve-package',
       });

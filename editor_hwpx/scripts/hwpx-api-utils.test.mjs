@@ -569,9 +569,12 @@ test('HWPX API structural batches qualify, reopen, and commit exactly once', asy
       text: marker,
     },
     {
-      op: 'setDocumentMetadata',
-      title: '2026 public-sector atomic validation',
-      author: 'HWPX API',
+      op: 'setPageSetup',
+      sectionIndex: 0,
+      width: 59_528,
+      height: 84_189,
+      orientation: 'portrait',
+      margins: { top: 5_669, right: 5_669, bottom: 5_669, left: 5_669 },
     },
   ]);
 
@@ -590,13 +593,7 @@ test('HWPX API structural batches qualify, reopen, and commit exactly once', asy
     reopened.inspectTarget({ paragraph: { section: 0, number: 0 } }).currentText
       .includes(marker),
   );
-  assert.deepEqual(JSON.parse(reopened.doc.getDocumentMetadata()), {
-    author: 'HWPX API',
-    description: '',
-    keywords: '',
-    subject: '',
-    title: '2026 public-sector atomic validation',
-  });
+  assert.equal(JSON.parse(reopened.doc.getPageDef(0)).height, 84_189);
 });
 
 test('HWPX API mixed batches preserve command order across patch and structural stages', async () => {
@@ -621,8 +618,10 @@ test('HWPX API mixed batches preserve command order across patch and structural 
       text: 'patch-safe-root',
     },
     {
-      op: 'setDocumentMetadata',
-      title: 'mixed-stage-order',
+      op: 'defineStyle',
+      name: 'Mixed Stage Order',
+      kind: 'paragraph',
+      properties: { bold: true },
     },
   ]);
 
@@ -637,9 +636,9 @@ test('HWPX API mixed batches preserve command order across patch and structural 
     reopened.inspectTarget({ paragraph: { section: 0, number: 1 } }).currentText,
     'native-legacy-inserted',
   );
-  assert.equal(
-    JSON.parse(reopened.doc.getDocumentMetadata()).title,
-    'mixed-stage-order',
+  assert.ok(
+    JSON.parse(reopened.doc.getStyleList())
+      .some(style => style.name === 'Mixed Stage Order'),
   );
 });
 
@@ -683,6 +682,32 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
 });
 
+test('HWPX API appendParagraph clones inspected style and text through qualification and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const sourceStyleIds = session.paragraphStyleIds({
+    paragraph: { section: 0, number: 11 },
+  });
+  const result = session.commandsBatch([{
+    op: 'appendParagraph',
+    target: { paragraph: { section: 0, number: 4 } },
+    styleSource: { paragraph: { section: 0, number: 11 } },
+    text: '복제 서식 신규 문단',
+  }]);
+
+  assert.equal(result.qualification.ok, true);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(
+    reopened.inspectTarget({ paragraph: { section: 0, number: 5 } }).currentText,
+    '복제 서식 신규 문단',
+  );
+  assert.deepEqual(
+    reopened.paragraphStyleIds({ paragraph: { section: 0, number: 5 } }),
+    sourceStyleIds,
+  );
+});
+
 test('HWPX API reopens and verifies every non-text structural target kind', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
@@ -694,19 +719,6 @@ test('HWPX API reopens and verifies every non-text structural target kind', asyn
       height: 84_189,
       orientation: 'portrait',
       margins: { top: 5_669, right: 5_669, bottom: 5_669, left: 5_669 },
-    },
-    {
-      op: 'setHeaderFooter',
-      target: { sectionIndex: 0 },
-      type: 'footer',
-      applyTo: 'both',
-      text: 'Atomic footer',
-      align: 'center',
-    },
-    {
-      op: 'insertFootnote',
-      target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
-      text: 'Atomic footnote',
     },
     {
       op: 'defineStyle',
@@ -733,8 +745,11 @@ test('HWPX API public-sector structural export preserves objects or rolls back a
 
   try {
     session.commandsBatch([{
-      op: 'setDocumentMetadata',
-      title: 'Public fixture atomic probe',
+      op: 'setPageSetup',
+      sectionIndex: 0,
+      width: 59_528,
+      height: 84_189,
+      orientation: 'portrait',
     }]);
     const reopened = new HwpxApiSession(session.save().bytes);
     const after = reopened.objectInventory();

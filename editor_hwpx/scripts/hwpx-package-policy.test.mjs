@@ -65,7 +65,7 @@ test('command classification separates patch-safe and RHWP structural export ope
     reasons: ['insertText', 'image.insertAfterParagraph'],
   });
   const promoted = HWPX_COMMAND_CATALOG
-    .filter(command => command.capability === 'adapter-required')
+    .filter(command => command.execution === 'structural-adapter')
     .map(command => ({ op: command.op }));
   assert.deepEqual(
     classifyHwpxCommands(promoted).reasons,

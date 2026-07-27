@@ -14,6 +14,9 @@ The implementation is intentionally split:
   reopen validation.
 - `editor_hwpx/scripts/hwpx-command-catalog.mjs` owns the machine-readable
   public command contract.
+- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs` verifies that the installed
+  RHWP artifact exposes every native method required by a ready command before
+  Studio materializes that artifact.
 - `editor_docx/scripts/editor-gateway.mjs` exposes `/v1/hwpx`.
 - `editor_docx/scripts/editor-mcp.mjs` exposes the `editor_hwpx_*` MCP tools.
 - `evaluation/hwpx-public-sector-v1` owns high-difficulty acceptance data and
@@ -27,18 +30,18 @@ share package mutation logic.
 | Area | DOCX | HWPX |
 | --- | --- | --- |
 | REST/MCP lifecycle | Open, bounded read, inspect, atomic apply, quality, render, checkpoint, finalize, artifact handoff, discard | Same lifecycle |
-| Canonical catalog | 29 operations | 17 operations |
+| Canonical catalog | 29 operations | 32 operations (29 ready, 3 unavailable) |
 | Existing text/table/style edit | Supported | Supported |
 | Existing image replacement/generation | Supported | Supported |
-| New table creation/caption | Supported | Not exposed |
-| Metadata/page setup/header/footer/footnote | Supported | Not exposed |
+| New table creation/caption | Supported | Supported through the structural adapter |
+| Metadata/page setup/header/footer/footnote | Supported | Page setup is ready; metadata, header/footer, and footnote remain unavailable |
 | Render evidence | Baseline/current WebP | Baseline/current RHWP SVG |
 | PDF export | Supported through isolated UNO | Not implemented |
 | Encrypted/distribution input | Not applicable to OOXML contract | Explicitly rejected |
 
-HWPX now has transport and agent-workflow parity, but it does not yet have
-DOCX's authoring breadth or renderer/export breadth. The command counts and
-limits above are deliberate current-contract facts, not roadmap promises.
+HWPX now has a wider authoring surface, but it does not have full DOCX
+renderer/export parity. The command counts and limits above are current
+contract facts, not roadmap promises.
 
 ## Preservation and transaction model
 
@@ -77,16 +80,36 @@ are revision-bound; enumerate targets again after a successful apply.
 
 ## Public command catalog
 
-The current catalog exposes 17 canonical operations:
+The current catalog exposes 32 canonical operations:
 
-- Text: `text.replaceParagraph`, `text.insertAfterParagraph`, `text.replace`
+- Text: `text.replaceParagraph`, `text.insertAfterParagraph`, `text.replace`,
+  `text.replaceTracked`, `insertText`, `deleteRange`, `appendParagraph`
 - Tables: `table.writeCell`, `table.writeRichCell`, `table.writeCells`,
-  `table.applyCellStyle`
-- Styles: `style.applyText`, `paragraph.applyStyle`, `style.clone`
+  `table.applyCellStyle`, `table.create`, `table.insertCaption`
+- Styles: `style.applyText`, `paragraph.applyStyle`, `style.clone`,
+  `applyStyle`, `setRunStyle`, `setParagraphStyle`
 - Lists: `list.writeBullets`, `list.applyNumbering`
 - Layout: `layout.fitText`
-- Images: `image.replace`, `image.generateAndReplace`
+- Images: `image.replace`, `image.insertAfterParagraph`,
+  `image.generateAndReplace`
+- Package and structure: `setDocumentMetadata`, `defineStyle`, `setPageSetup`,
+  `setHeaderFooter`, `insertFootnote`
 - Objects: `object.deleteTextBoxByText`, `object.replaceTextBoxText`
+
+Each entry reports `readiness` independently from `execution`. Ready
+preserve-package commands use `execution=preserve-package`; native tracked
+replacement uses `tracked-package-transform`; the promoted structural
+commands use `structural-adapter`. `appendParagraph` uses the qualified
+`preserve-package-adapter` so inspected paragraph/run style IDs can be copied
+exactly instead of being approximated through format properties. Three
+structural entries remain canonical
+with `readiness=unavailable`. Repository source implements
+`setDocumentMetadata`, while no published `@rhwp/core` artifact through 0.8.2
+exposes both metadata methods. The pinned published 0.7.15 artifact exposes
+the header/footer and footnote method names, but header/footer content does not
+survive export/reopen and footnote insertion traps on the supported
+blank-document fixture. Validation rejects all three operations before
+mutation.
 
 Query `editor_hwpx_command_catalog` or
 `POST /v1/hwpx/documents/{documentId}/commands/catalog` before applying a new
@@ -108,6 +131,13 @@ The renderer returns SVG evidence. It is not proof of pixel identity in Hancom
 Office, so workflows requiring Hancom-specific typography still need a human
 or Hancom rendering acceptance step.
 
+The deterministic Node suites exercise catalog validation, package policy,
+structural adapters, tracked-change markup/probing, reopen checks, and API
+utilities. Passing them is not Hancom interoperability evidence. In
+particular, tracked replacement is currently limited to one `hp:t` run and a
+single-command atomic batch; listing, accepting, and rejecting revisions are
+not public commands.
+
 ## Explicit limits
 
 These capabilities are not represented as supported:
@@ -115,9 +145,12 @@ These capabilities are not represented as supported:
 - encrypted/distribution HWPX editing; the loader returns
   `unsupported_encrypted_hwpx` with an actionable message;
 - HWPX PDF export;
-- creation of new tables;
+- document metadata mutation with the currently published RHWP artifact;
+- header/footer and footnote mutation with the pinned published RHWP artifact;
 - native numbering-definition creation (list commands write visible list
   text while preserving paragraph style);
+- cross-run or table-cell tracked replacement, tracked-change listing, and
+  tracked-change accept/reject;
 - semantic chart-data editing (replace an existing image entry instead);
 - guaranteed pixel parity with Hancom Office;
 - direct mutation of legacy binary HWP. HWP files may be reference inputs, but

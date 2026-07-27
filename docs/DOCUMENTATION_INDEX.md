@@ -25,6 +25,7 @@ Documentation explains behavior, but executable catalogs and tests decide
 whether a command is supported:
 
 - `editor_hwpx/scripts/hwpx-command-catalog.mjs`
+- `editor_hwpx/scripts/hwpx-runtime-readiness.mjs`
 - `editor_docx/scripts/docx-command-catalog.mjs`
 - `editor_docx/scripts/editor-mcp.mjs`
 - `editor_docx/scripts/editor-gateway.mjs`

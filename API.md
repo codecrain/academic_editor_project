@@ -49,7 +49,9 @@ HWPX MCP tools:
 
 `editor_docx_command_catalog` and `editor_hwpx_command_catalog` are the
 machine-readable sources of truth. They currently expose 29 DOCX commands and
-17 HWPX commands plus accepted aliases. Agents should query the applicable
+32 HWPX commands plus accepted aliases. HWPX command entries report
+`readiness` separately from `execution`; canonical commands that are not ready
+are rejected before mutation. Agents should query the applicable
 catalog by category or operation before the first apply. The broker validates
 every apply against that catalog before the document session can mutate.
 
@@ -574,7 +576,7 @@ Response:
 
 ## Canonical Commands
 
-Shared canonical commands:
+Shared canonical commands include:
 
 ```text
 text.replaceParagraph
@@ -593,10 +595,10 @@ image.replace
 image.generateAndReplace
 ```
 
-DOCX-only local commands:
+DOCX and HWPX both expose these canonical structural operations, although
+their target and option shapes remain format-specific:
 
 ```text
-setDocumentMetadata
 defineStyle
 setPageSetup
 setHeaderFooter
@@ -620,11 +622,22 @@ HWPX-only local commands:
 
 ```text
 text.insertAfterParagraph
+text.replaceTracked
 object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-HWPX local utility does not currently expose stable `table.create` through `HwpxApiSession.apply`. HWPX table creation exists in lower-level RHWP tests, not as a production-safe local API command.
+The HWPX catalog has 32 canonical entries. Twenty-nine currently report
+`readiness=available`. `setDocumentMetadata`, `setHeaderFooter`, and
+`insertFootnote` remain canonical but report `readiness=unavailable`. No
+published `@rhwp/core` package through 0.8.2 exposes the required metadata
+set/get methods; on the pinned 0.7.15 artifact, header/footer content does not
+survive export/reopen and footnote insertion traps on the supported blank
+fixture. Ready structural commands report `execution=structural-adapter`; this
+describes their execution path, not a missing implementation.
+`appendParagraph` instead reports `execution=preserve-package-adapter` so it
+can clone inspected paragraph and run style IDs exactly while still passing
+package qualification and reopen verification.
 
 ## Text Commands
 
@@ -779,7 +792,9 @@ Explicit DOCX-like table creation:
 }
 ```
 
-Use `table.create` only on DOCX local utility unless HWPX support is explicitly added and tested later.
+HWPX `table.create` is ready through the structural adapter and requires an
+inspected paragraph `target`, `rows`, and `columns`; query the HWPX catalog for
+its format-specific optional width, height, cell text, and caption fields.
 
 On success, the matching `results` item returns `tableId`, `target`, and exact `dimensions` (`rowCount`, `colCount`, `cellCount`). Use that returned `tableId` for all subsequent `target_map`, `target_inspect`, and cell-write calls; do not guess `tbl_0` or select an older table by position.
 
@@ -1335,25 +1350,49 @@ qualityCheck
 save
 ```
 
-HWPX supported shared commands:
+HWPX canonical commands:
 
 ```text
 text.replaceParagraph
+text.insertAfterParagraph
 text.replace
+text.replaceTracked
+insertText
+deleteRange
+appendParagraph
 table.writeCell
 table.writeCells
 table.writeRichCell
 table.applyCellStyle
+table.create
+table.insertCaption
 style.applyText
 paragraph.applyStyle
 style.clone
+applyStyle
+setRunStyle
+setParagraphStyle
 list.writeBullets
 list.applyNumbering
 layout.fitText
 image.replace
+image.insertAfterParagraph
 image.generateAndReplace
+setDocumentMetadata
+defineStyle
+setPageSetup
+setHeaderFooter
+insertFootnote
 object.deleteTextBoxByText
+object.replaceTextBoxText
 ```
+
+`setDocumentMetadata`, `setHeaderFooter`, and `insertFootnote` are listed
+because they remain canonical contract entries, but their current `readiness`
+is `unavailable` and apply validation fails closed.
+Tracked replacement is limited to one `hp:t` run and must be the only command
+in its atomic batch. The API does not yet list, accept, or reject tracked
+changes.
 
 DOCX local utility supports:
 
@@ -1423,6 +1462,12 @@ Format utilities:
 npm.cmd run test:docx-api
 npm.cmd run test:hwpx-api
 ```
+
+`test:hwpx-api` runs the catalog, package-policy, structural-command,
+tracked-change, tracked-change-probe, API utility, and runtime-readiness suites.
+These deterministic checks include package qualification and reopen
+verification; they do not constitute Hancom Office interoperability or visual
+acceptance evidence.
 
 Runtime and gateway:
 

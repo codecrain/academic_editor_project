@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { materializeCoreArtifact } from './hwpx-runtime-readiness.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(__dirname, '..');
@@ -72,20 +74,7 @@ function copyCoreWasmPackage() {
   if (!existsSync(coreRoot)) {
     throw new Error('Missing @rhwp/core. Run npm install in editor_hwpx first.');
   }
-
-  mkdirSync(pkgRoot, { recursive: true });
-  for (const fileName of [
-    'rhwp.js',
-    'rhwp.d.ts',
-    'rhwp_bg.wasm',
-    'rhwp_bg.wasm.d.ts',
-  ]) {
-    const source = path.resolve(coreRoot, fileName);
-    if (!existsSync(source)) {
-      throw new Error(`Missing @rhwp/core artifact: ${source}`);
-    }
-    copyFileSync(source, path.resolve(pkgRoot, fileName));
-  }
+  return materializeCoreArtifact(coreRoot, pkgRoot);
 }
 
 function ensureStudioFonts() {
@@ -130,7 +119,7 @@ function assertUpstreamPresent() {
 
 assertUpstreamPresent();
 ensureNpmInstall(sourceRoot, 'wrapper');
-copyCoreWasmPackage();
+const coreReadiness = copyCoreWasmPackage();
 ensureNpmInstall(studioRoot, 'rhwp-studio');
 ensureStudioFonts();
 
@@ -140,5 +129,5 @@ if (shouldBuild()) {
 
 const wasm = path.resolve(pkgRoot, 'rhwp_bg.wasm');
 console.log(
-  `[rhwp] ready: studio=${studioRoot}, wasm=${Math.round(statSync(wasm).size / 1024)}KB`,
+  `[rhwp] ready: core=${coreReadiness.artifact}, studio=${studioRoot}, wasm=${Math.round(statSync(wasm).size / 1024)}KB`,
 );
