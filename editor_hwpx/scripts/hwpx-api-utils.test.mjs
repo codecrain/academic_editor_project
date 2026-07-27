@@ -643,6 +643,54 @@ test('HWPX API mixed batches preserve command order across patch and structural 
   );
 });
 
+test('HWPX API structural table creation survives qualification and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const result = session.commandsBatch([{
+    commandId: 'actual-table',
+    op: 'table.create',
+    target: { paragraph: { section: 0, number: 0 } },
+    rows: 2,
+    columns: 2,
+    width: 12_000,
+    height: 6_000,
+    cellTexts: ['A', 'B', 'C', 'D'],
+    caption: 'Actual table',
+  }]);
+
+  assert.equal(result.qualification.ok, true);
+  assert.equal(result.results[0].target.kind, 'table');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const table = reopened.readJson().tables.find(item =>
+    item.dims.rowCount === 2 && item.dims.colCount === 2);
+  assert.ok(table);
+  assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
+});
+
+test('HWPX API public-sector structural export preserves objects or rolls back atomically', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const beforeRevision = session.revision;
+  const before = session.objectInventory();
+
+  try {
+    session.commandsBatch([{
+      op: 'setDocumentMetadata',
+      title: 'Public fixture atomic probe',
+    }]);
+    const reopened = new HwpxApiSession(session.save().bytes);
+    const after = reopened.objectInventory();
+    assert.equal(after.pictures.length, before.pictures.length);
+    assert.equal(after.binaryFiles.length, before.binaryFiles.length);
+  } catch (error) {
+    assert.equal(error.code, 'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS');
+    assert.equal(session.revision, beforeRevision);
+    assert.equal(Buffer.compare(session.save().bytes, input), 0);
+  }
+});
+
 test('HWPX API text.replace survives preserve-package save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/test-image.hwpx');
