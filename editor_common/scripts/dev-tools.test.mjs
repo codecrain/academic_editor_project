@@ -277,6 +277,9 @@ test('native release workflow uses the compiler-capable current Ubuntu runner', 
   const workflow = readProjectFile('.github/workflows/native-editor-runtime.yml');
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /node-version: '24'/);
+  assert.match(workflow, /actions\/checkout@v7/);
+  assert.match(workflow, /actions\/setup-node@v7/);
+  assert.match(workflow, /actions\/upload-artifact@v7/);
   assert.match(workflow, /for-code-assets\/engine-main-assets\.tar\.gz/);
   assert.doesNotMatch(workflow, /ubuntu-22\.04|node-version: '20'/);
   assert.doesNotMatch(workflow, /engine_assets \|\| 'source'/);
