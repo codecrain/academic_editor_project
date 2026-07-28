@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -53,6 +54,8 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   assertSafeBuildDir(contextRoot);
   const checkoutDir = path.join(contextRoot, 'official-online');
   const buildContextDir = path.join(contextRoot, 'from-source-gh-action');
+  const legacySourceDir = path.join(checkoutDir, 'docker', 'from-source-gh-action');
+  const currentSourceDir = path.join(checkoutDir, 'docker', 'from-source');
 
   rmSync(contextRoot, { recursive: true, force: true });
   mkdirSync(contextRoot, { recursive: true });
@@ -71,15 +74,22 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   run('git', ['-C', checkoutDir, 'sparse-checkout', 'init', '--no-cone']);
   writeFileSync(
     path.join(checkoutDir, '.git', 'info', 'sparse-checkout'),
-    'docker/from-source-gh-action/*\n',
+    'docker/from-source-gh-action/*\ndocker/from-source/*\n',
   );
   run('git', ['-C', checkoutDir, 'read-tree', '-mu', 'HEAD']);
 
-  cpSync(
-    path.join(checkoutDir, 'docker', 'from-source-gh-action'),
-    buildContextDir,
-    { recursive: true },
-  );
+  const usesLegacyLayout = existsSync(legacySourceDir);
+  const sourceDir = usesLegacyLayout
+    ? legacySourceDir
+    : existsSync(currentSourceDir)
+      ? currentSourceDir
+      : null;
+  if (sourceDir == null) {
+    throw new Error(
+      'The upstream repository contains neither docker/from-source-gh-action nor docker/from-source.',
+    );
+  }
+  cpSync(sourceDir, buildContextDir, { recursive: true });
 
   cpSync(
     path.join(repoRoot, 'branding', 'debrand-online.sh'),
@@ -90,10 +100,12 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
 
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
   let buildScript = readUtf8Lf(buildScriptPath);
-  buildScript = buildScript.replace(
-    /make -j \$\(nproc\)(\r?\n\s+)make install/,
-    'make -j $(nproc) DEFAULT_TARGET=static_release$1make install DEFAULT_TARGET=static_release',
-  );
+  if (usesLegacyLayout) {
+    buildScript = buildScript.replace(
+      /make -j \$\(nproc\)(\r?\n\s+)make install/,
+      'make -j $(nproc) DEFAULT_TARGET=static_release$1make install DEFAULT_TARGET=static_release',
+    );
+  }
   buildScript = buildScript.replace(
     /(\( cd online && git fetch --all && git checkout -f \$COLLABORA_ONLINE_BRANCH && git clean -f -d && git pull -r \) \|\| exit 1\r?\n)/,
     `$1\n# Apply the public debranding patch before compiling browser/server assets.\n` +
@@ -103,20 +115,25 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     /(\.\/autogen\.sh --with-distro=CPLinux-LOKit [^)\r\n]*?--disable-symbols)(\s*\))/,
     '$1 --with-lang="$ENGINE_LANGUAGES"$2',
   );
+  const languagePackGuard =
+    'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
+    '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
+    '  exit 1\n' +
+    '}\n\n';
   buildScript = buildScript.replace(
-    /(fi;\r?\n\r?\n)(mkdir -p "\$INSTDIR"\/opt\/)/,
-    '$1' +
-      'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
-      '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
-      '  exit 1\n' +
-      '}\n\n$2',
+    /((?:fi;?|# copy stuff)\r?\n(?:\r?\n)?)(mkdir -p "\$INSTDIR"\/opt\/)/,
+    `$1${languagePackGuard}$2`,
   );
   buildScript = buildScript.replace(
-    /git clone --depth=1 --branch \$COLLABORA_ONLINE_BRANCH "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
+    /git clone --depth=1 --branch "?\$COLLABORA_ONLINE_BRANCH"? "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
     'git clone --depth=1 --filter=blob:none --branch $COLLABORA_ONLINE_BRANCH "$COLLABORA_ONLINE_REPO" online || exit 1',
   );
-  if (!buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) {
-    throw new Error('Failed to switch POCO source build to the static_release target.');
+  const usesEngineBuildTarget = buildScript.includes('make $ENGINE_BUILD_TARGET');
+  if (
+    !buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release') &&
+    !usesEngineBuildTarget
+  ) {
+    throw new Error('Failed to switch the engine source build to the static_release target.');
   }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
@@ -126,7 +143,7 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   }
   writeUtf8Lf(buildScriptPath, buildScript);
 
-  return buildContextDir;
+  return { buildContextDir, usesEngineBuildTarget };
 }
 
 function main() {
@@ -144,7 +161,11 @@ function main() {
   const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
   const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const prepareOnly = readEnv('EDITOR_NATIVE_PREPARE_ONLY', 'false') === 'true';
-  const buildContextDir = prepareBuildContext(resolvedContextRoot, dockerRepo, dockerRef);
+  const { buildContextDir, usesEngineBuildTarget } = prepareBuildContext(
+    resolvedContextRoot,
+    dockerRepo,
+    dockerRef,
+  );
 
   if (prepareOnly) {
     console.log(`[editor] prepared native source build context at ${buildContextDir}`);
@@ -165,6 +186,8 @@ function main() {
       ONLINE_EXTRA_BUILD_OPTIONS: extraBuildOptions,
       ENGINE_ASSETS: engineAssets,
       ENGINE_LANGUAGES: engineLanguages,
+      ENGINE_BUILD_TARGET: usesEngineBuildTarget ? 'static_release' : '',
+      NO_DOCKER_IMAGE: 'true',
     },
   });
   console.log(`[editor] native build output: ${path.join(buildContextDir, 'instdir')}`);

@@ -116,11 +116,17 @@ test('source and native builds contain only verified spell dictionaries plus the
 
 test('source image preparation supports both legacy and current upstream docker layouts', () => {
   const sourceBuild = readProjectFile('editor_docx/scripts/build-source-editor-image.mjs');
+  const nativeBuild = readProjectFile('editor_docx/scripts/build-native-editor.mjs');
   assert.match(sourceBuild, /docker', 'from-source-gh-action'/);
   assert.match(sourceBuild, /docker', 'from-source'/);
   assert.match(sourceBuild, /const usesLegacyLayout = existsSync\(legacySourceDir\)/);
   assert.match(sourceBuild, /cpSync\(alpineDockerfile, path\.join\(buildContextDir, 'Dockerfile'\)\)/);
   assert.match(sourceBuild, /usesLegacyLayout\s*\?\s*'build\.sh'\s*:\s*'build-alpine\.sh'/);
+  assert.match(nativeBuild, /docker', 'from-source-gh-action'/);
+  assert.match(nativeBuild, /docker', 'from-source'/);
+  assert.match(nativeBuild, /const usesLegacyLayout = existsSync\(legacySourceDir\)/);
+  assert.match(nativeBuild, /ENGINE_BUILD_TARGET: usesEngineBuildTarget \? 'static_release' : ''/);
+  assert.match(nativeBuild, /NO_DOCKER_IMAGE: 'true'/);
 });
 
 test('dev check cleans up only runtimes created by the check', () => {
@@ -246,7 +252,7 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-001/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-002/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);
