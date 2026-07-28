@@ -241,6 +241,8 @@ test('docker and native runtimes forward independent WOPI host groups through up
   assert.match(starter, /function resolveWopiAliasGroups\(\)/);
   assert.match(starter, /function buildWopiAliasGroupEnv\(aliasGroups\)/);
   assert.match(starter, /EDITOR_WOPI_ALIASGROUP1/);
+  assert.match(starter, /EDITOR_GATEWAY_WOPI_BASE_URL/);
+  assert.match(starter, /\.\.\.splitAliasList\(explicit\)/);
   assert.match(starter, /EDITOR_WOPI_ALIASGROUP\$\{index\}/);
   assert.match(starter, /\.\.\.buildWopiAliasGroupEnv\(context\.wopiAliasGroups\)/);
   assert.doesNotMatch(starter, /withNativeWopiAliasGroupParams/);

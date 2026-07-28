@@ -16,7 +16,7 @@ const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 const DEFAULT_ENGINE_LANGUAGES =
-  'ar bg ca cs cy da de el en-US en-GB eo es eu fi fr ga gl he hr hu hy id is it ja kk ko lo nb nl oc pl pt pt-BR ro ru sk sl sq sv tr uk vi zh-CN zh-TW';
+  'de en-US en-GB es fr ko';
 const DOCUMENT_FONT_PACKAGES = [
   'fonts-noto',
   'fonts-noto-cjk',

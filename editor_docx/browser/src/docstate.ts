@@ -132,18 +132,9 @@
 
 	// Below 2 are related to document. I guess we can move these into "file" property.
 	languages: [], // all available languages, fetched from core
-	favouriteLanguages: [
-		'de-DE',
-		'en-US',
-		'en-GB',
-		'es-ES',
-		'fr-FR',
-		'it',
-		'nl-NL',
-		'pt-BR',
-		'pt-PT',
-		'ru',
-	],
+	// Spell-check languages intentionally supported by the product. Keep this
+	// list aligned with the engine build defaults and dictionary contract test.
+	favouriteLanguages: ['en-US', 'en-GB', 'es-ES', 'fr-FR', 'de-DE'],
 	colorNames: null,
 	colorPalettes: {
 		StandardColors: {

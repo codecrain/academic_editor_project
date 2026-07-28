@@ -300,6 +300,8 @@ window.L.Map = window.L.Evented.extend({
 					var code = '';
 					if (split.length > 1)
 						code = split[1];
+					if (app.favouriteLanguages.indexOf(code) < 0)
+						return;
 					app.languages.push({translated: _(language), neutral: language, iso: code});
 				});
 				app.languages.sort(function(a, b) {

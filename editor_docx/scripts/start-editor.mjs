@@ -282,24 +282,19 @@ function resolveWopiAliasGroup() {
     'EDITOR_WOPI_ALIASGROUP1',
     'EDITOR_WOPI_ALIAS_GROUP',
   ]);
-  if (explicit) {
-    return explicit;
-  }
+  const configured = [
+    process.env.EDITOR_WOPI_BASE_URL,
+    process.env.EDITOR_GATEWAY_WOPI_BASE_URL,
+    process.env.EDITOR_DEFAULT_WOPI_HOST,
+  ]
+    .map(normalizeAliasOrigin)
+    .filter(Boolean);
 
-  const configured = readFirstEnv([
-    'EDITOR_WOPI_BASE_URL',
-    'EDITOR_DEFAULT_WOPI_HOST',
-  ]);
-  if (!configured) {
-    return '';
-  }
-
-  const canonical = normalizeAliasOrigin(configured);
-  if (!canonical) {
-    return '';
-  }
-
-  return [canonical, ...splitAliasList(process.env.EDITOR_WOPI_ALIASES)]
+  return [
+    ...splitAliasList(explicit),
+    ...configured,
+    ...splitAliasList(process.env.EDITOR_WOPI_ALIASES),
+  ]
     .filter((item, index, items) => item && items.indexOf(item) === index)
     .join(',');
 }
