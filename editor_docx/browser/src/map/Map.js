@@ -499,7 +499,63 @@ window.L.Map = window.L.Evented.extend({
 	},
 
 	updateAvatars: function() {
-		…6861 tokens truncated…
+		if (this._docLayer && this._docLayer._annotations && this._docLayer._annotations._items) {
+			for (var idxAnno in this._docLayer._annotations._items) {
+				var annotation = this._docLayer._annotations._items[idxAnno];
+				var username = annotation._data.author;
+				if (this._viewInfoByUserName[username])
+					annotation._data.avatar = this._viewInfoByUserName[username].userextrainfo.avatar;
+				annotation._updateContent();
+			}
+		}
+	},
+
+	initializeModificationIndicator: function() {
+		this.fire('initmodificationindicator', this._lastmodtime);
+		this.updateModificationIndicator(this._lastmodtime);
+	},
+
+	updateModificationIndicator: function(newModificationTime) {
+		var timeout;
+
+		if (typeof newModificationTime === 'string') {
+			this._lastmodtime = newModificationTime;
+		}
+
+		clearTimeout(this._modTimeout);
+
+		if (this._modIndicatorInitialized && this._lastmodtime)…5937 tokens truncated….
+	// @acceptInput (only on "mobile" (= mobile phone) or on iOS and Android in general) true if we want to
+	// accept key input, and show the virtual keyboard.
+	focus: function (acceptInput) {
+		if (this._textInput)
+			this._textInput.focus(acceptInput);
+	},
+
+	// just set the keyboard state for mobile
+	// we don't want to change the focus, we know that keyboard is closed
+	// and we are just setting the state here
+	setAcceptInput: function (acceptInput) {
+		this._textInput._setAcceptInput(acceptInput);
+	},
+
+	// Lose focus to stop accepting keyboard input.
+	// On mobile, it will hide the virtual keyboard.
+	blur: function () {
+		this._textInput.blur();
+	},
+
+	hasFocus: function () {
+		return this._textInput && document.activeElement === this._textInput.activeElement();
+	},
+
+	// Returns true iff the textarea is enabled and we focused on it.
+	// On mobile, this signifies that the keyboard should be visible.
+	canAcceptKeyboardInput: function() {
+		return this._textInput.canAcceptKeyboardInput();
+	},
+
+	isSearching: function() {
 		return this._isSearching;
 	},
 
