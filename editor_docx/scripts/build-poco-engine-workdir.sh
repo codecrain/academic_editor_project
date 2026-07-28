@@ -9,7 +9,7 @@ POCO_SOURCE_DIR="$ENGINE_ROOT/workdir/UnpackedTarball/poco"
 POCO_LIBRARY_DIR="$ENGINE_ROOT/workdir/LinkTarget/StaticLibrary"
 POCO_BUILD_DIR="$ENGINE_ROOT/workdir/AcademicEditorPocoBuild"
 POCO_ARCHIVE="$ENGINE_ROOT/workdir/poco-${POCO_VERSION}.tar.gz"
-REQUIRED_LIBRARIES=(Foundation XML JSON Util Net Crypto NetSSL)
+REQUIRED_LIBRARIES=(Foundation XML JSON Util Net Crypto NetSSL Zip)
 
 poco_is_ready() {
   [ -f "$POCO_SOURCE_DIR/include/Poco/Net/WebSocket.h" ] || return 1
@@ -41,7 +41,7 @@ tar -xzf "$POCO_ARCHIVE" --strip-components=1 -C "$POCO_SOURCE_DIR"
 # Collabora's engine workdir exposes one merged Poco include root, while the
 # upstream Poco release keeps headers under each component directory.
 mkdir -p "$POCO_SOURCE_DIR/include"
-for component in Foundation XML JSON Util Net Crypto NetSSL_OpenSSL; do
+for component in Foundation XML JSON Util Net Crypto NetSSL_OpenSSL Zip; do
   cp -a "$POCO_SOURCE_DIR/$component/include/." "$POCO_SOURCE_DIR/include/"
 done
 
@@ -61,7 +61,7 @@ cmake -S "$POCO_SOURCE_DIR" -B "$POCO_BUILD_DIR" \
   -DENABLE_DATA_ODBC=OFF \
   -DENABLE_REDIS=OFF \
   -DENABLE_PROMETHEUS=OFF \
-  -DENABLE_ZIP=OFF \
+  -DENABLE_ZIP=ON \
   -DENABLE_PAGECOMPILER=OFF \
   -DENABLE_PAGECOMPILER_FILE2PAGE=OFF \
   -DENABLE_ACTIVERECORD=OFF \

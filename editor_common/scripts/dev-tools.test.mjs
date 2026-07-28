@@ -134,10 +134,10 @@ test('native build supplies a pinned verified POCO workdir when public engine as
   assert.match(nativeBuild, /build-poco-engine-workdir\.sh/);
   assert.match(pocoBuild, /POCO_VERSION=.*1\.14\.2/);
   assert.match(pocoBuild, /47394ea7ddb7b0a40e1a5be896f8f5dc77cfdc4f561d2e7131ecf582df5a0c3a/);
-  assert.match(pocoBuild, /Foundation XML JSON Util Net Crypto NetSSL_OpenSSL/);
+  assert.match(pocoBuild, /Foundation XML JSON Util Net Crypto NetSSL_OpenSSL Zip/);
   assert.match(pocoBuild, /ENABLE_DATA_MYSQL=OFF/);
   assert.match(pocoBuild, /ENABLE_DATA_POSTGRESQL=OFF/);
-  for (const library of ['Foundation', 'XML', 'JSON', 'Util', 'Net', 'Crypto', 'NetSSL']) {
+  for (const library of ['Foundation', 'XML', 'JSON', 'Util', 'Net', 'Crypto', 'NetSSL', 'Zip']) {
     assert.match(pocoBuild, new RegExp(`libPoco\\$\\{library\\}\\.a|${library}`));
   }
   assert.match(dependencies, /\bcmake\b/);
@@ -266,7 +266,7 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-007/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-008/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);
