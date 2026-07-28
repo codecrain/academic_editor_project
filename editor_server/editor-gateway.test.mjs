@@ -1119,6 +1119,22 @@ test('gateway DOCX page embeds the editor URL directly', () => {
   assert.match(html, /height: 100%/);
   assert.match(html, /WOPISrc=x/);
   assert.match(html, /rel="icon" href="data:,"/);
+  assert.match(html, /event\.source === window\.parent/);
+  assert.match(html, /event\.source === editorFrame\?\.contentWindow/);
+  assert.match(html, /event\.origin !== parentOrigin/);
+  assert.match(html, /editorFrame\.contentWindow\.postMessage/);
+});
+
+test('gateway signed DOCX wrapper bridges only the trusted parent and nested editor origins', () => {
+  const html = renderDocxPage('https://editor.example/docx/browser/cool.html', {
+    access_token: 'token',
+    access_token_ttl: '123',
+  });
+  assert.match(html, /document\.referrer \? new URL\(document\.referrer\)\.origin/);
+  assert.match(html, /event\.origin !== parentOrigin/);
+  assert.match(html, /event\.origin === window\.location\.origin/);
+  assert.match(html, /window\.parent\.postMessage\(event\.data, parentOrigin\)/);
+  assert.doesNotMatch(html, /postMessage\(event\.data, ['"]\*['"]\)/);
 });
 
 test('gateway strips upstream branding from proxied editor HTML', () => {

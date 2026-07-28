@@ -1698,6 +1698,34 @@ export class DocxApiSession {
           assert.ok(Number.isInteger(startOffset) && Number.isInteger(endOffset)
             && startOffset >= 0 && endOffset >= startOffset && endOffset <= target.currentText.length,
           `${operation.op}.target range is outside the existing paragraph`);
+          const selectedText = target.currentText.slice(startOffset, endOffset);
+          if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked') {
+            assert.equal(
+              typeof operation.expectedText,
+              'string',
+              `${operation.op}.expectedText is required and must equal the inspected range`,
+            );
+          }
+          if (operation.expectedText !== undefined) {
+            assert.equal(
+              String(operation.expectedText),
+              selectedText,
+              `${operation.op}.expectedText does not match the current inspected range`,
+            );
+          }
+          if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked') {
+            const replacementText = String(operation.text ?? '');
+            const prefix = target.currentText.slice(0, startOffset);
+            const suffix = target.currentText.slice(endOffset);
+            const looksLikeWholeParagraph = (
+              (prefix.length >= 8 && replacementText.startsWith(prefix))
+              || (suffix.length >= 8 && replacementText.endsWith(suffix))
+            );
+            assert.ok(
+              !looksLikeWholeParagraph,
+              `${operation.op}.text looks like complete paragraph text for a smaller selected range; use only the replacement fragment or text.replaceParagraph`,
+            );
+          }
           if (operation.op === 'text.replaceTracked') {
             assert.ok(!String(operation.text ?? '').includes('\n'),
               'text.replaceTracked replacement text must stay inside one paragraph');

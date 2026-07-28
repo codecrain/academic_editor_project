@@ -267,6 +267,29 @@ async function buildDocxEditorActionUrl(config, publicOrigin) {
 }
 
 function renderDocxPage(editorUrl, formParameters = null) {
+  const frameBridge = `
+  <script>
+    (() => {
+      const editorFrame = document.querySelector('iframe[title="DOCX editor"]');
+      let parentOrigin = null;
+      try {
+        parentOrigin = document.referrer ? new URL(document.referrer).origin : null;
+      } catch (_error) {
+        parentOrigin = null;
+      }
+      window.addEventListener('message', (event) => {
+        if (event.source === window.parent && window.parent !== window) {
+          if (!parentOrigin || event.origin !== parentOrigin || !editorFrame?.contentWindow) return;
+          editorFrame.contentWindow.postMessage(event.data, window.location.origin);
+          return;
+        }
+        if (event.source === editorFrame?.contentWindow && event.origin === window.location.origin) {
+          if (!parentOrigin || window.parent === window) return;
+          window.parent.postMessage(event.data, parentOrigin);
+        }
+      });
+    })();
+  </script>`;
   if (formParameters) {
     const inputs = Object.entries(formParameters)
       .map(([name, value]) => `    <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}">`)
@@ -285,7 +308,7 @@ function renderDocxPage(editorUrl, formParameters = null) {
   <form id="docx-editor-form" method="post" action="${htmlEscape(editorUrl)}" target="docx-editor">
 ${inputs}
   </form>
-  <script>document.getElementById('docx-editor-form').submit();</script>
+  <script>document.getElementById('docx-editor-form').submit();</script>${frameBridge}
 </body>
 </html>`;
   }
@@ -310,7 +333,7 @@ ${inputs}
   </style>
 </head>
 <body>
-  <iframe title="DOCX editor" src="${htmlEscape(editorUrl)}" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <iframe title="DOCX editor" src="${htmlEscape(editorUrl)}" allow="clipboard-read; clipboard-write; fullscreen"></iframe>${frameBridge}
 </body>
 </html>`;
 }

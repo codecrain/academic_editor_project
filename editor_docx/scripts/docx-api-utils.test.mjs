@@ -503,6 +503,7 @@ test('DOCX API executes the previously uncovered text, table, list, and append c
   rangeSession.apply([{
     op: 'text.replace',
     target: { native: { section: 0, para: 1, offset: 0, length: 5 } },
+    expectedText: 'Plain',
     text: 'Updated',
   }]);
   reopened = new DocxApiSession(rangeSession.save().bytes);
@@ -554,6 +555,7 @@ test('DOCX paragraph and range replacement preserve zero-width structural marker
     {
       op: 'text.replace',
       target: { native: { para: 0, offset: 0, length: 'Bookmarked title'.length } },
+      expectedText: 'Bookmarked title',
       text: 'Range-replaced bookmarked title',
     },
   ]) {
@@ -585,6 +587,43 @@ test('DOCX quality check fails closed when a structural marker disappears', () =
   assert.equal(report.ok, false);
   assert.ok(report.issues.some((issue) => issue.code === 'structural-marker-loss'));
   assert.ok(report.issues.some((issue) => issue.code === 'unbalanced-bookmarks'));
+});
+
+test('DOCX range replacement rejects stale expected text and whole-paragraph payloads atomically', () => {
+  const source = createDocxBytes({ paragraphs: ['Prefix Student suffix remains stable.'] });
+  const session = new DocxApiSession(source);
+  const before = session.save().bytes;
+  const target = { native: { para: 0, offset: 7, length: 7 } };
+
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      text: 'Learner',
+    }]),
+    /missing required field\(s\): expectedText|expectedText is required/,
+  );
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      expectedText: 'Outdated',
+      text: 'Learner',
+    }]),
+    /expectedText does not match/,
+  );
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      expectedText: 'Student',
+      text: 'Prefix Learner suffix remains stable.',
+    }]),
+    /complete paragraph text for a smaller selected range/,
+  );
+
+  assert.equal(session.revision, 1);
+  assert.equal(Buffer.compare(before, session.save().bytes), 0);
 });
 
 test('DOCX paragraph replacement requires explicit segments and preserves every mixed-style run', () => {

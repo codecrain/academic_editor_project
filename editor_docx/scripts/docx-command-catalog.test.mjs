@@ -129,6 +129,7 @@ test('catalog validation distinguishes intentional clearing from semantically em
   assert.doesNotThrow(() => validateDocxCommands([{
     op: 'text.replaceTracked',
     target: { native: { section: 0, para: 0, offset: 0, length: 4 } },
+    expectedText: 'Risk',
     text: '',
   }]));
   assert.doesNotThrow(() => validateDocxCommands([{
@@ -160,6 +161,7 @@ test('tracked replacement emits native Word revisions and enables revision track
   session.apply([{
     op: 'text.replaceTracked',
     target: { native: { section: 0, para: 0, offset: 8, length: 3 } },
+    expectedText: 'low',
     text: 'material',
     author: 'Tlooto DocsAgent',
     date: '2026-07-26T00:00:00.000Z',

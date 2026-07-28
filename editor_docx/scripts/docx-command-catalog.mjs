@@ -43,23 +43,29 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
   }),
   command({
     op: 'text.replace', category: 'text', precondition: 'target_inspect',
-    description: 'Replace an inspected text range.', required: ['target', 'text'], aliases: ['replaceText'],
-    fields: { target: targetField, text: 'Replacement text.' },
-    example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, text: '2026' },
+    description: 'Replace an inspected text range.', required: ['target', 'text', 'expectedText'], aliases: ['replaceText'],
+    fields: {
+      target: targetField,
+      text: 'Replacement fragment only. Never pass the complete paragraph for a smaller target range.',
+      expectedText: 'Required exact visible text of the inspected range. Apply fails if it no longer matches.',
+    },
+    example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, expectedText: '2025', text: '2026' },
   }),
   command({
     op: 'text.replaceTracked', category: 'text', precondition: 'target_inspect',
     description: 'Replace an inspected text range with native Word deletion and insertion revisions.',
-    required: ['target', 'text'], aliases: ['replaceTextTracked'],
+    required: ['target', 'text', 'expectedText'], aliases: ['replaceTextTracked'],
     fields: {
       target: targetField,
-      text: 'Replacement text. Use an empty string for a tracked deletion.',
+      text: 'Replacement fragment only. Use an empty string for a tracked deletion; never pass the complete paragraph for a smaller target range.',
+      expectedText: 'Required exact visible text of the inspected range. Apply fails if it no longer matches.',
       author: 'Optional review author shown by Word. Defaults to Tlooto DocsAgent.',
       date: 'Optional ISO-8601 revision timestamp. Defaults to the server time.',
     },
     example: {
       op: 'text.replaceTracked',
       target: { native: { section: 0, para: 1, offset: 0, length: 4 } },
+      expectedText: '2025',
       text: '2026',
       author: 'Tlooto DocsAgent',
     },
@@ -330,6 +336,9 @@ const EMPTY_TEXT_CLEARING_OPS = new Set([
 
 function requiredFieldIsValid(entry, commandValue, field) {
   const value = commandFieldValue(commandValue, field);
+  if (field === 'expectedText' && (entry.op === 'text.replace' || entry.op === 'text.replaceTracked')) {
+    return typeof value === 'string';
+  }
   if (field === 'text' && EMPTY_TEXT_CLEARING_OPS.has(entry.op)) {
     return typeof value === 'string';
   }
