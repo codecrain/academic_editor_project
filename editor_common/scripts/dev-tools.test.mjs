@@ -205,6 +205,12 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   );
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
+  assert.match(helper, /npm --prefix "\$ROOT_DIR\/editor_hwpx" run build:studio/);
+  assert.doesNotMatch(helper, /npm --prefix "\$ROOT_DIR\/editor_hwpx" run build(?:\s|$)/);
+  assert.match(
+    helper,
+    /run_docx_runtime_npm doctor:native\s+[^]*prepare_rhwp_static_assets\s+[^]*run_docx_runtime_npm start:native/,
+  );
   assert.match(helper, /start_editor_gateway/);
   assert.match(helper, /EDITOR_INTERNAL_SERVER_URL\}\/hosting\/discovery/);
   assert.match(helper, /127\.0\.0\.1:\$\{EDITOR_GATEWAY_PORT\}.*RHWP_STUDIO_BASE_PATH/);
@@ -217,4 +223,15 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /npm run source-offer -- --output/);
   assert.match(helper, /npm run smoke/);
   assert.match(helper, /pm2 save/);
+});
+
+test('production HWPX static build consumes the validated tracked core artifact', () => {
+  const pkg = JSON.parse(readProjectFile('editor_hwpx/package.json'));
+  const ensureStudio = readProjectFile('editor_hwpx/scripts/ensure-studio.mjs');
+
+  assert.equal(pkg.scripts['build:studio'], 'node scripts/ensure-studio.mjs --build');
+  assert.equal(pkg.scripts['build:core'], 'node scripts/build-core-runtime.mjs');
+  assert.match(ensureStudio, /validateCoreArtifact\(pkgRoot\);/);
+  assert.match(ensureStudio, /materializeCoreArtifact\(pkgRoot, destination\)/);
+  assert.doesNotMatch(ensureStudio, /catalog:\s*\[\]/);
 });

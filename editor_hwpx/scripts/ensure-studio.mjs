@@ -75,13 +75,13 @@ function ensureNpmInstall(root, label) {
 }
 
 function syncSourceBuiltCorePackage() {
-  validateCoreArtifact(pkgRoot, { catalog: [] });
+  validateCoreArtifact(pkgRoot);
   const destinations = [
     path.resolve(sourceRoot, 'node_modules', '@rhwp', 'core'),
     path.resolve(studioRoot, 'node_modules', '@rhwp', 'core'),
   ];
   const results = destinations.map((destination) =>
-    materializeCoreArtifact(pkgRoot, destination, { catalog: [] }));
+    materializeCoreArtifact(pkgRoot, destination));
   assertCoreArtifactParity([pkgRoot, ...destinations]);
   return results;
 }

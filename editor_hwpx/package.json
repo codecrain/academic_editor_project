@@ -6,6 +6,7 @@
   "scripts": {
     "ensure": "node scripts/ensure-studio.mjs",
     "build:core": "node scripts/build-core-runtime.mjs",
+    "build:studio": "node scripts/ensure-studio.mjs --build",
     "build": "npm run build:core && node scripts/ensure-studio.mjs --build",
     "dev": "node scripts/start-studio.mjs dev",
     "preview": "node scripts/start-studio.mjs preview",

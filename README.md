@@ -269,6 +269,13 @@ EDITOR_NATIVE_RELEASE_TAG=native-YYYYMMDD \
 ./sh.start
 ```
 
+The production deploy validates the repository-owned HWPX core under
+`editor_hwpx/pkg`, materializes that exact artifact into the Studio dependency
+trees, and builds only the Studio static UI. Production servers therefore do
+not need `wasm-pack`, Rust, or Docker. Rebuilding the HWPX WASM itself is an
+explicit build-host operation (`npm --prefix editor_hwpx run build:core`), not a
+normal deployment step.
+
 Both entrypoints accept the same runtime variables documented below. Useful
 overrides are `EDITOR_HOST_PORT`, `EDITOR_NATIVE_PM2_NAME`,
 `EDITOR_REPO_SYNC=false`, `EDITOR_RECREATE=false`, and

@@ -457,9 +457,9 @@ prepare_rhwp_static_assets() {
 
   [ -f "$ROOT_DIR/editor_hwpx/package.json" ] || die "RHWP runtime package was not found: $ROOT_DIR/editor_hwpx"
 
-  log "building HWPX editor static assets"
+  log "validating the tracked HWPX core and building Studio static assets"
   RHWP_STUDIO_BASE_PATH="$RHWP_STUDIO_BASE_PATH" \
-  npm --prefix "$ROOT_DIR/editor_hwpx" run build
+  npm --prefix "$ROOT_DIR/editor_hwpx" run build:studio
 
   [ -f "$EDITOR_GATEWAY_HWPX_STATIC_ROOT/index.html" ] ||
     die "HWPX editor static build was not found: $EDITOR_GATEWAY_HWPX_STATIC_ROOT"
@@ -504,9 +504,11 @@ run_optional_checks() {
   fi
 
   run_docx_runtime_npm doctor:native
+  # Finish all build-only work before replacing either long-running service.
+  # A static asset failure must leave the currently serving PM2 processes alone.
+  prepare_rhwp_static_assets
   run_docx_runtime_npm start:native
   run_docx_runtime_npm doctor:native -- --require-installed
-  prepare_rhwp_static_assets
   start_editor_gateway
 
   local timestamp
