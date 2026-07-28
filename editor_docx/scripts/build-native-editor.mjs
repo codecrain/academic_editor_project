@@ -130,10 +130,10 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   );
   const usesEngineBuildTarget = buildScript.includes('make $ENGINE_BUILD_TARGET');
   if (
-    !buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release') &&
-    !usesEngineBuildTarget
+    (usesLegacyLayout && !buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) ||
+    (!usesLegacyLayout && !usesEngineBuildTarget)
   ) {
-    throw new Error('Failed to switch the engine source build to the static_release target.');
+    throw new Error('Failed to configure the upstream engine source build target.');
   }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
@@ -143,7 +143,7 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   }
   writeUtf8Lf(buildScriptPath, buildScript);
 
-  return { buildContextDir, usesEngineBuildTarget };
+  return buildContextDir;
 }
 
 function main() {
@@ -161,7 +161,7 @@ function main() {
   const engineAssetsRaw = readEnv('EDITOR_ENGINE_ASSETS', DEFAULT_ENGINE_ASSETS);
   const engineAssets = /^(source|none|false)$/i.test(engineAssetsRaw) ? '' : engineAssetsRaw;
   const prepareOnly = readEnv('EDITOR_NATIVE_PREPARE_ONLY', 'false') === 'true';
-  const { buildContextDir, usesEngineBuildTarget } = prepareBuildContext(
+  const buildContextDir = prepareBuildContext(
     resolvedContextRoot,
     dockerRepo,
     dockerRef,
@@ -186,7 +186,7 @@ function main() {
       ONLINE_EXTRA_BUILD_OPTIONS: extraBuildOptions,
       ENGINE_ASSETS: engineAssets,
       ENGINE_LANGUAGES: engineLanguages,
-      ENGINE_BUILD_TARGET: usesEngineBuildTarget ? 'static_release' : '',
+      ENGINE_BUILD_TARGET: '',
       NO_DOCKER_IMAGE: 'true',
     },
   });

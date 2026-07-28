@@ -262,7 +262,7 @@ EDITOR_PUBLIC_URL=https://your-service-domain.example ./sh.start
 ```
 
 Production uses the `academic-editor-native` pm2 process and the pinned
-`native-20260728-003` release by default. `sh.start` compares that tag with the
+`native-20260728-004` release by default. `sh.start` compares that tag with the
 installed release marker: it installs a missing or newer pinned artifact once,
 then only restarts and verifies it on later deploys. To test another release,
 override the tag explicitly:

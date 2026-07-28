@@ -8,9 +8,9 @@ on:
         required: false
         default: main
       engine_assets:
-        description: Public multilingual engine asset tarball URL. Keep source to build and verify required language packs.
+        description: Public multilingual engine asset tarball URL. Use source only on a build host with the engine translation repositories.
         required: false
-        default: source
+        default: https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz
   push:
     tags:
       - native-*
@@ -44,13 +44,13 @@ jobs:
         run: npm run build:native
         env:
           EDITOR_SOURCE_REF: ${{ github.event.inputs.source_ref || 'main' }}
-          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'source' }}
+          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz' }}
 
       - name: Package native runtime artifact
         run: npm run package:native
         env:
           EDITOR_SOURCE_REF: ${{ github.event.inputs.source_ref || 'main' }}
-          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'source' }}
+          EDITOR_ENGINE_ASSETS: ${{ github.event.inputs.engine_assets || 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz' }}
 
       - name: Upload native runtime artifact
         uses: actions/upload-artifact@v4

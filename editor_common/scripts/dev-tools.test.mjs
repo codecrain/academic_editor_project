@@ -125,7 +125,7 @@ test('source image preparation supports both legacy and current upstream docker 
   assert.match(nativeBuild, /docker', 'from-source-gh-action'/);
   assert.match(nativeBuild, /docker', 'from-source'/);
   assert.match(nativeBuild, /const usesLegacyLayout = existsSync\(legacySourceDir\)/);
-  assert.match(nativeBuild, /ENGINE_BUILD_TARGET: usesEngineBuildTarget \? 'static_release' : ''/);
+  assert.match(nativeBuild, /ENGINE_BUILD_TARGET: ''/);
   assert.match(nativeBuild, /NO_DOCKER_IMAGE: 'true'/);
 });
 
@@ -252,7 +252,7 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-003/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-004/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);
@@ -263,7 +263,9 @@ test('native release workflow uses the compiler-capable current Ubuntu runner', 
   const workflow = readProjectFile('.github/workflows/native-editor-runtime.yml');
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
   assert.match(workflow, /node-version: '24'/);
+  assert.match(workflow, /for-code-assets\/engine-main-assets\.tar\.gz/);
   assert.doesNotMatch(workflow, /ubuntu-22\.04|node-version: '20'/);
+  assert.doesNotMatch(workflow, /engine_assets \|\| 'source'/);
 });
 
 test('production HWPX static build consumes the validated tracked core artifact', () => {
