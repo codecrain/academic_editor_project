@@ -391,15 +391,16 @@ patches = [
 
 /* Tlooto compact desktop notebookbar
  * Keep touch/tablet sizing unchanged while recovering document viewport space
- * on desktop. The 56px content area still contains the tallest 28px controls
- * plus their label row and focus outline without clipping. */
+ * on desktop. The 50px content area contains the tallest 28px controls plus
+ * their label row and focus outline; the outer row keeps the upstream 18px
+ * allowance for labels and spacing. */
 @media (min-width: 901px) {
 \t.main-nav.hasnotebookbar {
-\t\theight: 30px;
+\t\theight: 28px;
 \t}
 
 \t#toolbar-wrapper.hasnotebookbar {
-\t\t--notebookbar-element-height: 56px;
+\t\t--notebookbar-element-height: 50px;
 \t}
 
 \t.notebookbar-scroll-wrapper,
@@ -407,7 +408,7 @@ patches = [
 \t.hasnotebookbar > #toolbar-row,
 \t.ui-overflow-manager > .notebookbar:not(.ui-separator),
 \t.ui-overflow-manager:not(:has(.ui-overflow-group)) {
-\t\theight: 74px;
+\t\theight: 68px;
 \t}
 }
 """,
@@ -465,6 +466,49 @@ if filter_statement not in text:
     print("[debrand] limited spell-check languages to en-US, en-GB, es-ES, fr-FR, de-DE")
 else:
     print("[debrand] spell-check language policy already present")
+PY
+
+# The language picker is a primary editing control, not disposable status
+# information. Keep it reachable in narrow iframe layouts and let the signing
+# indicator collapse before it when the status bar runs out of width.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+statusbar = root / "browser" / "src" / "control" / "Control.StatusBar.js"
+if not statusbar.exists():
+    raise SystemExit("[debrand] cannot find browser status bar source")
+
+text = statusbar.read_text(encoding="utf-8", errors="ignore")
+replacements = [
+    (
+        "{type: 'menubutton', id: 'languagestatus:LanguageStatusMenu', dataPriority: 3,",
+        "{type: 'menubutton', id: 'languagestatus:LanguageStatusMenu',",
+    ),
+    (
+        "{type: 'separator', id: 'languagestatusbreak', orientation: 'vertical', visible: false, dataPriority: 3}",
+        "{type: 'separator', id: 'languagestatusbreak', orientation: 'vertical', visible: false}",
+    ),
+    (
+        "{type: 'toolitem', id: 'signstatus', command: '.uno:Signature', w2icon: '', text: _UNO('.uno:Signature'), visible: false}",
+        "{type: 'toolitem', id: 'signstatus', command: '.uno:Signature', w2icon: '', text: _UNO('.uno:Signature'), visible: false, dataPriority: 10}",
+    ),
+]
+
+changed = False
+for old, new in replacements:
+    if old in text:
+        text = text.replace(old, new, 1)
+        changed = True
+    elif new not in text:
+        raise SystemExit(f"[debrand] cannot apply status bar priority patch: {old}")
+
+if changed:
+    statusbar.write_text(text, encoding="utf-8", newline="\n")
+    print("[debrand] kept the spell language picker visible in narrow iframe layouts")
+else:
+    print("[debrand] spell language picker priority already patched")
 PY
 
 # Build compatibility patch for upstream main as checked on 2026-06-03:

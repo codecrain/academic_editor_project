@@ -249,7 +249,9 @@ cd /home/bitnami/academic_editor_project
 `academic-editor-native-dev` pm2 process on port `9980`, and verifies the
 deployment with native doctor, runtime audit, source-offer output, and smoke
 checks. On a fresh DEV server, it can resolve the latest `native-*` GitHub
-release automatically when the native runtime is not installed yet.
+release automatically. The installed release tag is recorded under the runtime
+directory, so later deploys install a newer release once instead of repeatedly
+downloading an unchanged artifact.
 
 For production, pass the real service origin explicitly so DEV URLs cannot leak
 into a commercial deployment:
@@ -259,9 +261,11 @@ cd /home/bitnami/academic_editor_project
 EDITOR_PUBLIC_URL=https://your-service-domain.example ./sh.start
 ```
 
-Production uses the `academic-editor-native` pm2 process by default. If the
-runtime is already installed, `sh.start` restarts and verifies it. To install or
-upgrade a release artifact, pass one of these:
+Production uses the `academic-editor-native` pm2 process and the pinned
+`native-20260728-001` release by default. `sh.start` compares that tag with the
+installed release marker: it installs a missing or newer pinned artifact once,
+then only restarts and verifies it on later deploys. To test another release,
+override the tag explicitly:
 
 ```bash
 EDITOR_PUBLIC_URL=https://your-service-domain.example \
@@ -318,6 +322,8 @@ Useful native build environment variables:
 - `EDITOR_NATIVE_PREPARE_ONLY`: set to `true` to prepare the generated native build context without compiling.
 - `EDITOR_NATIVE_ARTIFACT_URL`: direct artifact URL for `npm run install:native:artifact`.
 - `EDITOR_NATIVE_RELEASE_TAG`: GitHub release tag such as `native-YYYYMMDD`.
+- `EDITOR_NATIVE_RELEASE_MARKER`: installed release marker. Default:
+  `/var/lib/academic-editor/native-release-tag`.
 - `EDITOR_NATIVE_ARTIFACT`: local tarball path for `npm run install:native:artifact`.
 - `EDITOR_NATIVE_RUNTIME_DIR`: runtime state directory. Default: `/var/lib/academic-editor`.
 - `EDITOR_NATIVE_CACHE_DIR`: runtime cache directory. Default: `/var/cache/academic-editor`.

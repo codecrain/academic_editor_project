@@ -46,7 +46,7 @@ m4_ifelse(MOBILEAPP, [true],
 [
   <input type="hidden" id="init-app-type" value="mobile" />
   <input type="hidden" id="init-help-file" value="m4_syscmd([cat html/cool-help.html | sed 's/"/\&quot;/g'])" />
-  <input type="hidden" id="init-product-branding-url" value="INFO_URL" />
+  <input type="hidden" id="init-product-branding-url" value="" />
 ],
 [
   <input type="hidden" id="init-welcome-url" value="%WELCOME_URL%" />
@@ -54,7 +54,7 @@ m4_ifelse(MOBILEAPP, [true],
   <input type="hidden" id="init-buy-product-url" value="%BUYPRODUCT_URL%" />
   <input type="hidden" id="init-app-type" value="browser" />
   <input type="hidden" id="init-css-vars" value="<!--%CSS_VARIABLES%-->" />
-  <input type="hidden" id="init-product-branding-url" value="%PRODUCT_BRANDING_URL%" />
+  <input type="hidden" id="init-product-branding-url" value="" />
 ]
 )
 

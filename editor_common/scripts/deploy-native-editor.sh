@@ -109,6 +109,7 @@ apply_runtime_defaults() {
   export EDITOR_NATIVE_AUTO_LATEST="${EDITOR_NATIVE_AUTO_LATEST:-false}"
   export EDITOR_NATIVE_INSTALL_ALWAYS="${EDITOR_NATIVE_INSTALL_ALWAYS:-false}"
   export EDITOR_NATIVE_INSTALL_ON_ARTIFACT_SOURCE="${EDITOR_NATIVE_INSTALL_ON_ARTIFACT_SOURCE:-true}"
+  export EDITOR_NATIVE_RELEASE_MARKER="${EDITOR_NATIVE_RELEASE_MARKER:-$EDITOR_NATIVE_RUNTIME_DIR/native-release-tag}"
   export EDITOR_CLEAN_ARTIFACT_CACHE="${EDITOR_CLEAN_ARTIFACT_CACHE:-true}"
   export EDITOR_VERIFY_PUBLIC="${EDITOR_VERIFY_PUBLIC:-true}"
   export EDITOR_AUDIT_NATIVE="${EDITOR_AUDIT_NATIVE:-true}"
@@ -362,6 +363,12 @@ artifact_configured() {
     [ -n "${EDITOR_NATIVE_RELEASE_TAG:-}" ]
 }
 
+native_release_is_current() {
+  [ -n "${EDITOR_NATIVE_RELEASE_TAG:-}" ] &&
+    [ -f "$EDITOR_NATIVE_RELEASE_MARKER" ] &&
+    [ "$(tr -d '\r\n' < "$EDITOR_NATIVE_RELEASE_MARKER")" = "$EDITOR_NATIVE_RELEASE_TAG" ]
+}
+
 resolve_latest_release_tag() {
   ensure_command curl
   ensure_command node
@@ -389,6 +396,10 @@ should_install_artifact() {
   if ! native_installed; then
     return 0
   fi
+  if [ -n "${EDITOR_NATIVE_RELEASE_TAG:-}" ]; then
+    ! native_release_is_current
+    return
+  fi
   truthy "$EDITOR_NATIVE_INSTALL_ON_ARTIFACT_SOURCE" && artifact_configured
 }
 
@@ -407,13 +418,17 @@ clean_artifact_cache() {
 }
 
 install_artifact_if_needed() {
-  if ! should_install_artifact; then
-    log "native runtime already installed; skipping artifact install"
-    return 0
-  fi
-
   if ! artifact_configured && truthy "$EDITOR_NATIVE_AUTO_LATEST"; then
     resolve_latest_release_tag
+  fi
+
+  if ! should_install_artifact; then
+    if native_release_is_current; then
+      log "native runtime release is current: ${EDITOR_NATIVE_RELEASE_TAG}"
+    else
+      log "native runtime already installed; skipping artifact install"
+    fi
+    return 0
   fi
 
   artifact_configured ||

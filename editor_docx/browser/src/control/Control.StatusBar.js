@@ -251,14 +251,16 @@ class StatusBar extends JSDialog.Toolbar {
 			this._generateHtmlItem('statusselectionmode', 6),				// text
 			this._generateHtmlItem('slidestatus'),						// presentation
 			this._generateHtmlItem('pagestatus'),						// drawing
-			{type: 'menubutton', id: 'languagestatus:LanguageStatusMenu', dataPriority: 3,
+			// Language selection is a primary editing control. Do not assign a
+			// disposable status priority: narrow iframe layouts must retain it.
+			{type: 'menubutton', id: 'languagestatus:LanguageStatusMenu',
 				configLabel: _('Language'), configId: 'languagestatus', configTargetId: 'languagestatus', configPeers: ['languagestatusbreak']},
-			{type: 'separator', id: 'languagestatusbreak', orientation: 'vertical', visible: false, dataPriority: 3}, // spreadsheet
+			{type: 'separator', id: 'languagestatusbreak', orientation: 'vertical', visible: false}, // spreadsheet
 			this._generateHtmlItem('statetablecell', 4, ['StateTableCellMenu', 'statetablebreak']),
 			this._generateStateTableCellMenuItem(2, false),			// spreadsheet
 			{type: 'separator', id: 'statetablebreak', orientation: 'vertical', visible: false, dataPriority: 7}, // spreadsheet
 			this._generateHtmlItem('permissionmode'),					// spreadsheet, text, presentation
-			{type: 'toolitem', id: 'signstatus', command: '.uno:Signature', w2icon: '', text: _UNO('.uno:Signature'), visible: false},
+			{type: 'toolitem', id: 'signstatus', command: '.uno:Signature', w2icon: '', text: _UNO('.uno:Signature'), visible: false, dataPriority: 10},
 			{type: 'spacer',  id: 'permissionspacer'},
 			this._generateHtmlItem('documentstatus', 2),					// spreadsheet, text, presentation, drawing
 			{type: 'customtoolitem',  id: 'multi-page-view', command: 'multipageview', text: _('Multi Page View'), dataPriority: 10, visible: false,

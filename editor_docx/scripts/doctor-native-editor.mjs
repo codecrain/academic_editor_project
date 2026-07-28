@@ -4,6 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 
 import { inspectAcademicFontReadiness } from './academic-font-readiness.mjs';
+import { inspectNativeSpellcheckReadiness } from './native-spellcheck-readiness.mjs';
 
 const REQUIRED_COMMANDS = [
   'git',
@@ -127,6 +128,9 @@ async function main() {
 
   const officeDir = '/opt/collaboraoffice';
   addResult(results, existsSync(officeDir), 'office engine install dir', officeDir);
+
+  const spellcheck = inspectNativeSpellcheckReadiness({ officeRoot: officeDir });
+  results.push(...spellcheck.results);
 
   const academicFonts = inspectAcademicFontReadiness();
   results.push(...academicFonts.results);

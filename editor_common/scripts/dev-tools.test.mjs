@@ -67,11 +67,27 @@ test('debranding patch keeps the notebookbar title restrained and desktop header
     assert.match(source, /text-overflow: ellipsis/);
     assert.match(source, /Tlooto compact desktop notebookbar/);
     assert.match(source, /@media \(min-width: 901px\)/);
-    assert.match(source, /--notebookbar-element-height: 56px/);
-    assert.match(source, /height: 74px/);
+    assert.match(source, /--notebookbar-element-height: 50px/);
+    assert.match(source, /height: 68px/);
   }
   assert.match(patch, /limited spell-check languages to en-US, en-GB, es-ES, fr-FR, de-DE/);
   assert.match(patch, /app\.favouriteLanguages\.indexOf\(code\) < 0/);
+});
+
+test('DOCX status bar keeps the spell language picker reachable in narrow iframes', () => {
+  const patch = readProjectFile('branding/debrand-online.sh');
+  const statusBar = readProjectFile('editor_docx/browser/src/control/Control.StatusBar.js');
+  const languageItem = statusBar.match(/\{type: 'menubutton', id: 'languagestatus:LanguageStatusMenu',[^\n]*/)?.[0];
+  const languageSeparator = statusBar.match(/\{type: 'separator', id: 'languagestatusbreak',[^\n]*/)?.[0];
+  const signingItem = statusBar.match(/\{type: 'toolitem', id: 'signstatus',[^\n]*/)?.[0];
+
+  assert.ok(languageItem, 'language status item must exist');
+  assert.ok(languageSeparator, 'language status separator must exist');
+  assert.ok(signingItem, 'document signing status item must exist');
+  assert.doesNotMatch(languageItem, /dataPriority/);
+  assert.doesNotMatch(languageSeparator, /dataPriority/);
+  assert.match(signingItem, /dataPriority: 10/);
+  assert.match(patch, /kept the spell language picker visible in narrow iframe layouts/);
 });
 
 test('source and native builds apply the public debranding patch before compilation', () => {
@@ -223,6 +239,18 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /npm run source-offer -- --output/);
   assert.match(helper, /npm run smoke/);
   assert.match(helper, /pm2 save/);
+});
+
+test('production deployment installs a pinned native release once and records it', () => {
+  const production = readProjectFile('sh.start');
+  const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
+  const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
+
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-001/);
+  assert.match(deployment, /native_release_is_current\(\)/);
+  assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
+  assert.match(deployment, /native runtime release is current/);
+  assert.match(installer, /writeFileSync\(releaseMarker, `\$\{releaseTag\}\\n`/);
 });
 
 test('production HWPX static build consumes the validated tracked core artifact', () => {

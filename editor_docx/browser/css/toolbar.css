@@ -1807,15 +1807,16 @@ menu-entry-with-icon.padding-left + menu-entry-icon.width */
 }
 /* Tlooto compact desktop notebookbar
  * Keep touch/tablet sizing unchanged while recovering document viewport space
- * on desktop. The 56px content area still contains the tallest 28px controls
- * plus their label row and focus outline without clipping. */
+ * on desktop. The 50px content area contains the tallest 28px controls plus
+ * their label row and focus outline; the outer row keeps the upstream 18px
+ * allowance for labels and spacing. */
 @media (min-width: 901px) {
 	.main-nav.hasnotebookbar {
-		height: 30px;
+		height: 28px;
 	}
 
 	#toolbar-wrapper.hasnotebookbar {
-		--notebookbar-element-height: 56px;
+		--notebookbar-element-height: 50px;
 	}
 
 	.notebookbar-scroll-wrapper,
@@ -1823,7 +1824,6 @@ menu-entry-with-icon.padding-left + menu-entry-icon.width */
 	.hasnotebookbar > #toolbar-row,
 	.ui-overflow-manager > .notebookbar:not(.ui-separator),
 	.ui-overflow-manager:not(:has(.ui-overflow-group)) {
-		height: 74px;
+		height: 68px;
 	}
 }
-

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -90,9 +90,13 @@ function locateInstallDir(stagingDir) {
   throw new Error(`Native artifact does not contain usr/bin/coolwsd under ${stagingDir}.`);
 }
 
-function installFromDir(installDir) {
+function installFromDir(installDir, releaseTag = '') {
   const runtimeDir = readEnv('EDITOR_NATIVE_RUNTIME_DIR', '/var/lib/academic-editor');
   const cacheDir = readEnv('EDITOR_NATIVE_CACHE_DIR', '/var/cache/academic-editor');
+  const releaseMarker = readEnv(
+    'EDITOR_NATIVE_RELEASE_MARKER',
+    path.join(runtimeDir, 'native-release-tag'),
+  );
 
   sudo(['rsync', '-a', `${installDir}/`, '/']);
   sudo(['setcap', 'cap_fowner,cap_chown,cap_sys_chroot=ep', '/usr/bin/coolforkit-caps']);
@@ -103,6 +107,11 @@ function installFromDir(installDir) {
   sudo(['chmod', '-R', 'u+rwX', runtimeDir, cacheDir, '/etc/coolwsd']);
   sudo(['coolwsd-systemplate-setup', path.join(runtimeDir, 'systemplate'), '/opt/collaboraoffice']);
   sudo(['chmod', '640', '/etc/coolwsd/coolwsd.xml']);
+
+  if (releaseTag) {
+    mkdirSync(path.dirname(releaseMarker), { recursive: true });
+    writeFileSync(releaseMarker, `${releaseTag}\n`, { encoding: 'utf8', mode: 0o644 });
+  }
 
   console.log('[editor] native document editor runtime is installed from artifact.');
   console.log(`[editor] runtime dir: ${runtimeDir}`);
@@ -115,6 +124,7 @@ function main() {
   }
 
   const artifactArg = parseArg('artifact') || readEnv('EDITOR_NATIVE_ARTIFACT');
+  const releaseTag = parseArg('tag') || readEnv('EDITOR_NATIVE_RELEASE_TAG');
   const artifactUrl = resolveArtifactUrl();
   const artifactCacheDir = resolveRepoPath(readEnv('EDITOR_NATIVE_ARTIFACT_CACHE_DIR', path.join(repoRoot, '.build', 'artifacts')));
   const stagingDir = resolveRepoPath(readEnv('EDITOR_NATIVE_ARTIFACT_STAGING_DIR', path.join(repoRoot, '.build', 'native-editor-artifact')));
@@ -136,7 +146,7 @@ function main() {
   rmSync(stagingDir, { recursive: true, force: true });
   mkdirSync(stagingDir, { recursive: true });
   run('tar', ['-xzf', artifactPath, '-C', stagingDir]);
-  installFromDir(locateInstallDir(stagingDir));
+  installFromDir(locateInstallDir(stagingDir), releaseTag);
 }
 
 try {

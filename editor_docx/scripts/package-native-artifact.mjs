@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { assertNativeSpellcheckReadiness } from './native-spellcheck-readiness.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -43,6 +45,9 @@ function main() {
 
   mkdirSync(outputDir, { recursive: true });
   run('test', ['-x', path.join(installDir, 'usr', 'bin', 'coolwsd')]);
+  const spellcheck = assertNativeSpellcheckReadiness({
+    officeRoot: path.join(installDir, 'opt', 'collaboraoffice'),
+  });
   run('tar', ['-czf', artifactPath, '-C', path.dirname(installDir), path.basename(installDir)]);
   run('sh', ['-lc', `cd "${outputDir.replace(/"/g, '\\"')}" && sha256sum "${artifactName.replace(/"/g, '\\"')}" > "${artifactName.replace(/"/g, '\\"')}.sha256"`]);
 
@@ -55,6 +60,7 @@ function main() {
       'EDITOR_ENGINE_ASSETS',
       'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz',
     ),
+    spellDictionaries: spellcheck.dictionaries,
     artifact: artifactName,
   };
   writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
