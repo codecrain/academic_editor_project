@@ -346,8 +346,10 @@ if not toolbar_css.exists():
     raise SystemExit("[debrand] cannot find browser/css/toolbar.css for document title sizing")
 
 text = toolbar_css.read_text(encoding="utf-8", errors="ignore")
-marker = "/* Tlooto document title sizing */"
-patch = """
+patches = [
+    (
+        "/* Tlooto document title sizing */",
+        """
 
 /* Tlooto document title sizing */
 .main-nav.hasnotebookbar #document-titlebar {
@@ -380,13 +382,89 @@ patch = """
 \t\tmax-width: 180px;
 \t}
 }
-"""
+""",
+        "notebookbar document title sizing",
+    ),
+    (
+        "/* Tlooto compact desktop notebookbar",
+        """
 
-if marker not in text:
-    toolbar_css.write_text(text.rstrip() + patch + "\n", encoding="utf-8", newline="\n")
-    print("[debrand] patched notebookbar document title sizing")
+/* Tlooto compact desktop notebookbar
+ * Keep touch/tablet sizing unchanged while recovering document viewport space
+ * on desktop. The 56px content area still contains the tallest 28px controls
+ * plus their label row and focus outline without clipping. */
+@media (min-width: 901px) {
+\t.main-nav.hasnotebookbar {
+\t\theight: 30px;
+\t}
+
+\t#toolbar-wrapper.hasnotebookbar {
+\t\t--notebookbar-element-height: 56px;
+\t}
+
+\t.notebookbar-scroll-wrapper,
+\t.notebookbar#NotebookBar,
+\t.hasnotebookbar > #toolbar-row,
+\t.ui-overflow-manager > .notebookbar:not(.ui-separator),
+\t.ui-overflow-manager:not(:has(.ui-overflow-group)) {
+\t\theight: 74px;
+\t}
+}
+""",
+        "compact desktop notebookbar",
+    ),
+]
+
+changed_labels = []
+for marker, patch, label in patches:
+    if marker not in text:
+        text = text.rstrip() + patch + "\n"
+        changed_labels.append(label)
+
+if changed_labels:
+    toolbar_css.write_text(text, encoding="utf-8", newline="\n")
+    print("[debrand] patched " + ", ".join(changed_labels))
 else:
-    print("[debrand] notebookbar document title sizing patch already present")
+    print("[debrand] notebookbar UI patches already present")
+PY
+
+# Keep spell-check exposure, engine assets, and the QA contract aligned. Korean
+# remains available as a UI language pack but is not exposed as a spell language.
+"${PYTHON_BIN}" - "${ROOT_DIR}" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+root = Path(sys.argv[1])
+docstate = root / "browser" / "src" / "docstate.ts"
+map_source = root / "browser" / "src" / "map" / "Map.js"
+if not docstate.exists() or not map_source.exists():
+    raise SystemExit("[debrand] cannot find browser language sources")
+
+text = docstate.read_text(encoding="utf-8", errors="ignore")
+replacement = "\t// Spell-check languages intentionally supported by the product. Keep this\n\t// list aligned with the engine build defaults and dictionary contract test.\n\tfavouriteLanguages: ['en-US', 'en-GB', 'es-ES', 'fr-FR', 'de-DE'],"
+text, count = re.subn(
+    r"(?m)^\tfavouriteLanguages: \[\n(?:\t\t'[^']+',\n)+\t\],|^\t// Spell-check languages intentionally supported by the product\..*?^\tfavouriteLanguages: \[[^\n]+\],",
+    replacement,
+    text,
+    count=1,
+    flags=re.MULTILINE | re.DOTALL,
+)
+if count != 1:
+    raise SystemExit("[debrand] cannot find favouriteLanguages policy")
+docstate.write_text(text, encoding="utf-8", newline="\n")
+
+text = map_source.read_text(encoding="utf-8", errors="ignore")
+filter_statement = "\t\t\t\t\tif (app.favouriteLanguages.indexOf(code) < 0)\n\t\t\t\t\t\treturn;\n"
+if filter_statement not in text:
+    needle = "\t\t\t\t\tif (split.length > 1)\n\t\t\t\t\t\tcode = split[1];\n"
+    if needle not in text:
+        raise SystemExit("[debrand] cannot find LanguageStatus code extraction")
+    text = text.replace(needle, needle + filter_statement, 1)
+    map_source.write_text(text, encoding="utf-8", newline="\n")
+    print("[debrand] limited spell-check languages to en-US, en-GB, es-ES, fr-FR, de-DE")
+else:
+    print("[debrand] spell-check language policy already present")
 PY
 
 # Build compatibility patch for upstream main as checked on 2026-06-03:
