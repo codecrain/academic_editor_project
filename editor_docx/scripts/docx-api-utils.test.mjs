@@ -7,12 +7,51 @@ import {
   DocxApiSession,
   applyDocxCommand,
   createDocxBytes,
+  createZip,
   generatePngBytes,
   getDocumentXml,
   getZipText,
   readZip,
   resolveDocxTextTarget,
 } from './docx-api-utils.mjs';
+
+function createMixedOrientationDocx() {
+  const entries = readZip(createDocxBytes({ paragraphs: ['placeholder'] }));
+  entries.set('word/document.xml', Buffer.from(
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>`
+    + `<w:p><w:pPr><w:sectPr w:rsidR="00000001"><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:pPr><w:r><w:t>Portrait section</w:t></w:r></w:p>`
+    + `<w:p><w:pPr><w:sectPr w:rsidR="00000002"><w:type w:val="nextPage"/><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="900" w:right="800" w:bottom="900" w:left="800" w:header="500" w:footer="500" w:gutter="0"/></w:sectPr></w:pPr><w:r><w:t>Landscape section</w:t></w:r></w:p>`
+    + `<w:p><w:r><w:t>Final portrait section</w:t></w:r></w:p>`
+    + `<w:sectPr w:rsidR="00000003"><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000" w:header="600" w:footer="600" w:gutter="0"/></w:sectPr>`
+    + `</w:body></w:document>`,
+    'utf8',
+  ));
+  return createZip(entries);
+}
+
+const customSectionRatioFixture = path.resolve(
+  import.meta.dirname,
+  '..',
+  'engine',
+  'sw',
+  'qa',
+  'extras',
+  'ooxmlexport',
+  'data',
+  'tdf149313.docx',
+);
+
+const mixedPageStyleFixture = path.resolve(
+  import.meta.dirname,
+  '..',
+  'engine',
+  'sw',
+  'qa',
+  'extras',
+  'ooxmlexport',
+  'data',
+  'tdf95033.docx',
+);
 
 function createStyledDocx() {
   return createDocxBytes({
@@ -84,6 +123,10 @@ test('DOCX API read/target/object APIs expose editable guidance', () => {
   const session = new DocxApiSession(createStyledDocx());
   const json = session.readJson();
   const table = json.tables[0];
+  assert.equal(json.pageCount, json.pageCountEstimate);
+  assert.equal(json.pageCountSource, 'paragraph-heuristic');
+  assert.equal(json.pageCountIsEstimate, true);
+  assert.equal(json.layoutGraph.pageCountIsEstimate, true);
   assert.ok(json.editableTargets.paragraphs.length >= 2);
   assert.equal(table.dims.cellCount, 4);
   assert.ok(session.targetMap().cells.length >= 4);
@@ -91,6 +134,159 @@ test('DOCX API read/target/object APIs expose editable guidance', () => {
   assert.equal(session.objectInventory().images[0].name, 'word/media/image1.png');
   assert.equal(session.objectInventory().pictures[0].relationshipId, 'rIdImage1');
   assert.ok(session.qualityCheck().ok);
+});
+
+test('DOCX API exposes every native section and preserves mixed page orientation', () => {
+  const session = new DocxApiSession(createMixedOrientationDocx());
+  const json = session.readJson();
+
+  assert.equal(json.sections.length, 3);
+  assert.deepEqual(json.sections.map((section) => section.pageSetup.orientation), [
+    'portrait',
+    'landscape',
+    'portrait',
+  ]);
+  assert.deepEqual(json.sections.map((section) => section.pageSetup.width), [11906, 16838, 12240]);
+  assert.deepEqual(json.blocks.map((block) => block.native.section), [0, 1, 2]);
+  assert.deepEqual(json.layoutGraph.sections.map((section) => section.boundary.kind), [
+    'paragraph',
+    'paragraph',
+    'body',
+  ]);
+});
+
+test('setPageSetup targets one native section without flattening adjacent page ratios', () => {
+  const session = new DocxApiSession(createMixedOrientationDocx());
+  session.apply([{
+    op: 'setPageSetup',
+    section: 1,
+    width: 18000,
+    height: 12000,
+    orientation: 'landscape',
+    margins: { top: 700, right: 710, bottom: 720, left: 730, header: 400, footer: 410 },
+  }]);
+
+  const saved = session.save().bytes;
+  const reopened = new DocxApiSession(saved);
+  const sections = reopened.readJson().sections;
+  assert.deepEqual(sections.map((section) => section.pageSetup.width), [11906, 18000, 12240]);
+  assert.deepEqual(sections.map((section) => section.pageSetup.orientation), ['portrait', 'landscape', 'portrait']);
+  assert.equal(sections[1].pageSetup.margins.left, 730);
+  assert.match(getDocumentXml(saved), /<w:sectPr w:rsidR="00000002">[\s\S]*?<w:pgSz w:w="18000" w:h="12000" w:orient="landscape"\/>/);
+  assert.match(getDocumentXml(saved), /<w:sectPr w:rsidR="00000001">/);
+  assert.match(getDocumentXml(saved), /<w:sectPr w:rsidR="00000003">/);
+});
+
+test('setPageSetup changes every native section only when section is explicitly all', () => {
+  const session = new DocxApiSession(createMixedOrientationDocx());
+  session.apply([{
+    op: 'setPageSetup',
+    section: 'all',
+    width: 15840,
+    height: 12240,
+    orientation: 'landscape',
+    margins: { top: 800, right: 810, bottom: 820, left: 830 },
+  }]);
+
+  const reopened = new DocxApiSession(session.save().bytes);
+  assert.deepEqual(reopened.readJson().sections.map((section) => section.pageSetup.width), [15840, 15840, 15840]);
+  assert.deepEqual(reopened.readJson().sections.map((section) => section.pageSetup.orientation), ['landscape', 'landscape', 'landscape']);
+});
+
+test('DOCX API preserves real custom section page ratios during a content edit', () => {
+  const input = readFileSync(customSectionRatioFixture);
+  const session = new DocxApiSession(input);
+  const baseline = session.readJson();
+  const pageRatios = (document) => document.sections.map(({ pageSetup }) => [
+    pageSetup.width,
+    pageSetup.height,
+    pageSetup.orientation,
+  ]);
+  const expectedPageRatios = [
+    [5000, 5000, 'portrait'],
+    [8000, 5000, 'landscape'],
+  ];
+
+  // This tracked LibreOffice regression fixture has a square first section and
+  // a custom landscape second section. It catches code that silently replaces
+  // native section dimensions with one default paper size while editing text.
+  assert.deepEqual(pageRatios(baseline), expectedPageRatios);
+  assert.deepEqual(baseline.blocks.map((block) => block.native.section), [0, 0, 1]);
+
+  session.apply([{
+    op: 'text.replaceParagraph',
+    location: { paragraph: { number: 2 } },
+    text: 'Edited Page 2',
+  }]);
+
+  const saved = session.save().bytes;
+  const documentXml = getDocumentXml(saved);
+  const reopened = new DocxApiSession(saved).readJson();
+  assert.equal(reopened.blocks[2].text, 'Edited Page 2');
+  assert.deepEqual(pageRatios(reopened), expectedPageRatios);
+  assert.deepEqual(reopened.blocks.map((block) => block.native.section), [0, 0, 1]);
+  assert.equal((documentXml.match(/<w:pgSz\b/g) || []).length, 2);
+  assert.match(documentXml, /<w:pgSz w:w="5000" w:h="5000"\/>/);
+  assert.match(documentXml, /<w:pgSz w:w="8000" w:h="5000"\/>/);
+});
+
+test('DOCX API preserves a complex real document with section-specific page styles', () => {
+  const input = readFileSync(mixedPageStyleFixture);
+  const session = new DocxApiSession(input);
+  const baseline = session.readJson();
+  const sectionSetup = (document) => document.sections.map(({ pageSetup }) => ({
+    width: pageSetup.width,
+    height: pageSetup.height,
+    orientation: pageSetup.orientation,
+    margins: pageSetup.margins,
+  }));
+  const expectedSectionSetup = sectionSetup(baseline);
+
+  assert.deepEqual(expectedSectionSetup.map(({ width, height, orientation }) => [
+    width,
+    height,
+    orientation,
+  ]), [
+    [16840, 11907, 'landscape'],
+    [16840, 11907, 'landscape'],
+    [11907, 16840, 'portrait'],
+  ]);
+  assert.notDeepEqual(expectedSectionSetup[0].margins, expectedSectionSetup[1].margins);
+  assert.equal(baseline.blocks[2].native.section, 1);
+
+  session.apply([{
+    op: 'text.replaceParagraph',
+    location: { paragraph: { number: 2 } },
+    text: 'Edited mixed section',
+  }]);
+
+  const reopened = new DocxApiSession(session.save().bytes).readJson();
+  assert.equal(reopened.blocks[2].text, 'Edited mixed section');
+  assert.deepEqual(sectionSetup(reopened), expectedSectionSetup);
+  assert.equal(reopened.tables.length, baseline.tables.length);
+  assert.equal(reopened.blocks.length, baseline.blocks.length);
+});
+
+test('DOCX quality check fails closed when a section page ratio changes unexpectedly', () => {
+  const session = new DocxApiSession(createMixedOrientationDocx());
+  const baseline = session.readJson();
+
+  session.apply([{
+    op: 'setPageSetup',
+    section: 1,
+    width: 12240,
+    height: 15840,
+    orientation: 'portrait',
+    margins: { top: 900, right: 800, bottom: 900, left: 800 },
+  }]);
+
+  const report = session.qualityCheck({ baselineJson: baseline });
+  assert.equal(report.ok, false);
+  assert.ok(report.issues.some((issue) => issue.code === 'section-layout-changed'));
+  assert.equal(
+    session.qualityCheck({ baselineJson: baseline, allowSectionLayoutChanges: true }).ok,
+    true,
+  );
 });
 
 test('DOCX quality check downgrades only non-regressing baseline table-capacity warnings', () => {
@@ -503,6 +699,7 @@ test('DOCX API executes the previously uncovered text, table, list, and append c
   rangeSession.apply([{
     op: 'text.replace',
     target: { native: { section: 0, para: 1, offset: 0, length: 5 } },
+    expectedText: 'Plain',
     text: 'Updated',
   }]);
   reopened = new DocxApiSession(rangeSession.save().bytes);
@@ -554,6 +751,7 @@ test('DOCX paragraph and range replacement preserve zero-width structural marker
     {
       op: 'text.replace',
       target: { native: { para: 0, offset: 0, length: 'Bookmarked title'.length } },
+      expectedText: 'Bookmarked title',
       text: 'Range-replaced bookmarked title',
     },
   ]) {
@@ -585,6 +783,43 @@ test('DOCX quality check fails closed when a structural marker disappears', () =
   assert.equal(report.ok, false);
   assert.ok(report.issues.some((issue) => issue.code === 'structural-marker-loss'));
   assert.ok(report.issues.some((issue) => issue.code === 'unbalanced-bookmarks'));
+});
+
+test('DOCX range replacement rejects stale expected text and whole-paragraph payloads atomically', () => {
+  const source = createDocxBytes({ paragraphs: ['Prefix Student suffix remains stable.'] });
+  const session = new DocxApiSession(source);
+  const before = session.save().bytes;
+  const target = { native: { para: 0, offset: 7, length: 7 } };
+
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      text: 'Learner',
+    }]),
+    /missing required field\(s\): expectedText|expectedText is required/,
+  );
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      expectedText: 'Outdated',
+      text: 'Learner',
+    }]),
+    /expectedText does not match/,
+  );
+  assert.throws(
+    () => session.apply([{
+      op: 'text.replace',
+      target,
+      expectedText: 'Student',
+      text: 'Prefix Learner suffix remains stable.',
+    }]),
+    /complete paragraph text for a smaller selected range/,
+  );
+
+  assert.equal(session.revision, 1);
+  assert.equal(Buffer.compare(before, session.save().bytes), 0);
 });
 
 test('DOCX paragraph replacement requires explicit segments and preserves every mixed-style run', () => {

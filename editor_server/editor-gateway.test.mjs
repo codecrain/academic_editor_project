@@ -902,6 +902,9 @@ test('MCP read and target streams stay bounded, complete, opaque, and revision-b
       bytesBase64: sourceBytes.toString('base64'),
     });
     const opened = openedCall.result.structuredContent;
+    assert.equal(opened.pageCount, opened.pageCountEstimate);
+    assert.equal(opened.pageCountSource, 'paragraph-heuristic');
+    assert.equal(opened.pageCountIsEstimate, true);
 
     const summaryCall = await mcp('editor_docx_read_json', { documentId: opened.documentId });
     const summary = summaryCall.result.structuredContent;
@@ -910,6 +913,9 @@ test('MCP read and target streams stay bounded, complete, opaque, and revision-b
     assert.equal(summary.returned, 1);
     assert.equal(summary.nextCursor, null);
     assert.equal(summary.items[0].tableCount, 2);
+    assert.equal(summary.items[0].pageCount, summary.items[0].pageCountEstimate);
+    assert.equal(summary.items[0].pageCountSource, 'paragraph-heuristic');
+    assert.equal(summary.items[0].pageCountIsEstimate, true);
     assert.equal(summary.blocks, undefined);
     assert.equal(summary.sections, undefined);
     assertBounded(summaryCall);
@@ -1119,6 +1125,22 @@ test('gateway DOCX page embeds the editor URL directly', () => {
   assert.match(html, /height: 100%/);
   assert.match(html, /WOPISrc=x/);
   assert.match(html, /rel="icon" href="data:,"/);
+  assert.match(html, /event\.source === window\.parent/);
+  assert.match(html, /event\.source === editorFrame\?\.contentWindow/);
+  assert.match(html, /event\.origin !== parentOrigin/);
+  assert.match(html, /editorFrame\.contentWindow\.postMessage/);
+});
+
+test('gateway signed DOCX wrapper bridges only the trusted parent and nested editor origins', () => {
+  const html = renderDocxPage('https://editor.example/docx/browser/cool.html', {
+    access_token: 'token',
+    access_token_ttl: '123',
+  });
+  assert.match(html, /document\.referrer \? new URL\(document\.referrer\)\.origin/);
+  assert.match(html, /event\.origin !== parentOrigin/);
+  assert.match(html, /event\.origin === window\.location\.origin/);
+  assert.match(html, /window\.parent\.postMessage\(event\.data, parentOrigin\)/);
+  assert.doesNotMatch(html, /postMessage\(event\.data, ['"]\*['"]\)/);
 });
 
 test('gateway strips upstream branding from proxied editor HTML', () => {
@@ -1431,6 +1453,7 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
     enableSampleDocx: false,
     allowedWopiOrigins: new Set([gatewayOrigin]),
+    frameAncestorOrigins: ['https://code-dev-v2.tlooto.com'],
     internalBearerToken: 'gateway-test-api-key-with-24-characters',
     documentStore,
   });
@@ -1468,6 +1491,10 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
       body: new URLSearchParams(firstSession.formParameters),
     });
     assert.equal(openFirst.status, 200);
+    assert.equal(
+      openFirst.headers.get('content-security-policy'),
+      "frame-ancestors 'self' https://code-dev-v2.tlooto.com;",
+    );
     const firstHtml = await openFirst.text();
     assert.match(firstHtml, new RegExp(first.documentId));
     assert.doesNotMatch(firstHtml, new RegExp(second.documentId));

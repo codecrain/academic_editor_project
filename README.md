@@ -37,6 +37,9 @@ Current documentation starts at [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION
 The complete transport contract is [API.md](API.md), and the reproducible HWPX
 acceptance corpus is under
 [evaluation/hwpx-public-sector-v1](evaluation/hwpx-public-sector-v1).
+DOCX mixed-page preservation, the current iframe bridge, and the proposed
+host-owned context-action contract are specified in
+[docs/DOCX_IFRAME_INTEGRATION.md](docs/DOCX_IFRAME_INTEGRATION.md).
 
 The private service repository owns the WOPI host, authentication, storage,
 database, project/report UI, and deployment secrets.
@@ -152,6 +155,7 @@ running editor runtimes:
 
 ```powershell
 npm.cmd run test:docx-browser
+npm.cmd run test:docx-page-ratio
 npm.cmd run test:hwpx-browser
 ```
 
@@ -160,7 +164,12 @@ use `127.0.0.1`, but `EDITOR_GATEWAY_WOPI_BASE_URL` must use
 `host.docker.internal` so the container can call back to WOPI. The Collabora
 alias group must allow the same WOPI origin. `test:docx-browser` defaults to
 `http://127.0.0.1:11007/docx/`; override `DOCX_ACCEPTANCE_URL` for another
-isolated environment. Both browser tests close the Chrome process they create.
+isolated environment. Each browser test closes the Chrome process it creates.
+`test:docx-page-ratio` defaults to `http://127.0.0.1:11017/docx/` and expects an
+isolated gateway serving a copy of the tracked `tdf149313.docx` fixture. It
+asserts the square and custom-landscape page rectangles before editing, after
+WOPI save, and after a fresh browser reopen; override
+`DOCX_PAGE_RATIO_ACCEPTANCE_URL` when the isolated gateway uses another port.
 
 DOCX automatic spelling is intentionally limited to English (US), English
 (UK), Spanish (Spain), French (France), and German (Germany). These menu choices

@@ -12,6 +12,9 @@ superseded design notes are intentionally not published as documentation.
 - [HWPX_EDITOR.md](HWPX_EDITOR.md): HWPX engine capabilities, limits, and
   acceptance criteria.
 - [HWPX_MCP_API.md](HWPX_MCP_API.md): concise HWPX MCP workflow and examples.
+- [DOCX_IFRAME_INTEGRATION.md](DOCX_IFRAME_INTEGRATION.md): mixed-section page
+  preservation, the implemented iframe bridge, and the proposed host/editor
+  context-menu messaging contract.
 - [evaluation/hwpx-public-sector-v1/README.md](../evaluation/hwpx-public-sector-v1/README.md):
   100-case public-sector evaluation corpus.
 - [evaluation/hwpx-public-sector-v1/METHODOLOGY.md](../evaluation/hwpx-public-sector-v1/METHODOLOGY.md):

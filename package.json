@@ -37,6 +37,7 @@
     "test:hwpx-evaluation": "node evaluation/hwpx-public-sector-v1/scripts/run-api-evaluation.mjs --render full",
     "test:hwpx-browser": "node editor_hwpx/rhwp-studio/e2e/api-artifact-acceptance.test.mjs",
     "test:docx-browser": "node editor_docx/e2e/browser-artifact-acceptance.test.mjs",
+    "test:docx-page-ratio": "node editor_docx/e2e/page-ratio-acceptance.test.mjs",
     "test:docx-api": "node --test editor_docx/scripts/docx-command-catalog.test.mjs editor_docx/scripts/docx-api-utils.test.mjs editor_docx/scripts/docx-renderer.test.mjs editor_docx/scripts/spellcheck-dictionary-contract.test.mjs",
     "test:uno-renderer": "node editor_docx/scripts/run-uno-renderer-tests.mjs",
     "docx:author:samples": "node editor_docx/scripts/author-docx-api-samples.mjs",

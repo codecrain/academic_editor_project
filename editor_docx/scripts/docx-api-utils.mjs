@@ -806,6 +806,95 @@ function discoverParagraphs(documentXml) {
   });
 }
 
+function wordAttribute(xml, name, fallback = null) {
+  return firstMatch(xml, new RegExp(`\\bw:${name}="([^"]+)"`), fallback);
+}
+
+function numericWordAttribute(xml, name) {
+  const value = wordAttribute(xml, name, null);
+  if (value === null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function sectionLayoutFromXml(sectPrXml) {
+  const pageSizeXml = tagXml(sectPrXml, 'pgSz');
+  const pageMarginsXml = tagXml(sectPrXml, 'pgMar');
+  const columnsXml = tagXml(sectPrXml, 'cols');
+  const width = numericWordAttribute(pageSizeXml, 'w');
+  const height = numericWordAttribute(pageSizeXml, 'h');
+  const explicitOrientation = wordAttribute(pageSizeXml, 'orient', null);
+  const orientation = explicitOrientation === 'landscape' || explicitOrientation === 'portrait'
+    ? explicitOrientation
+    : width !== null && height !== null && width > height
+    ? 'landscape'
+    : 'portrait';
+  return {
+    pageSetup: {
+      width,
+      height,
+      orientation,
+      margins: {
+        top: numericWordAttribute(pageMarginsXml, 'top'),
+        right: numericWordAttribute(pageMarginsXml, 'right'),
+        bottom: numericWordAttribute(pageMarginsXml, 'bottom'),
+        left: numericWordAttribute(pageMarginsXml, 'left'),
+        header: numericWordAttribute(pageMarginsXml, 'header'),
+        footer: numericWordAttribute(pageMarginsXml, 'footer'),
+        gutter: numericWordAttribute(pageMarginsXml, 'gutter'),
+      },
+    },
+    type: wordAttribute(tagXml(sectPrXml, 'type'), 'val', 'nextPage'),
+    columns: {
+      count: numericWordAttribute(columnsXml, 'num') ?? 1,
+      space: numericWordAttribute(columnsXml, 'space'),
+      equalWidth: wordAttribute(columnsXml, 'equalWidth', '1') !== '0',
+    },
+  };
+}
+
+function discoverSections(documentXml, discoveredParagraphs) {
+  const sectionBlocks = elementBlocks(documentXml, 'sectPr');
+  if (!sectionBlocks.length) {
+    return [{
+      id: 'sect_0',
+      section: 0,
+      start: 0,
+      end: documentXml.length,
+      boundary: { kind: 'implicit' },
+      paragraphStart: discoveredParagraphs[0]?.index ?? null,
+      paragraphEnd: discoveredParagraphs.at(-1)?.index ?? null,
+      ...sectionLayoutFromXml(''),
+    }];
+  }
+  return sectionBlocks.map((block, section) => {
+    const boundaryParagraph = discoveredParagraphs.find(
+      (paragraph) => paragraph.start <= block.start && paragraph.end >= block.end,
+    );
+    const previousBoundary = sectionBlocks[section - 1];
+    const paragraphs = discoveredParagraphs.filter((paragraph) => (
+      paragraph.start > (previousBoundary?.start ?? -1) && paragraph.start <= block.start
+    ));
+    return {
+      id: `sect_${section}`,
+      section,
+      start: previousBoundary?.end ?? bodyRange(documentXml).openEnd,
+      end: block.end,
+      boundary: boundaryParagraph
+        ? { kind: 'paragraph', paragraph: boundaryParagraph.index }
+        : { kind: 'body' },
+      paragraphStart: paragraphs[0]?.index ?? null,
+      paragraphEnd: paragraphs.at(-1)?.index ?? null,
+      ...sectionLayoutFromXml(block.xml),
+    };
+  });
+}
+
+function sectionForPosition(sections, position) {
+  const section = sections.find((item) => position <= item.end) ?? sections.at(-1);
+  return section?.section ?? 0;
+}
+
 function estimateCellCapacity(style = {}) {
   const width = Number(style.cell?.width) || 4500;
   const fontSizeHalfPoints = Number(style.text?.fontSizeHalfPoints) || 20;
@@ -1063,7 +1152,7 @@ function editableTargets(sections, tables) {
   return {
     paragraphs: sections.flatMap((section) => section.paragraphs.map((paragraph) => ({
       id: paragraph.id,
-      location: { paragraph: { section: 0, number: paragraph.index } },
+      location: { paragraph: { section: paragraph.section, number: paragraph.index } },
       textLength: paragraph.text.length,
       styleFingerprint: paragraph.styleFingerprint,
       runs: paragraphRunsFromXml(paragraph.xml).map(({ index, text, textLength, style }) => ({
@@ -1239,29 +1328,69 @@ export class DocxApiSession {
   }
 
   readJson() {
-    const paragraphs = discoverParagraphs(this.documentXml);
-    const sections = [{ section: 0, paragraphCount: paragraphs.length, paragraphs }];
-    const tables = discoverTables(this.documentXml);
+    const discoveredParagraphs = discoverParagraphs(this.documentXml);
+    const discoveredSections = discoverSections(this.documentXml, discoveredParagraphs);
+    const paragraphs = discoveredParagraphs.map((paragraph) => {
+      const section = sectionForPosition(discoveredSections, paragraph.start);
+      return {
+        ...paragraph,
+        section,
+        native: { ...paragraph.native, section },
+      };
+    });
+    const sections = discoveredSections.map((section) => {
+      const sectionParagraphs = paragraphs.filter((paragraph) => paragraph.section === section.section);
+      return {
+        ...section,
+        paragraphCount: sectionParagraphs.length,
+        paragraphs: sectionParagraphs,
+      };
+    });
+    const tables = discoverTables(this.documentXml).map((table) => {
+      const section = sectionForPosition(discoveredSections, table.start);
+      return { ...table, native: { ...table.native, section } };
+    });
     const objectGraph = readObjectGraph(this.entries, this.documentXml);
+    // DOCX pagination is a renderer concern. This value is deliberately retained
+    // for backward compatibility, but must never be presented as a rendered page
+    // count: fonts, tracked changes, fields, floating objects, and printer metrics
+    // can all change the result substantially.
+    const pageCountEstimate = Math.max(1, Math.ceil(Math.max(1, paragraphs.length) / 34));
     return {
       revision: this.revision,
       sourceFormat: 'docx',
-      pageCount: Math.max(1, Math.ceil(Math.max(1, paragraphs.length) / 34)),
+      pageCount: pageCountEstimate,
+      pageCountEstimate,
+      pageCountSource: 'paragraph-heuristic',
+      pageCountIsEstimate: true,
       sections,
       blocks: paragraphs.map((paragraph) => ({
         id: paragraph.id,
         kind: 'paragraph',
         text: paragraph.text,
-        native: { section: 0, paragraph: paragraph.index },
+        native: { section: paragraph.section, paragraph: paragraph.index },
         styleFingerprint: paragraph.styleFingerprint,
       })),
       tables,
       styleGraph: readStyleGraph(this.entries),
       layoutGraph: {
-        pageCount: Math.max(1, Math.ceil(Math.max(1, paragraphs.length) / 34)),
+        pageCount: pageCountEstimate,
+        pageCountEstimate,
+        pageCountSource: 'paragraph-heuristic',
+        pageCountIsEstimate: true,
+        sections: sections.map((section) => ({
+          id: section.id,
+          section: section.section,
+          boundary: section.boundary,
+          paragraphStart: section.paragraphStart,
+          paragraphEnd: section.paragraphEnd,
+          pageSetup: section.pageSetup,
+          type: section.type,
+          columns: section.columns,
+        })),
         tables: tables.map((table) => ({
           id: table.id,
-          section: 0,
+          section: table.native.section,
           tableIndex: table.tableIndex,
           cellCount: table.dims.cellCount,
         })),
@@ -1347,10 +1476,11 @@ export class DocxApiSession {
       };
     }
     const paragraph = this.paragraphFromLocation(location);
+    const section = this.readJson().blocks.find((block) => block.id === paragraph.id)?.native?.section ?? 0;
     return {
       kind: 'paragraph',
       id: paragraph.id,
-      location: { paragraph: { section: 0, number: paragraph.index } },
+      location: { paragraph: { section, number: paragraph.index } },
       currentText: paragraph.text,
       textLength: paragraph.text.length,
       style: paragraph.style,
@@ -1362,7 +1492,7 @@ export class DocxApiSession {
         style,
       })),
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering', 'image.insertAfterParagraph'],
-      native: { section: 0, paragraph: paragraph.index },
+      native: { section, paragraph: paragraph.index },
     };
   }
 
@@ -1698,6 +1828,34 @@ export class DocxApiSession {
           assert.ok(Number.isInteger(startOffset) && Number.isInteger(endOffset)
             && startOffset >= 0 && endOffset >= startOffset && endOffset <= target.currentText.length,
           `${operation.op}.target range is outside the existing paragraph`);
+          const selectedText = target.currentText.slice(startOffset, endOffset);
+          if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked') {
+            assert.equal(
+              typeof operation.expectedText,
+              'string',
+              `${operation.op}.expectedText is required and must equal the inspected range`,
+            );
+          }
+          if (operation.expectedText !== undefined) {
+            assert.equal(
+              String(operation.expectedText),
+              selectedText,
+              `${operation.op}.expectedText does not match the current inspected range`,
+            );
+          }
+          if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked') {
+            const replacementText = String(operation.text ?? '');
+            const prefix = target.currentText.slice(0, startOffset);
+            const suffix = target.currentText.slice(endOffset);
+            const looksLikeWholeParagraph = (
+              (prefix.length >= 8 && replacementText.startsWith(prefix))
+              || (suffix.length >= 8 && replacementText.endsWith(suffix))
+            );
+            assert.ok(
+              !looksLikeWholeParagraph,
+              `${operation.op}.text looks like complete paragraph text for a smaller selected range; use only the replacement fragment or text.replaceParagraph`,
+            );
+          }
           if (operation.op === 'text.replaceTracked') {
             assert.ok(!String(operation.text ?? '').includes('\n'),
               'text.replaceTracked replacement text must stay inside one paragraph');
@@ -2242,16 +2400,25 @@ export class DocxApiSession {
     this.dirtyPackage = true;
   }
 
-  updateSectPr(updater) {
-    const selfClosing = this.documentXml.match(/<w:sectPr\b[^>]*\/>/);
-    if (selfClosing) {
-      this.documentXml = `${this.documentXml.slice(0, selfClosing.index)}<w:sectPr>${updater('')}</w:sectPr>${this.documentXml.slice(selfClosing.index + selfClosing[0].length)}`;
-      this.dirtyDocument = true;
-      return;
+  updateSectPr(updater, sectionTarget = 0) {
+    const sectionBlocks = elementBlocks(this.documentXml, 'sectPr');
+    assert.ok(sectionBlocks.length, 'sectPr must exist');
+    const targets = sectionTarget === 'all'
+      ? sectionBlocks
+      : [sectionBlocks[Number(sectionTarget)]];
+    assert.ok(targets.every(Boolean), `section not found: ${sectionTarget}`);
+    for (const block of [...targets].sort((left, right) => right.start - left.start)) {
+      const selfClosing = block.xml.endsWith('/>');
+      const open = selfClosing
+        ? block.xml.replace(/\/>$/, '>')
+        : block.xml.match(/^<w:sectPr\b[^>]*>/)?.[0];
+      assert.ok(open, `invalid sectPr XML for section ${sectionTarget}`);
+      const body = selfClosing
+        ? ''
+        : block.xml.slice(open.length, block.xml.length - '</w:sectPr>'.length);
+      const replacement = `${open}${updater(body)}</w:sectPr>`;
+      this.documentXml = `${this.documentXml.slice(0, block.start)}${replacement}${this.documentXml.slice(block.end)}`;
     }
-    const expanded = this.documentXml.match(/<w:sectPr\b[^>]*>([\s\S]*?)<\/w:sectPr>/);
-    assert.ok(expanded, 'sectPr must exist');
-    this.documentXml = `${this.documentXml.slice(0, expanded.index)}<w:sectPr>${updater(expanded[1])}</w:sectPr>${this.documentXml.slice(expanded.index + expanded[0].length)}`;
     this.dirtyDocument = true;
   }
 
@@ -2272,7 +2439,7 @@ export class DocxApiSession {
       const pgSz = `<w:pgSz w:w="${setup.width}" w:h="${setup.height}"${setup.orientation === 'landscape' ? ' w:orient="landscape"' : ''}/>`;
       const pgMar = `<w:pgMar w:top="${margins.top}" w:right="${margins.right}" w:bottom="${margins.bottom}" w:left="${margins.left}" w:header="${margins.header || 720}" w:footer="${margins.footer || 720}" w:gutter="${margins.gutter || 0}"/>`;
       return replaceOrInsertChild(replaceOrInsertChild(body, /^/, 'pgSz', pgSz), /^/, 'pgMar', pgMar);
-    });
+    }, setup.section ?? 0);
   }
 
   setHeaderFooter(op) {
@@ -2414,6 +2581,25 @@ export class DocxApiSession {
     }
     issues.push(...tableCapacityRiskIssues(json));
     if (options.baselineJson) {
+      if (!options.allowSectionLayoutChanges) {
+        const pageLayout = (section) => ({
+          section: section.section,
+          pageSetup: section.pageSetup,
+          type: section.type,
+          columns: section.columns,
+        });
+        const baselineLayouts = (options.baselineJson.sections ?? []).map(pageLayout);
+        const currentLayouts = (json.sections ?? []).map(pageLayout);
+        if (JSON.stringify(currentLayouts) !== JSON.stringify(baselineLayouts)) {
+          issues.push({
+            severity: 'error',
+            code: 'section-layout-changed',
+            message: 'Section count, page size, orientation, margins, type, or columns changed from baseline.',
+            before: baselineLayouts,
+            after: currentLayouts,
+          });
+        }
+      }
       const currentCells = new Map(json.tables.flatMap((table) => table.cells.map((cell) => [cell.id, cell])));
       for (const baselineTable of options.baselineJson.tables ?? []) {
         for (const baselineCell of baselineTable.cells ?? []) {
@@ -2477,6 +2663,12 @@ export class DocxApiSession {
       revision: this.revision,
       pageCount: json.pageCount,
       tableCount: json.tables.length,
+      sections: json.sections.map((section) => ({
+        section: section.section,
+        pageSetup: section.pageSetup,
+        type: section.type,
+        columns: section.columns,
+      })),
       paragraphCount: json.blocks.length,
       objectSummary: {
         imageCount: json.objectGraph.images.length,
@@ -2516,8 +2708,16 @@ export class DocxApiSession {
     return {
       sourceFormat: 'docx',
       pageCount: json.pageCount,
+      pageCountEstimate: json.pageCountEstimate,
+      pageCountSource: json.pageCountSource,
       paragraphCount: json.blocks.length,
       tableCount: json.tables.length,
+      sections: json.sections.map((section) => ({
+        section: section.section,
+        pageSetup: section.pageSetup,
+        type: section.type,
+        columns: section.columns,
+      })),
       tables: json.tables.map((table) => ({ id: table.id, dims: table.dims })),
       warnings: json.warnings,
     };

@@ -43,23 +43,29 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
   }),
   command({
     op: 'text.replace', category: 'text', precondition: 'target_inspect',
-    description: 'Replace an inspected text range.', required: ['target', 'text'], aliases: ['replaceText'],
-    fields: { target: targetField, text: 'Replacement text.' },
-    example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, text: '2026' },
+    description: 'Replace an inspected text range.', required: ['target', 'text', 'expectedText'], aliases: ['replaceText'],
+    fields: {
+      target: targetField,
+      text: 'Replacement fragment only. Never pass the complete paragraph for a smaller target range.',
+      expectedText: 'Required exact visible text of the inspected range. Apply fails if it no longer matches.',
+    },
+    example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, expectedText: '2025', text: '2026' },
   }),
   command({
     op: 'text.replaceTracked', category: 'text', precondition: 'target_inspect',
     description: 'Replace an inspected text range with native Word deletion and insertion revisions.',
-    required: ['target', 'text'], aliases: ['replaceTextTracked'],
+    required: ['target', 'text', 'expectedText'], aliases: ['replaceTextTracked'],
     fields: {
       target: targetField,
-      text: 'Replacement text. Use an empty string for a tracked deletion.',
+      text: 'Replacement fragment only. Use an empty string for a tracked deletion; never pass the complete paragraph for a smaller target range.',
+      expectedText: 'Required exact visible text of the inspected range. Apply fails if it no longer matches.',
       author: 'Optional review author shown by Word. Defaults to Tlooto DocsAgent.',
       date: 'Optional ISO-8601 revision timestamp. Defaults to the server time.',
     },
     example: {
       op: 'text.replaceTracked',
       target: { native: { section: 0, para: 1, offset: 0, length: 4 } },
+      expectedText: '2025',
       text: '2026',
       author: 'Tlooto DocsAgent',
     },
@@ -253,9 +259,9 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
   }),
   command({
     op: 'setPageSetup', category: 'package',
-    description: 'Set DOCX page size, orientation, and margins.', required: ['width', 'height'], anyOf: [['margins', 'marginTop']],
-    fields: { width: 'Page width in twentieths of a point.', height: 'Page height in twentieths of a point.', orientation: 'portrait or landscape.', margins: 'Object with top, right, bottom, left and optional header/footer/gutter.', marginTop: 'Legacy flat top margin; use with marginRight, marginBottom, and marginLeft.' },
-    example: { op: 'setPageSetup', width: 11906, height: 16838, margins: { top: 1440, right: 1440, bottom: 1440, left: 1440 } },
+    description: 'Set one DOCX section page size, orientation, and margins without flattening other section layouts.', required: ['width', 'height'], anyOf: [['margins', 'marginTop']],
+    fields: { section: 'Zero-based native section index, or all. Defaults to section 0 for backward compatibility.', width: 'Page width in twentieths of a point.', height: 'Page height in twentieths of a point.', orientation: 'portrait or landscape.', margins: 'Object with top, right, bottom, left and optional header/footer/gutter.', marginTop: 'Legacy flat top margin; use with marginRight, marginBottom, and marginLeft.' },
+    example: { op: 'setPageSetup', section: 1, width: 16838, height: 11906, orientation: 'landscape', margins: { top: 1440, right: 1440, bottom: 1440, left: 1440 } },
   }),
   command({
     op: 'setHeaderFooter', category: 'package',
@@ -330,6 +336,9 @@ const EMPTY_TEXT_CLEARING_OPS = new Set([
 
 function requiredFieldIsValid(entry, commandValue, field) {
   const value = commandFieldValue(commandValue, field);
+  if (field === 'expectedText' && (entry.op === 'text.replace' || entry.op === 'text.replaceTracked')) {
+    return typeof value === 'string';
+  }
   if (field === 'text' && EMPTY_TEXT_CLEARING_OPS.has(entry.op)) {
     return typeof value === 'string';
   }

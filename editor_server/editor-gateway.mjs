@@ -267,6 +267,29 @@ async function buildDocxEditorActionUrl(config, publicOrigin) {
 }
 
 function renderDocxPage(editorUrl, formParameters = null) {
+  const frameBridge = `
+  <script>
+    (() => {
+      const editorFrame = document.querySelector('iframe[title="DOCX editor"]');
+      let parentOrigin = null;
+      try {
+        parentOrigin = document.referrer ? new URL(document.referrer).origin : null;
+      } catch (_error) {
+        parentOrigin = null;
+      }
+      window.addEventListener('message', (event) => {
+        if (event.source === window.parent && window.parent !== window) {
+          if (!parentOrigin || event.origin !== parentOrigin || !editorFrame?.contentWindow) return;
+          editorFrame.contentWindow.postMessage(event.data, window.location.origin);
+          return;
+        }
+        if (event.source === editorFrame?.contentWindow && event.origin === window.location.origin) {
+          if (!parentOrigin || window.parent === window) return;
+          window.parent.postMessage(event.data, parentOrigin);
+        }
+      });
+    })();
+  </script>`;
   if (formParameters) {
     const inputs = Object.entries(formParameters)
       .map(([name, value]) => `    <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}">`)
@@ -285,7 +308,7 @@ function renderDocxPage(editorUrl, formParameters = null) {
   <form id="docx-editor-form" method="post" action="${htmlEscape(editorUrl)}" target="docx-editor">
 ${inputs}
   </form>
-  <script>document.getElementById('docx-editor-form').submit();</script>
+  <script>document.getElementById('docx-editor-form').submit();</script>${frameBridge}
 </body>
 </html>`;
   }
@@ -310,7 +333,7 @@ ${inputs}
   </style>
 </head>
 <body>
-  <iframe title="DOCX editor" src="${htmlEscape(editorUrl)}" allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+  <iframe title="DOCX editor" src="${htmlEscape(editorUrl)}" allow="clipboard-read; clipboard-write; fullscreen"></iframe>${frameBridge}
 </body>
 </html>`;
 }
@@ -377,12 +400,20 @@ function validateExternalWopiRequest(documentId, params, config) {
   };
 }
 
-function sendText(res, statusCode, body, contentType = 'text/plain; charset=utf-8') {
+function sendText(res, statusCode, body, contentType = 'text/plain; charset=utf-8', headers = {}) {
   res.writeHead(statusCode, {
     'Content-Type': contentType,
     'Cache-Control': 'no-store',
+    ...headers,
   });
   res.end(body);
+}
+
+function docxWrapperHeaders(config) {
+  const ancestors = ["'self'", ...(config.frameAncestorOrigins ?? [])];
+  return {
+    'Content-Security-Policy': `frame-ancestors ${[...new Set(ancestors)].join(' ')};`,
+  };
 }
 
 function sendJson(res, statusCode, payload, headers = {}) {
@@ -937,6 +968,9 @@ function projectDocumentSummary(json) {
   return {
     sourceFormat: json.sourceFormat,
     pageCount: json.pageCount,
+    ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
+    ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
+    ...(json.pageCountIsEstimate !== undefined ? { pageCountIsEstimate: Boolean(json.pageCountIsEstimate) } : {}),
     sectionCount: json.sections?.length ?? 0,
     paragraphCount: (json.sections ?? []).reduce((sum, section) => sum + (section.paragraphs?.length ?? 0), 0),
     blockCount: json.blocks?.length ?? 0,
@@ -1245,6 +1279,9 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     fmt,
     revision: session.revision,
     pageCount: json.pageCount ?? pageCountFromSession(session),
+    ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
+    ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
+    ...(json.pageCountIsEstimate !== undefined ? { pageCountIsEstimate: Boolean(json.pageCountIsEstimate) } : {}),
     capabilities: [
       'json',
       'targetMap',
@@ -2482,7 +2519,7 @@ function createGatewayServer(config) {
         sendText(res, 200, renderDocxPage(editorUrl.toString(), {
           access_token: formParameters.access_token,
           access_token_ttl: formParameters.access_token_ttl,
-        }), 'text/html; charset=utf-8');
+        }), 'text/html; charset=utf-8', docxWrapperHeaders(config));
         return;
       }
 
@@ -2524,7 +2561,7 @@ function createGatewayServer(config) {
         sendText(res, 200, renderDocxPage(editorUrl.toString(), {
           access_token: DOCX_WOPI_TOKEN,
           access_token_ttl: String(Date.now() + 12 * 60 * 60 * 1000),
-        }), 'text/html; charset=utf-8');
+        }), 'text/html; charset=utf-8', docxWrapperHeaders(config));
         return;
       }
 

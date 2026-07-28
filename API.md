@@ -318,7 +318,23 @@ Current shared response shape:
   "revision": 1,
   "sourceFormat": "hwpx",
   "pageCount": 10,
-  "sections": [],
+  "sections": [
+    {
+      "id": "sect_0",
+      "section": 0,
+      "boundary": { "kind": "paragraph", "paragraph": 25 },
+      "paragraphStart": 0,
+      "paragraphEnd": 25,
+      "pageSetup": {
+        "width": 11906,
+        "height": 16838,
+        "orientation": "portrait",
+        "margins": { "top": 1440, "right": 1440, "bottom": 1440, "left": 1440 }
+      },
+      "type": "nextPage",
+      "columns": { "count": 1, "space": null, "equalWidth": true }
+    }
+  ],
   "blocks": [
     {
       "id": "s0_p25",
@@ -383,7 +399,7 @@ editableTargets.cells[]
 objectGraph.images[]
 ```
 
-Currently both DOCX and HWPX utilities also return `sections`, `styleGraph`, `layoutGraph`, and `warnings`; callers should use them when present but must not use them as the only target source. DOCX additionally returns `integrityGraph` counters for zero-width structures and references such as bookmarks, comments, notes, fields, and hyperlinks.
+Currently both DOCX and HWPX utilities also return `sections`, `styleGraph`, `layoutGraph`, and `warnings`; callers should use them when present but must not use them as the only target source. DOCX `sections[]` is derived from every native `w:sectPr`, including paragraph-owned section breaks and the final body section. Its zero-based `section`, boundary, page size, orientation, margins, section type, and column settings are preserved separately, so a mixed portrait/landscape document must not be reconstructed as one page setup. DOCX additionally returns `integrityGraph` counters for zero-width structures and references such as bookmarks, comments, notes, fields, and hyperlinks.
 
 LLM use:
 - `blocks[]` gives paragraph anchors.
@@ -1137,8 +1153,10 @@ DOCX page setup example:
 {
   "commandId": "page-setup-1",
   "op": "setPageSetup",
-  "width": 11906,
-  "height": 16838,
+  "section": 1,
+  "width": 16838,
+  "height": 11906,
+  "orientation": "landscape",
   "margins": {
     "top": 1440,
     "bottom": 1440,
@@ -1147,6 +1165,19 @@ DOCX page setup example:
   }
 }
 ```
+
+`section` is the zero-based native DOCX section index returned by `read-json`.
+It defaults to `0` for backward compatibility and may be `"all"` only when the
+caller intentionally wants the same page setup on every section. Omitting it
+must never be used to rebuild a document whose `sections[]` contains different
+page sizes or orientations.
+
+When `qualityCheck({ baselineJson })` is run after an ordinary content edit, it
+fails closed with `section-layout-changed` if any native section count, page
+width/height, orientation, margin, section type, or column setting changed.
+Pass `allowSectionLayoutChanges: true` only for a request that explicitly
+intends to change page setup; the saved artifact still exposes every section in
+the quality and validation reports for independent comparison.
 
 DOCX header/footer example:
 

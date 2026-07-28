@@ -673,6 +673,9 @@ window.L.Map.WOPI = window.L.Handler.extend({
 		else if (msg.MessageId === 'Get_Views') {
 			this._postViewsMessage('Get_Views_Resp');
 		}
+		else if (msg.MessageId === 'Get_Document_UI_State') {
+			this._postMessage({msgId: 'Get_Document_UI_State_Resp', args: this._getDocumentUIState()});
+		}
 		else if (msg.MessageId === 'Reset_Access_Token') {
 			if (msg.Values) {
 				// No ttl implies no expiry tracking, matching the legacy
@@ -1171,6 +1174,68 @@ window.L.Map.WOPI = window.L.Handler.extend({
 		}
 
 		this._postMessage({msgId: messageId, args: getMembersRespVal});
+	},
+
+	_getDocumentUIState: function() {
+		const docLayer = this._map && this._map._docLayer;
+		const pageRectangles = app.file && app.file.writer && Array.isArray(app.file.writer.pageRectangleList)
+			? app.file.writer.pageRectangleList
+			: [];
+		const pageRectangleLimit = 500;
+		const pageSizeCounts = new Map();
+		pageRectangles.forEach(function(rectangle) {
+			if (!Array.isArray(rectangle) || rectangle.length < 4)
+				return;
+			const width = Number(rectangle[2]);
+			const height = Number(rectangle[3]);
+			if (!Number.isFinite(width) || !Number.isFinite(height))
+				return;
+			const key = width + 'x' + height;
+			const entry = pageSizeCounts.get(key) || {Width: width, Height: height, Count: 0};
+			entry.Count += 1;
+			pageSizeCounts.set(key, entry);
+		});
+		const isVisible = function(element) {
+			if (!element || element.getAttribute('aria-hidden') === 'true')
+				return false;
+			const style = window.getComputedStyle(element);
+			const rect = element.getBoundingClientRect();
+			return style.display !== 'none' && style.visibility !== 'hidden' &&
+				Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+		};
+		const visibleControlCount = function(label) {
+			return Array.from(document.querySelectorAll('[aria-label="' + label + '"]')).filter(isVisible).length;
+		};
+		const multiPageViewVisibleCount = visibleControlCount('Multi Page View');
+		const zoomVisibleCount = Array.from(document.querySelectorAll('[id="zoom-button"]')).filter(isVisible).length;
+		const pageCount = Number.isInteger(docLayer && docLayer._pages) ? docLayer._pages : null;
+		const currentPage = Number.isInteger(docLayer && docLayer._currentPage) ? docLayer._currentPage + 1 : null;
+		const multiPage = Boolean(this._map.uiManager && this._map.uiManager.isMultiPageView());
+
+		return {
+			Title: this.BaseFileName || null,
+			PageCount: pageCount,
+			CurrentPage: currentPage,
+			ZoomPercent: typeof this._map.getZoomPercent === 'function' ? this._map.getZoomPercent() : null,
+			ViewMode: multiPage ? 'multi-page' : 'single-page',
+			PageGeometry: {
+				Unit: 'twip',
+				PageCount: pageRectangles.length,
+				Truncated: pageRectangles.length > pageRectangleLimit,
+				Rectangles: pageRectangles.slice(0, pageRectangleLimit).map(function(rectangle) {
+					return Array.isArray(rectangle) ? rectangle.slice(0, 4).map(Number) : [];
+				}),
+				Sizes: Array.from(pageSizeCounts.values())
+			},
+			VisibleControls: {
+				MultiPageView: multiPageViewVisibleCount,
+				Zoom: zoomVisibleCount
+			},
+			Conflicts: {
+				MultiPageView: multiPageViewVisibleCount > 1,
+				Zoom: zoomVisibleCount > 1
+			}
+		};
 	}
 });
 
