@@ -127,6 +127,19 @@ test('source image preparation supports both legacy and current upstream docker 
   assert.match(nativeBuild, /NO_DOCKER_IMAGE: 'true'/);
 });
 
+test('native build supplies a pinned verified POCO workdir when public engine assets omit it', () => {
+  const nativeBuild = readProjectFile('editor_docx/scripts/build-native-editor.mjs');
+  const pocoBuild = readProjectFile('editor_docx/scripts/build-poco-engine-workdir.sh');
+  const dependencies = readProjectFile('editor_docx/scripts/install-native-deps.sh');
+  assert.match(nativeBuild, /build-poco-engine-workdir\.sh/);
+  assert.match(pocoBuild, /POCO_VERSION=.*1\.14\.2/);
+  assert.match(pocoBuild, /47394ea7ddb7b0a40e1a5be896f8f5dc77cfdc4f561d2e7131ecf582df5a0c3a/);
+  for (const library of ['Foundation', 'XML', 'JSON', 'Util', 'Net', 'Crypto', 'NetSSL']) {
+    assert.match(pocoBuild, new RegExp(`libPoco\\$\\{library\\}\\.a|${library}`));
+  }
+  assert.match(dependencies, /\bcmake\b/);
+});
+
 test('dev check cleans up only runtimes created by the check', () => {
   const devCheck = readProjectFile('editor_common/scripts/dev-check.mjs');
   assert.match(devCheck, /snapshotRuntime\(\)/);
@@ -250,7 +263,7 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-005/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-006/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);

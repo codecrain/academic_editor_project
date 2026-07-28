@@ -40,7 +40,7 @@ DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC sudo apt-get -y install \
   libpoco-dev python3-polib libcap-dev npm \
   libpam-dev libzstd-dev wget git build-essential libtool \
   python3-lxml libpng-dev libcppunit-dev pkg-config snapd "${CHROMIUM_PACKAGES[@]}" \
-  rsync curl zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build \
+  rsync curl zip ccache autoconf gperf nasm xsltproc flex bison uuid-dev meson ninja-build cmake \
   libpixman-1-dev
 
 if ! command -v node >/dev/null 2>&1 || ! node --version | grep -Eq '^v20\.'; then

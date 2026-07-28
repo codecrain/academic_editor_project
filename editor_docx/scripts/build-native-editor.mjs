@@ -96,6 +96,14 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     path.join(buildContextDir, 'debrand-online.sh'),
   );
   writeUtf8Lf(path.join(buildContextDir, 'debrand-online.sh'), readUtf8Lf(path.join(buildContextDir, 'debrand-online.sh')));
+  cpSync(
+    path.join(repoRoot, 'editor_docx', 'scripts', 'build-poco-engine-workdir.sh'),
+    path.join(buildContextDir, 'build-poco-engine-workdir.sh'),
+  );
+  writeUtf8Lf(
+    path.join(buildContextDir, 'build-poco-engine-workdir.sh'),
+    readUtf8Lf(path.join(buildContextDir, 'build-poco-engine-workdir.sh')),
+  );
   rmSync(checkoutDir, { recursive: true, force: true });
 
   const buildScriptPath = path.join(buildContextDir, 'build.sh');
@@ -116,6 +124,11 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     '$1 --with-lang="$ENGINE_LANGUAGES"$2',
   );
   buildScript = buildScript.replace(
+    /(\r?\n# copy stuff\r?\n)/,
+    '\n# Supply the current server build with the pinned static POCO workdir.\n' +
+      'bash "$SRCDIR/build-poco-engine-workdir.sh" "$BUILDDIR/online/engine" || exit 1\n$1',
+  );
+  buildScript = buildScript.replace(
     /git clone --depth=1 --branch "?\$COLLABORA_ONLINE_BRANCH"? "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
     'git clone --depth=1 --filter=blob:none --branch $COLLABORA_ONLINE_BRANCH "$COLLABORA_ONLINE_REPO" online || exit 1',
   );
@@ -131,6 +144,9 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   }
   if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"')) {
     throw new Error('Failed to enforce the multilingual engine build contract.');
+  }
+  if (!buildScript.includes('build-poco-engine-workdir.sh')) {
+    throw new Error('Failed to inject the pinned POCO workdir preparation.');
   }
   writeUtf8Lf(buildScriptPath, buildScript);
 
