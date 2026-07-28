@@ -19,9 +19,6 @@ License boundary:
 - Keep DOCX and HWP/HWPX editor work separated in `editor_docx/` and
   `editor_hwpx/` so their source, notices, and build paths can be audited
   independently.
-- Keep the PDF engine isolated in `editor_pdf/`; retain the Apache-2.0 and MIT
-  component notices and the exact `editor_pdf/package-lock.json` dependency
-  graph in every runtime release.
 - Keep the private SaaS service repository separate. The WOPI host,
   authentication, storage, billing, product UI, deployment secrets, and
   proprietary service code do not become MPL-2.0 merely because they integrate

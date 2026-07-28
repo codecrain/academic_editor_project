@@ -93,9 +93,6 @@ apply_runtime_defaults() {
   export RHWP_STUDIO_PM2_NAME="${RHWP_STUDIO_PM2_NAME:-rhwp-studio-${EDITOR_DEPLOY_ENV}}"
   export RHWP_STUDIO_BASE_PATH="${RHWP_STUDIO_BASE_PATH:-/hwpx/}"
   export EDITOR_GATEWAY_HWPX_STATIC_ROOT="${EDITOR_GATEWAY_HWPX_STATIC_ROOT:-$ROOT_DIR/editor_hwpx/rhwp-studio/dist}"
-  export EDITOR_PDF_BASE_PATH="${EDITOR_PDF_BASE_PATH:-/pdf/}"
-  export EDITOR_GATEWAY_PDF_STATIC_ROOT="${EDITOR_GATEWAY_PDF_STATIC_ROOT:-$ROOT_DIR/editor_pdf/public}"
-  export EDITOR_GATEWAY_PDF_VENDOR_ROOT="${EDITOR_GATEWAY_PDF_VENDOR_ROOT:-$ROOT_DIR/editor_pdf/node_modules}"
   export EDITOR_GATEWAY_PUBLIC_ORIGIN="${EDITOR_GATEWAY_PUBLIC_ORIGIN:-http://${EDITOR_GATEWAY_HOST}:${EDITOR_GATEWAY_PORT}}"
   export ACADEMIC_EDITOR_API_ORIGIN="${ACADEMIC_EDITOR_API_ORIGIN:-${EDITOR_GATEWAY_PUBLIC_ORIGIN}}"
   export EDITOR_GATEWAY_WOPI_BASE_URL="${EDITOR_GATEWAY_WOPI_BASE_URL:-http://127.0.0.1:${EDITOR_GATEWAY_PORT}}"
@@ -486,17 +483,6 @@ prepare_rhwp_static_assets() {
   log "HWPX static assets ready: ${EDITOR_GATEWAY_HWPX_STATIC_ROOT}"
 }
 
-prepare_pdf_runtime() {
-  [ -f "$ROOT_DIR/editor_pdf/package-lock.json" ] || die "PDF runtime lockfile was not found: $ROOT_DIR/editor_pdf/package-lock.json"
-  ensure_command pdftoppm
-  log "installing pinned PDF editor dependencies"
-  npm --prefix "$ROOT_DIR/editor_pdf" ci --omit=dev
-  [ -f "$EDITOR_GATEWAY_PDF_VENDOR_ROOT/pdfjs-dist/legacy/build/pdf.mjs" ] ||
-    die "PDF.js runtime was not installed under $EDITOR_GATEWAY_PDF_VENDOR_ROOT"
-  [ -f "$EDITOR_GATEWAY_PDF_STATIC_ROOT/index.html" ] ||
-    die "PDF editor static assets were not found under $EDITOR_GATEWAY_PDF_STATIC_ROOT"
-}
-
 start_editor_gateway() {
   local gateway_script="$ROOT_DIR/editor_server/editor-gateway.mjs"
   [ -f "$gateway_script" ] || die "editor gateway script was not found: $gateway_script"
@@ -517,9 +503,6 @@ start_editor_gateway() {
   EDITOR_GATEWAY_WOPI_BASE_URL="$EDITOR_GATEWAY_WOPI_BASE_URL" \
   EDITOR_GATEWAY_DOCX_ORIGIN="$EDITOR_GATEWAY_DOCX_ORIGIN" \
   EDITOR_GATEWAY_HWPX_STATIC_ROOT="$EDITOR_GATEWAY_HWPX_STATIC_ROOT" \
-  EDITOR_PDF_BASE_PATH="$EDITOR_PDF_BASE_PATH" \
-  EDITOR_GATEWAY_PDF_STATIC_ROOT="$EDITOR_GATEWAY_PDF_STATIC_ROOT" \
-  EDITOR_GATEWAY_PDF_VENDOR_ROOT="$EDITOR_GATEWAY_PDF_VENDOR_ROOT" \
   EDITOR_SERVICE_ROOT="$EDITOR_SERVICE_ROOT" \
   RHWP_STUDIO_BASE_PATH="$RHWP_STUDIO_BASE_PATH" \
   pm2 start "$(command -v node)" --name "$EDITOR_GATEWAY_PM2_NAME" -- "$gateway_script"
@@ -528,7 +511,6 @@ start_editor_gateway() {
   if truthy "$RHWP_ENABLED"; then
     wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${RHWP_STUDIO_BASE_PATH}" "HWPX gateway"
   fi
-  wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_PDF_BASE_PATH}" "PDF gateway"
 }
 
 run_optional_checks() {
@@ -540,7 +522,6 @@ run_optional_checks() {
   # Finish all build-only work before replacing either long-running service.
   # A static asset failure must leave the currently serving PM2 processes alone.
   prepare_rhwp_static_assets
-  prepare_pdf_runtime
   run_docx_runtime_npm start:native
   run_docx_runtime_npm doctor:native -- --require-installed
   start_editor_gateway

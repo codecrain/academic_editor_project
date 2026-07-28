@@ -5,8 +5,7 @@ import test from 'node:test';
 
 import { DOCX_COMMAND_OPS } from '../editor_docx/scripts/docx-command-catalog.mjs';
 import { HWPX_COMMAND_OPS } from '../editor_hwpx/scripts/hwpx-command-catalog.mjs';
-import { PDF_COMMAND_OPS } from '../editor_pdf/scripts/pdf-command-catalog.mjs';
-import { DOCX_MCP_TOOLS, HWPX_MCP_TOOLS, PDF_MCP_TOOLS } from './editor-mcp.mjs';
+import { DOCX_MCP_TOOLS, HWPX_MCP_TOOLS } from './editor-mcp.mjs';
 
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const canonicalPaths = [
@@ -15,8 +14,6 @@ const canonicalPaths = [
   'docs/DOCUMENTATION_INDEX.md',
   'docs/HWPX_EDITOR.md',
   'docs/HWPX_MCP_API.md',
-  'docs/PDF_EDITOR.md',
-  'docs/PDF_MCP_API.md',
   'evaluation/hwpx-public-sector-v1/README.md',
   'evaluation/hwpx-public-sector-v1/METHODOLOGY.md',
 ];
@@ -47,10 +44,7 @@ test('canonical documentation has no superseded editor claims', () => {
   ]) {
     assert.doesNotMatch(combined, stale);
   }
-  assert.match(canonical.get('README.md'), /DOCX, HWPX, and PDF are separate editor engines/);
-  for (const enginePath of ['editor_docx/', 'editor_hwpx/', 'editor_pdf/']) {
-    assert.ok(canonical.get('README.md').includes('`' + enginePath + '`'));
-  }
+  assert.match(canonical.get('README.md'), /editor_docx\/.*editor_hwpx\/.*separate editor engines/s);
   assert.match(
     canonical.get('docs/HWPX_EDITOR.md'),
     new RegExp(`${HWPX_COMMAND_OPS.length} canonical commands.*readiness=available`, 's'),
@@ -70,23 +64,13 @@ test('documented command lists match executable catalogs exactly', () => {
   }
   assert.deepEqual(textBlockAfter(hwpxEditor, 'exception.'), HWPX_COMMAND_OPS);
   assert.equal(DOCX_COMMAND_OPS.length, 31);
-  assert.deepEqual(
-    textBlockAfter(canonical.get('docs/PDF_EDITOR.md'), '## Supported commands'),
-    PDF_COMMAND_OPS,
-  );
-  assert.equal(PDF_COMMAND_OPS.length, 6);
 });
 
-test('documented MCP tool lists match executable HWPX and PDF tools', () => {
+test('documented MCP tool list matches executable HWPX tools', () => {
   const documented = textBlockAfter(canonical.get('docs/HWPX_MCP_API.md'), '## Tools');
   assert.deepEqual(documented, HWPX_MCP_TOOLS.map((tool) => tool.name));
   assert.equal(HWPX_MCP_TOOLS.length, 16);
   assert.equal(DOCX_MCP_TOOLS.length, 16);
-  assert.deepEqual(
-    textBlockAfter(canonical.get('docs/PDF_MCP_API.md'), '## Tools'),
-    PDF_MCP_TOOLS.map((tool) => tool.name),
-  );
-  assert.equal(PDF_MCP_TOOLS.length, 16);
   assert.match(canonical.get('docs/HWPX_MCP_API.md'), /"baseRevision": 1/);
 });
 

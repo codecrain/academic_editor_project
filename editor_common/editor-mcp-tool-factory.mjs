@@ -17,7 +17,7 @@ function createEditorMcpTools({
   readViews = ['summary', 'blocks', 'tables'],
 }) {
   const normalizedFormat = String(format || '').toLowerCase();
-  if (!['docx', 'hwpx', 'pdf'].includes(normalizedFormat)) {
+  if (!['docx', 'hwpx'].includes(normalizedFormat)) {
     throw new Error(`Unsupported editor MCP format: ${format}`);
   }
   const label = normalizedFormat.toUpperCase();

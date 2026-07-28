@@ -62,17 +62,16 @@ async function waitForOutput(child, expected, timeoutMs = 10_000) {
 }
 
 test('format engines never import the opposite format engine', async () => {
-  for (const [root, forbiddenFormats] of [
-    [path.resolve('editor_docx'), ['editor_hwpx', 'editor_pdf']],
-    [path.resolve('editor_hwpx'), ['editor_docx', 'editor_pdf']],
-    [path.resolve('editor_pdf'), ['editor_docx', 'editor_hwpx']],
+  for (const [root, forbidden] of [
+    [path.resolve('editor_docx'), 'editor_hwpx'],
+    [path.resolve('editor_hwpx'), 'editor_docx'],
   ]) {
     for (const file of await listModules(root)) {
       const imports = moduleSpecifiers(await readFile(file, 'utf8'));
       assert.equal(
-        imports.some((specifier) => forbiddenFormats.some((forbidden) => specifier.includes(forbidden))),
+        imports.some((specifier) => specifier.includes(forbidden)),
         false,
-        `${path.relative(process.cwd(), file)} must not import another format engine`,
+        `${path.relative(process.cwd(), file)} must not import ${forbidden}`,
       );
     }
   }
@@ -84,7 +83,7 @@ test('shared server reaches format engines only through format adapters', async 
     if (file.includes(`${path.sep}format-adapters${path.sep}`)) continue;
     const imports = moduleSpecifiers(await readFile(file, 'utf8'));
     assert.equal(
-      imports.some((specifier) => /editor_(?:docx|hwpx|pdf)/.test(specifier)),
+      imports.some((specifier) => /editor_(?:docx|hwpx)/.test(specifier)),
       false,
       `${path.relative(process.cwd(), file)} must depend on a format adapter`,
     );

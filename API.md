@@ -7,7 +7,7 @@ Audience: an LLM agent with no prior project context.
 The production agent integration uses the Streamable HTTP endpoint `POST /mcp`
 with JSON-RPC 2.0. Call `tools/list` to discover the compact schemas instead of
 placing this full API document in every model context. The MCP broker delegates
-to the same `/v1/docx`, `/v1/hwpx`, and `/v1/pdf` implementations; it does not duplicate
+to the same `/v1/docx` and `/v1/hwpx` implementations; it does not duplicate
 document editing logic.
 
 DOCX MCP tools:
@@ -48,28 +48,9 @@ HWPX MCP tools:
 - `editor_hwpx_artifact_read`
 - `editor_hwpx_artifact_delete`
 
-PDF MCP tools:
-
-- `editor_pdf_open`
-- `editor_pdf_discard`
-- `editor_pdf_read_json`
-- `editor_pdf_target_map`
-- `editor_pdf_target_find`
-- `editor_pdf_target_inspect`
-- `editor_pdf_object_inventory`
-- `editor_pdf_command_catalog`
-- `editor_pdf_apply`
-- `editor_pdf_render_pages`
-- `editor_pdf_quality_check`
-- `editor_pdf_export_pdf`
-- `editor_pdf_save_source`
-- `editor_pdf_save_checkpoint`
-- `editor_pdf_artifact_read`
-- `editor_pdf_artifact_delete`
-
-`editor_docx_command_catalog`, `editor_hwpx_command_catalog`, and
-`editor_pdf_command_catalog` are the machine-readable sources of truth. They
-currently expose 31 DOCX commands, 37 HWPX commands, and 6 PDF commands.
+`editor_docx_command_catalog` and `editor_hwpx_command_catalog` are the
+machine-readable sources of truth. They currently expose 31 DOCX commands and
+37 HWPX commands.
 HWPX command entries report
 `readiness` separately from `execution`; canonical commands that are not ready
 are rejected before mutation. Agents should query the applicable
@@ -169,20 +150,19 @@ a cursor after a revision change. The gateway budgets the structured page near
 9 KiB so the MCP response containing both text and structured content remains
 near or below 24 KiB at item boundaries.
 
-The direct `/v1/docx/...`, `/v1/hwpx/...`, and `/v1/pdf/...` `documents/read-json` and
+The direct `/v1/docx/...` and `/v1/hwpx/...` `documents/read-json` and
 `target/map` routes keep
 their legacy unpaged response for trusted non-MCP callers. New agent code must
 use the bounded MCP tools; the internal bounded projection marker is not a
 public REST contract.
 
-This file is the contract for API-only editing of DOCX, HWPX, and PDF documents. It is not a UI automation guide. Do not click editor iframes, do not infer from screen coordinates, and do not edit by vague text alone. PDF support deliberately performs additive page-content edits only; it does not replace arbitrary existing PDF text or image objects.
+This file is the contract for API-only editing of DOCX and HWPX documents. It is not a UI automation guide. Do not click editor iframes, do not infer from screen coordinates, and do not edit by vague text alone.
 
 ## Runtime Boundary
 
 Formats:
 - DOCX API prefix: `/v1/docx/...`
 - HWPX API prefix: `/v1/hwpx/...`
-- PDF API prefix: `/v1/pdf/...`
 
 Local implementation files:
 - Shared LLM/API contract: `editor_common/document-api-core.mjs`
@@ -191,14 +171,12 @@ Local implementation files:
 - DOCX API utility: `editor_docx/scripts/docx-api-utils.mjs`
 - DOCX UNO renderer: `editor_docx/scripts/docx-renderer.mjs` and `render-docx-uno.py`
 - HWPX API utility: `editor_hwpx/scripts/hwpx-api-utils.mjs`
-- PDF API utility: `editor_pdf/scripts/pdf-api-utils.mjs`
 - Canonical API bridge/gateway: `editor_server/editor-gateway.mjs`
 - Compatibility launch path: `editor_docx/scripts/editor-gateway.mjs`
 
 Engine split:
 - DOCX browser editing remains on the DOCX/WOPI editor path.
 - HWPX browser editing remains on the RHWP/HWPX path.
-- PDF browser editing remains on the PDF.js/PDF overlay path.
 - Shared code is allowed only for LLM-facing API contract utilities: command normalization, target normalization, text fitting, list text generation, hashing, and session-shape validation.
 - Do not make DOCX depend on HWPX internals or HWPX depend on DOCX OOXML internals.
 
@@ -1589,7 +1567,6 @@ Format utilities:
 ```powershell
 npm.cmd run test:docx-api
 npm.cmd run test:hwpx-api
-npm.cmd run test:pdf-api
 ```
 
 `test:hwpx-api` runs the catalog, package-policy, structural-command,
