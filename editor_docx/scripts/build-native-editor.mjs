@@ -15,7 +15,7 @@ const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 const DEFAULT_ENGINE_LANGUAGES =
-  'de en-US en-GB es fr ko';
+  'de en-US en-GB es fr';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 
@@ -115,15 +115,6 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
     /(\.\/autogen\.sh --with-distro=CPLinux-LOKit [^)\r\n]*?--disable-symbols)(\s*\))/,
     '$1 --with-lang="$ENGINE_LANGUAGES"$2',
   );
-  const languagePackGuard =
-    'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
-    '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
-    '  exit 1\n' +
-    '}\n\n';
-  buildScript = buildScript.replace(
-    /((?:fi;?|# copy stuff)\r?\n(?:\r?\n)?)(mkdir -p "\$INSTDIR"\/opt\/)/,
-    `$1${languagePackGuard}$2`,
-  );
   buildScript = buildScript.replace(
     /git clone --depth=1 --branch "?\$COLLABORA_ONLINE_BRANCH"? "\$COLLABORA_ONLINE_REPO" online \|\| exit 1/,
     'git clone --depth=1 --filter=blob:none --branch $COLLABORA_ONLINE_BRANCH "$COLLABORA_ONLINE_REPO" online || exit 1',
@@ -138,7 +129,7 @@ function prepareBuildContext(contextRoot, dockerRepo, dockerRef) {
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the native source build script.');
   }
-  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"') || !buildScript.includes('Langpack-ko.xcd')) {
+  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"')) {
     throw new Error('Failed to enforce the multilingual engine build contract.');
   }
   writeUtf8Lf(buildScriptPath, buildScript);

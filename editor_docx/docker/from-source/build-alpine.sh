@@ -21,7 +21,7 @@ fi;
 echo "Building branch '$COLLABORA_ONLINE_BRANCH' from '$COLLABORA_ONLINE_REPO'"
 
 if [ -z "$COLLABORA_ENGINE_LANGUAGES" ]; then
-  COLLABORA_ENGINE_LANGUAGES="de en-US en-GB es fr ko"
+  COLLABORA_ENGINE_LANGUAGES="de en-US en-GB es fr"
 fi
 
 if [ -z "$ENGINE_BUILD_TARGET" ]; then

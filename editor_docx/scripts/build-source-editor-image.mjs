@@ -16,7 +16,7 @@ const DEFAULT_SOURCE_REPO = 'https://gerrit.collaboraoffice.com/online';
 const DEFAULT_SOURCE_REF = 'main';
 const DEFAULT_ENGINE_ASSETS = 'https://github.com/CollaboraOnline/online/releases/download/for-code-assets/engine-main-assets.tar.gz';
 const DEFAULT_ENGINE_LANGUAGES =
-  'de en-US en-GB es fr ko';
+  'de en-US en-GB es fr';
 const DOCUMENT_FONT_PACKAGES = [
   'fonts-noto',
   'fonts-noto-cjk',
@@ -215,21 +215,13 @@ function prepareOfficialDockerContext(contextDir, dockerRepo, dockerRef) {
     /(\.\/autogen\.sh --with-distro=CPLinux-LOKit [^)\r\n]*?--disable-symbols)(?:\s+--with-lang=(?:"[^"]*"|[^\s)]+))?(\s*\))/,
     '$1 --with-lang="$ENGINE_LANGUAGES"$2',
   );
-  buildScript = buildScript.replace(
-    /(\r?\n# copy stuff\r?\n)/,
-    '\n' +
-      'test -f online/engine/instdir/share/registry/Langpack-ko.xcd || {\n' +
-      '  echo "Engine is missing the required Korean language pack. Build the engine from source with ENGINE_LANGUAGES including ko." >&2\n' +
-      '  exit 1\n' +
-      '}\n$1',
-  );
   if (usesLegacyLayout && !buildScript.includes('make -j $(nproc) DEFAULT_TARGET=static_release')) {
     throw new Error('Failed to switch POCO source build to the static_release target.');
   }
   if (!buildScript.includes('debrand-online.sh')) {
     throw new Error('Failed to inject the debranding patch into the generated source build script.');
   }
-  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"') || !buildScript.includes('Langpack-ko.xcd')) {
+  if (!buildScript.includes('--with-lang="$ENGINE_LANGUAGES"')) {
     throw new Error('Failed to enforce the multilingual engine build contract.');
   }
   writeUtf8Lf(buildScriptPath, buildScript);

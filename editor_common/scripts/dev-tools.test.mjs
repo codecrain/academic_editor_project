@@ -99,18 +99,16 @@ test('source and native builds apply the public debranding patch before compilat
   }
 });
 
-test('source and native builds contain only verified spell dictionaries plus the Korean UI pack', () => {
+test('source and native builds limit engine languages to the five verified spell locales', () => {
   const sourceBuild = readProjectFile('editor_docx/scripts/build-source-editor-image.mjs');
   const nativeBuild = readProjectFile('editor_docx/scripts/build-native-editor.mjs');
   const alpineBuild = readProjectFile('editor_docx/docker/from-source/build-alpine.sh');
   for (const script of [sourceBuild, nativeBuild, alpineBuild]) {
     assert.match(script, /ENGINE_LANGUAGES/);
-    assert.match(script, /de en-US en-GB es fr ko/);
+    assert.match(script, /de en-US en-GB es fr/);
+    assert.doesNotMatch(script, /de en-US en-GB es fr ko/);
     assert.doesNotMatch(script, /\bar bg ca cs cy da\b/);
     assert.doesNotMatch(script, /--with-lang=en-US(?:\s|["'])/);
-  }
-  for (const script of [sourceBuild, nativeBuild]) {
-    assert.match(script, /Langpack-ko\.xcd/);
   }
 });
 
@@ -252,7 +250,7 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-004/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-005/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);
