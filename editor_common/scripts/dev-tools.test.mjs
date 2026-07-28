@@ -55,14 +55,23 @@ test('debranding patch removes unsafe upstream support surfaces from Help and Ab
   assert.doesNotMatch(patch, /window\.open\('https:\/\/forum\.collaboraonline\.com'/);
 });
 
-test('debranding patch keeps notebookbar document title visually restrained', () => {
+test('debranding patch keeps the notebookbar title restrained and desktop header compact', () => {
   const patch = readProjectFile('branding/debrand-online.sh');
-  assert.match(patch, /Tlooto document title sizing/);
-  assert.match(patch, /#document-titlebar/);
-  assert.match(patch, /max-width: 280px/);
-  assert.match(patch, /#document-name-input/);
-  assert.match(patch, /font-size: var\(--default-font-size\) !important/);
-  assert.match(patch, /text-overflow: ellipsis/);
+  const toolbar = readProjectFile('editor_docx/browser/css/toolbar.css');
+  for (const source of [patch, toolbar]) {
+    assert.match(source, /Tlooto document title sizing/);
+    assert.match(source, /#document-titlebar/);
+    assert.match(source, /max-width: 280px/);
+    assert.match(source, /#document-name-input/);
+    assert.match(source, /font-size: var\(--default-font-size\) !important/);
+    assert.match(source, /text-overflow: ellipsis/);
+    assert.match(source, /Tlooto compact desktop notebookbar/);
+    assert.match(source, /@media \(min-width: 901px\)/);
+    assert.match(source, /--notebookbar-element-height: 56px/);
+    assert.match(source, /height: 74px/);
+  }
+  assert.match(patch, /limited spell-check languages to en-US, en-GB, es-ES, fr-FR, de-DE/);
+  assert.match(patch, /app\.favouriteLanguages\.indexOf\(code\) < 0/);
 });
 
 test('source and native builds apply the public debranding patch before compilation', () => {
@@ -74,13 +83,14 @@ test('source and native builds apply the public debranding patch before compilat
   }
 });
 
-test('source and native builds require multilingual engines with Korean language resources', () => {
+test('source and native builds contain only verified spell dictionaries plus the Korean UI pack', () => {
   const sourceBuild = readProjectFile('editor_docx/scripts/build-source-editor-image.mjs');
   const nativeBuild = readProjectFile('editor_docx/scripts/build-native-editor.mjs');
   const alpineBuild = readProjectFile('editor_docx/docker/from-source/build-alpine.sh');
   for (const script of [sourceBuild, nativeBuild, alpineBuild]) {
     assert.match(script, /ENGINE_LANGUAGES/);
-    assert.match(script, /\bko\b/);
+    assert.match(script, /de en-US en-GB es fr ko/);
+    assert.doesNotMatch(script, /\bar bg ca cs cy da\b/);
     assert.doesNotMatch(script, /--with-lang=en-US(?:\s|["'])/);
   }
   for (const script of [sourceBuild, nativeBuild]) {
