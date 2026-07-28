@@ -38,6 +38,13 @@ curl -fL --retry 3 --retry-delay 2 -o "$POCO_ARCHIVE" "$POCO_ARCHIVE_URL"
 printf '%s  %s\n' "$POCO_ARCHIVE_SHA256" "$POCO_ARCHIVE" | sha256sum -c -
 tar -xzf "$POCO_ARCHIVE" --strip-components=1 -C "$POCO_SOURCE_DIR"
 
+# Collabora's engine workdir exposes one merged Poco include root, while the
+# upstream Poco release keeps headers under each component directory.
+mkdir -p "$POCO_SOURCE_DIR/include"
+for component in Foundation XML JSON Util Net Crypto NetSSL_OpenSSL; do
+  cp -a "$POCO_SOURCE_DIR/$component/include/." "$POCO_SOURCE_DIR/include/"
+done
+
 cmake -S "$POCO_SOURCE_DIR" -B "$POCO_BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -49,6 +56,9 @@ cmake -S "$POCO_SOURCE_DIR" -B "$POCO_BUILD_DIR" \
   -DENABLE_MONGODB=OFF \
   -DENABLE_DATA=OFF \
   -DENABLE_DATA_SQLITE=OFF \
+  -DENABLE_DATA_MYSQL=OFF \
+  -DENABLE_DATA_POSTGRESQL=OFF \
+  -DENABLE_DATA_ODBC=OFF \
   -DENABLE_REDIS=OFF \
   -DENABLE_PROMETHEUS=OFF \
   -DENABLE_ZIP=OFF \
