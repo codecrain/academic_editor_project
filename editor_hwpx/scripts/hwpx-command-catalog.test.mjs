@@ -22,10 +22,14 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'insertText',
     'deleteRange',
     'appendParagraph',
+    'text.deleteParagraphs',
     'table.writeCell',
     'table.writeRichCell',
     'table.writeCells',
     'table.applyCellStyle',
+    'table.insertRows',
+    'table.setSize',
+    'table.setCellSize',
     'table.create',
     'table.insertCaption',
     'style.applyText',
@@ -39,6 +43,7 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'layout.fitText',
     'image.replace',
     'image.insertAfterParagraph',
+    'image.cloneToCell',
     'image.generateAndReplace',
     'setDocumentMetadata',
     'defineStyle',
@@ -53,6 +58,123 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('text'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('table'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('image'));
+});
+
+test('HWPX location-changing commands require explicit stable targets and bounded shapes', () => {
+  const deleteCommand = {
+    op: 'text.deleteParagraphs',
+    locations: [
+      { paragraph: { section: 0, number: 3 } },
+      { paragraph: { section: 0, number: 4 } },
+    ],
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([deleteCommand]));
+  assert.deepEqual(
+    requiredInspectionTargets([deleteCommand]).map((item) => item.key),
+    ['paragraph:0:3', 'paragraph:0:4'],
+  );
+  assert.throws(
+    () => validateHwpxCommands([{
+      op: 'text.deleteParagraphs',
+      locations: [{ tableId: 'tbl_0', cell: { number: 0 } }],
+    }]),
+    /top-level paragraphs/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{
+      op: 'text.deleteParagraphs',
+      locations: [
+        { paragraph: { section: 0, number: 3 } },
+        { paragraph: { section: 0, number: 3 } },
+      ],
+    }]),
+    /must be unique/,
+  );
+
+  const insertRows = {
+    op: 'table.insertRows',
+    target: { tableId: 'tbl_0', cell: { number: 0 } },
+    rowIndex: 3,
+    count: 2,
+    templateRow: 2,
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([insertRows]));
+  assert.doesNotThrow(() => validateHwpxCommands([{ ...insertRows, extendBoundarySpans: true }]));
+  assert.deepEqual(
+    requiredInspectionTargets([insertRows]).map((item) => item.key),
+    ['table:tbl_0/cell:0'],
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...insertRows, count: 21 }]),
+    /1 through 20/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...insertRows, extendBoundarySpans: 'yes' }]),
+    /extendBoundarySpans must be a boolean/,
+  );
+
+  const setSize = {
+    op: 'table.setSize',
+    target: { tableId: 'tbl_0', cell: { number: 0 } },
+    height: 70902,
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([setSize]));
+  assert.throws(() => validateHwpxCommands([{ ...setSize, height: 0 }]), /positive integer/);
+
+  const setCellSize = {
+    op: 'table.setCellSize',
+    target: { tableId: 'tbl_0', cell: { number: 4 } },
+    height: 15932,
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([setCellSize]));
+  assert.deepEqual(
+    requiredInspectionTargets([setCellSize]).map((item) => item.key),
+    ['table:tbl_0/cell:4'],
+  );
+  assert.throws(() => validateHwpxCommands([{ ...setCellSize, width: -1 }]), /positive integer/);
+
+  const clonePicture = {
+    op: 'image.cloneToCell',
+    target: { tableId: 'tbl_0', cell: { number: 0 } },
+    sourcePictureId: 'pic_0',
+    targetParagraphIndex: 2,
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([clonePicture]));
+  assert.throws(() => validateHwpxCommands([{ ...clonePicture, sourcePictureId: 'image1' }]), /picture ID/);
+});
+
+test('HWPX rich cell commands validate one paragraph-style entry per text paragraph', () => {
+  const command = {
+    op: 'table.writeCell',
+    location: { tableId: 'tbl_0', cell: { number: 2 } },
+    text: '첫 문단\n둘째 문단',
+    paragraphStyleIds: [
+      { paraPrIDRef: 22, styleIDRef: 17 },
+      { paraPrIDRef: 45, styleIDRef: 0 },
+    ],
+    paragraphTemplateIndices: [0, 17],
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([command]));
+  assert.throws(
+    () => validateHwpxCommands([{ ...command, paragraphStyleIds: [{ paraPrIDRef: 22 }] }]),
+    /exactly one entry/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...command, paragraphStyleIds: [{ paraPrIDRef: 22 }, {}] }]),
+    /nonnegative integer style IDs/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...command, paragraphTemplateIndices: [0] }]),
+    /exactly one entry/,
+  );
+});
+
+test('HWPX catalog advertises mixed paragraph and structural template options', () => {
+  for (const op of ['table.writeCell', 'table.writeRichCell', 'table.writeCells']) {
+    const entry = getHwpxCommandCatalog({ op }).commands[0];
+    assert.ok(entry.optional.includes('paragraphStyleIds'));
+    assert.ok(entry.optional.includes('paragraphTemplateIndices'));
+  }
 });
 
 test('HWPX command catalog publishes every operation as executable', () => {

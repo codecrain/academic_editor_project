@@ -39,7 +39,15 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 let hwpxReady = null;
 
 export async function initHwpxRuntime() {
-  globalThis.measureTextWidth ??= (text) => String(text ?? '').length * 560;
+  globalThis.measureTextWidth ??= (_font, text) => {
+    let width = 0;
+    for (const character of String(text ?? '')) {
+      if (/\s/u.test(character)) width += 350;
+      else if (/[\u0000-\u007f]/u.test(character)) width += 550;
+      else width += 1000;
+    }
+    return width;
+  };
   hwpxReady ??= initHwpx({
     module_or_path: readFileSync(path.join(
       repoRoot,
@@ -408,6 +416,155 @@ function discoverTables(doc) {
   return tables;
 }
 
+function decodeXmlText(value) {
+  return String(value ?? '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, decimal) => String.fromCodePoint(Number.parseInt(decimal, 10)))
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&quot;', '"')
+    .replaceAll('&apos;', "'")
+    .replaceAll('&amp;', '&');
+}
+
+function xmlVisibleText(xml) {
+  let withoutNestedTables = xml;
+  const nestedTables = findAllBlocks(withoutNestedTables, 'tbl');
+  for (const table of [...nestedTables].sort((a, b) => b.start - a.start)) {
+    withoutNestedTables = `${withoutNestedTables.slice(0, table.start)}${withoutNestedTables.slice(table.end)}`;
+  }
+  return [...withoutNestedTables.matchAll(/<hp:t\b[^>]*>([\s\S]*?)<\/hp:t>/g)]
+    .map((match) => decodeXmlText(match[1].replace(/<[^>]+>/g, '')))
+    .join('');
+}
+
+function readPackageCellStyle(cellXml) {
+  const tc = cellXml.match(/<hp:tc\b[^>]*>/)?.[0] ?? '';
+  const subList = cellXml.match(/<hp:subList\b[^>]*>/)?.[0] ?? '';
+  const cellSize = cellXml.match(/<hp:cellSz\b[^>]*\/>/)?.[0] ?? '';
+  const margin = cellXml.match(/<hp:cellMargin\b[^>]*\/>/)?.[0] ?? '';
+  const paragraph = cellXml.match(/<hp:p\b[^>]*>/)?.[0] ?? '';
+  const run = cellXml.match(/<hp:run\b[^>]*>/)?.[0] ?? '';
+  return {
+    cell: stripUndefined({
+      borderFillId: integerAttribute(tc, 'borderFillIDRef'),
+      verticalAlign: firstMatch(subList, /\bvertAlign="([^"]+)"/, null),
+      width: integerAttribute(cellSize, 'width'),
+      height: integerAttribute(cellSize, 'height'),
+      leftMargin: integerAttribute(margin, 'left'),
+      rightMargin: integerAttribute(margin, 'right'),
+      topMargin: integerAttribute(margin, 'top'),
+      bottomMargin: integerAttribute(margin, 'bottom'),
+    }),
+    paragraph: stripUndefined({
+      paraPrIDRef: integerAttribute(paragraph, 'paraPrIDRef'),
+    }),
+    text: stripUndefined({
+      charPrIDRef: integerAttribute(run, 'charPrIDRef'),
+      fontSize: 1000,
+    }),
+    namedStyle: stripUndefined({
+      id: integerAttribute(paragraph, 'styleIDRef'),
+    }),
+  };
+}
+
+function packageTableId(section, paragraph, tableXml, ordinal) {
+  const nativeId = firstMatch(tableXml, /<hp:tbl\b[^>]*\bid="([^"]+)"/, null);
+  return nativeId ? `xtbl_${nativeId}` : `xtbl_s${section}_p${paragraph}_${ordinal}`;
+}
+
+function discoverNestedPackageTables(inputBytes) {
+  const entries = readZip(inputBytes);
+  const tables = [];
+  let cellGlobalStart = 0;
+  const sections = [...entries.keys()]
+    .filter((name) => /^Contents\/section\d+\.xml$/i.test(name))
+    .sort();
+  for (const sectionName of sections) {
+    const section = Number(sectionName.match(/section(\d+)\.xml$/i)?.[1] ?? 0);
+    const sectionXml = entries.get(sectionName)?.toString('utf8') ?? '';
+    const paragraphs = findTopLevelParagraphs(sectionXml);
+    for (let para = 0; para < paragraphs.length; para += 1) {
+      const allTables = findAllBlocks(paragraphs[para].xml, 'tbl').filter((table) => table.depth > 0);
+      for (let ordinal = 0; ordinal < allTables.length; ordinal += 1) {
+        const tableBlock = allTables[ordinal];
+        const tableXml = tableBlock.xml;
+        const id = packageTableId(section, para, tableXml, ordinal);
+        const cellBlocks = findBlocks(tableXml, 'tc');
+        const cells = cellBlocks.map((cellBlock, cellIndex) => {
+          const cellXml = cellBlock.xml;
+          const address = cellXml.match(/<hp:cellAddr\b[^>]*\/>/)?.[0] ?? '';
+          const span = cellXml.match(/<hp:cellSpan\b[^>]*\/>/)?.[0] ?? '';
+          const subList = extractSubList(cellXml);
+          const paragraphsInCell = findBlocks(subList.inner, 'p').map((paragraphBlock, index) => ({
+            index,
+            length: xmlVisibleText(paragraphBlock.xml).length,
+            text: xmlVisibleText(paragraphBlock.xml),
+          }));
+          const style = readPackageCellStyle(cellXml);
+          const capacity = estimateTextCapacity(style, null);
+          const row = integerAttribute(address, 'rowAddr', 0);
+          const col = integerAttribute(address, 'colAddr', 0);
+          return {
+            id: `${id}_cell_${cellIndex}`,
+            cellIndex,
+            row,
+            col,
+            rowSpan: integerAttribute(span, 'rowSpan', 1),
+            colSpan: integerAttribute(span, 'colSpan', 1),
+            text: paragraphsInCell.map((item) => item.text).join('\n'),
+            paragraphs: paragraphsInCell,
+            location: { tableId: id, cell: { number: cellIndex, row, column: col } },
+            style,
+            styleFingerprint: styleFingerprint(style),
+            layout: { bbox: null, capacity },
+            allowedActions: [
+              'table.writeCell',
+              'table.writeRichCell',
+              'table.applyCellStyle',
+              'list.writeBullets',
+              'list.applyNumbering',
+              'style.clone',
+              'style.applyText',
+              'paragraph.applyStyle',
+              'layout.fitText',
+            ],
+            native: {
+              packageOnly: true,
+              xmlTableId: id,
+              section,
+              paragraph: para,
+              cellIndex,
+            },
+          };
+        });
+        tables.push({
+          id,
+          tableIndex: tables.length,
+          cellGlobalStart,
+          section,
+          para,
+          control: null,
+          tableOrderInParagraph: null,
+          packageOnly: true,
+          xmlDepth: tableBlock.depth,
+          dims: {
+            rowCount: integerAttribute(tableXml.match(/<hp:tbl\b[^>]*>/)?.[0] ?? '', 'rowCnt', 0),
+            colCount: integerAttribute(tableXml.match(/<hp:tbl\b[^>]*>/)?.[0] ?? '', 'colCnt', 0),
+            cellCount: cells.length,
+          },
+          layout: { properties: null, bbox: null, cellBboxes: [] },
+          native: { packageOnly: true, xmlTableId: id, section, paragraph: para },
+          cells,
+        });
+        cellGlobalStart += cells.length;
+      }
+    }
+  }
+  return tables;
+}
+
 function readPackageObjects(inputBytes) {
   try {
     const entries = readZip(inputBytes);
@@ -566,6 +723,31 @@ function findBlocks(xml, tagName) {
   return blocks;
 }
 
+function findAllBlocks(xml, tagName) {
+  const blocks = [];
+  const tag = tagName.replace(/^hp:/, '');
+  const re = new RegExp(`<\\/?hp:${tag}\\b[^>]*\\/?>`, 'g');
+  const stack = [];
+  let match;
+  while ((match = re.exec(xml))) {
+    const raw = match[0];
+    if (raw.startsWith('</')) {
+      const opened = stack.pop();
+      if (opened) {
+        blocks.push({
+          start: opened.start,
+          end: re.lastIndex,
+          depth: opened.depth,
+          xml: xml.slice(opened.start, re.lastIndex),
+        });
+      }
+    } else if (!raw.endsWith('/>')) {
+      stack.push({ start: match.index, depth: stack.length });
+    }
+  }
+  return blocks.sort((a, b) => a.start - b.start || b.end - a.end);
+}
+
 function findTopLevelParagraphs(sectionXml) {
   return findBlocks(sectionXml.slice(sectionXml.indexOf('>') + 1, sectionXml.lastIndexOf('</hs:sec>')), 'p')
     .map((block) => {
@@ -576,6 +758,253 @@ function findTopLevelParagraphs(sectionXml) {
         xml: block.xml,
       };
     });
+}
+
+function integerAttribute(xml, name, fallback = null) {
+  const value = firstMatch(xml, new RegExp(`\\b${name}="(\\d+)"`), null);
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : fallback;
+}
+
+function setTagAttribute(tag, name, value) {
+  const encoded = String(value);
+  if (new RegExp(`\\b${name}="[^"]*"`).test(tag)) {
+    return tag.replace(new RegExp(`\\b${name}="[^"]*"`), `${name}="${encoded}"`);
+  }
+  const closing = tag.endsWith('/>') ? '/>' : '>';
+  return `${tag.slice(0, -closing.length)} ${name}="${encoded}"${closing}`;
+}
+
+function patchCellRowGeometry(cellXml, {
+  rowIndex,
+  count,
+  insertedHeight = 0,
+  extendBoundarySpans = false,
+}) {
+  const address = cellXml.match(/<hp:cellAddr\b[^>]*\/>/)?.[0];
+  if (!address) return cellXml;
+  const rowAddr = integerAttribute(address, 'rowAddr');
+  if (rowAddr === null) return cellXml;
+  const span = cellXml.match(/<hp:cellSpan\b[^>]*\/>/)?.[0];
+  const rowSpan = integerAttribute(span ?? '', 'rowSpan', 1);
+  let next = cellXml;
+  if (rowAddr >= rowIndex) {
+    next = next.replace(address, setTagAttribute(address, 'rowAddr', rowAddr + count));
+  } else if (
+    rowAddr + rowSpan > rowIndex
+    || (extendBoundarySpans && rowSpan > 1 && rowAddr + rowSpan === rowIndex)
+  ) {
+    if (span) {
+      next = next.replace(span, setTagAttribute(span, 'rowSpan', rowSpan + count));
+    }
+    const size = next.match(/<hp:cellSz\b[^>]*\/>/)?.[0];
+    const height = integerAttribute(size ?? '', 'height');
+    if (size && height !== null && insertedHeight > 0) {
+      next = next.replace(size, setTagAttribute(size, 'height', height + insertedHeight));
+    }
+  }
+  return next;
+}
+
+function setRowAddress(rowXml, rowAddr) {
+  return rowXml.replace(/<hp:cellAddr\b[^>]*\/>/g, (tag) => setTagAttribute(tag, 'rowAddr', rowAddr));
+}
+
+function clearRowText(rowXml) {
+  let next = rowXml;
+  const cells = findBlocks(next, 'tc');
+  for (const cell of [...cells].sort((a, b) => b.start - a.start)) {
+    next = `${next.slice(0, cell.start)}${replaceCellTextXml(cell.xml, '')}${next.slice(cell.end)}`;
+  }
+  return next;
+}
+
+function adjustCellZones(xml, rowIndex, count) {
+  return xml.replace(/<hp:cellzone\b[^>]*\/>/g, (tag) => {
+    const start = integerAttribute(tag, 'startRowAddr');
+    const end = integerAttribute(tag, 'endRowAddr');
+    let next = tag;
+    if (start !== null && start >= rowIndex) {
+      next = setTagAttribute(next, 'startRowAddr', start + count);
+    }
+    if (end !== null && end >= rowIndex) {
+      next = setTagAttribute(next, 'endRowAddr', end + count);
+    }
+    return next;
+  });
+}
+
+function insertTableRowsXml(tableXml, patch) {
+  const rows = findBlocks(tableXml, 'tr');
+  const rowIndex = Number(patch.rowIndex);
+  const templateRow = Number(patch.templateRow);
+  const count = Number(patch.count);
+  assert.ok(Number.isInteger(rowIndex) && rowIndex >= 0 && rowIndex <= rows.length, `table.insertRows rowIndex out of range: ${rowIndex}`);
+  assert.ok(Number.isInteger(templateRow) && templateRow >= 0 && templateRow < rows.length, `table.insertRows templateRow out of range: ${templateRow}`);
+  assert.ok(Number.isInteger(count) && count >= 1 && count <= 20, `table.insertRows count out of range: ${count}`);
+
+  const templateCells = findBlocks(rows[templateRow].xml, 'tc');
+  const templateHeight = Math.max(0, ...templateCells.map((cell) => integerAttribute(cell.xml.match(/<hp:cellSz\b[^>]*\/>/)?.[0] ?? '', 'height', 0)));
+  const insertedHeight = templateHeight * count;
+  const adjustedRows = rows.map((row) => {
+    let rowXml = row.xml;
+    const cells = findBlocks(rowXml, 'tc');
+    for (const cell of [...cells].sort((a, b) => b.start - a.start)) {
+      rowXml = `${rowXml.slice(0, cell.start)}${patchCellRowGeometry(cell.xml, {
+        rowIndex,
+        count,
+        insertedHeight,
+        extendBoundarySpans: patch.extendBoundarySpans === true,
+      })}${rowXml.slice(cell.end)}`;
+    }
+    return rowXml;
+  });
+  const insertedRows = Array.from({ length: count }, (_, offset) => {
+    let rowXml = setRowAddress(rows[templateRow].xml, rowIndex + offset);
+    if (patch.clearText !== false) rowXml = clearRowText(rowXml);
+    return rowXml;
+  });
+  adjustedRows.splice(rowIndex, 0, ...insertedRows);
+
+  let head = tableXml.slice(0, rows[0].start);
+  const tail = tableXml.slice(rows.at(-1).end);
+  head = head.replace(/<hp:tbl\b[^>]*>/, (tag) => setTagAttribute(tag, 'rowCnt', rows.length + count));
+  if (insertedHeight > 0) {
+    head = head.replace(/<hp:sz\b[^>]*\/>/, (tag) => {
+      const height = integerAttribute(tag, 'height');
+      return height === null ? tag : setTagAttribute(tag, 'height', height + insertedHeight);
+    });
+  }
+  return adjustCellZones(`${head}${adjustedRows.join('')}${tail}`, rowIndex, count);
+}
+
+function setTableSizeXml(tableXml, patch) {
+  return tableXml.replace(/<hp:sz\b[^>]*\/>/, (tag) => {
+    let next = tag;
+    if (patch.width !== undefined) next = setTagAttribute(next, 'width', patch.width);
+    if (patch.height !== undefined) next = setTagAttribute(next, 'height', patch.height);
+    return next;
+  });
+}
+
+function setCellSizeXml(cellXml, patch) {
+  return cellXml.replace(/<hp:cellSz\b[^>]*\/>/, (tag) => {
+    let next = tag;
+    if (patch.width !== undefined) next = setTagAttribute(next, 'width', patch.width);
+    if (patch.height !== undefined) next = setTagAttribute(next, 'height', patch.height);
+    return next;
+  });
+}
+
+function replaceTableInOwningParagraph(paragraphXml, tableBlock, replacementTableXml, heightDelta = 0) {
+  const owners = findAllBlocks(paragraphXml, 'p')
+    .filter((block) => block.start <= tableBlock.start && block.end >= tableBlock.end)
+    .sort((left, right) => (left.end - left.start) - (right.end - right.start));
+  const owner = owners[0];
+  if (!owner) {
+    return `${paragraphXml.slice(0, tableBlock.start)}${replacementTableXml}${paragraphXml.slice(tableBlock.end)}`;
+  }
+
+  const tableStart = tableBlock.start - owner.start;
+  const tableEnd = tableBlock.end - owner.start;
+  let ownerXml = `${owner.xml.slice(0, tableStart)}${replacementTableXml}${owner.xml.slice(tableEnd)}`;
+  if (heightDelta !== 0) {
+    const afterTable = tableStart + replacementTableXml.length;
+    const tail = ownerXml.slice(afterTable);
+    const lineSeg = tail.match(/<hp:lineseg\b[^>]*\/>/)?.[0];
+    if (lineSeg) {
+      const vertSize = integerAttribute(lineSeg, 'vertsize');
+      const textHeight = integerAttribute(lineSeg, 'textheight');
+      const baseline = integerAttribute(lineSeg, 'baseline');
+      let resizedLineSeg = lineSeg;
+      if (vertSize !== null) resizedLineSeg = setTagAttribute(resizedLineSeg, 'vertsize', vertSize + heightDelta);
+      if (textHeight !== null) resizedLineSeg = setTagAttribute(resizedLineSeg, 'textheight', textHeight + heightDelta);
+      if (baseline !== null && vertSize > 0) {
+        resizedLineSeg = setTagAttribute(
+          resizedLineSeg,
+          'baseline',
+          Math.round((vertSize + heightDelta) * (baseline / vertSize)),
+        );
+      }
+      ownerXml = `${ownerXml.slice(0, afterTable)}${tail.replace(lineSeg, resizedLineSeg)}`;
+    }
+  }
+  return `${paragraphXml.slice(0, owner.start)}${ownerXml}${paragraphXml.slice(owner.end)}`;
+}
+
+function resizeTableInOwningParagraph(paragraphXml, tableBlock, patch) {
+  const sizeTag = tableBlock.xml.match(/<hp:sz\b[^>]*\/>/)?.[0] ?? '';
+  const oldHeight = integerAttribute(sizeTag, 'height');
+  const heightDelta = patch.height !== undefined && oldHeight !== null
+    ? Number(patch.height) - oldHeight
+    : 0;
+  return replaceTableInOwningParagraph(
+    paragraphXml,
+    tableBlock,
+    setTableSizeXml(tableBlock.xml, patch),
+    heightDelta,
+  );
+}
+
+function insertTableRowsInOwningParagraph(paragraphXml, tableBlock, patch) {
+  const oldSizeTag = tableBlock.xml.match(/<hp:sz\b[^>]*\/>/)?.[0] ?? '';
+  const oldHeight = integerAttribute(oldSizeTag, 'height', 0);
+  const insertedTable = insertTableRowsXml(tableBlock.xml, patch);
+  const newSizeTag = insertedTable.match(/<hp:sz\b[^>]*\/>/)?.[0] ?? '';
+  const newHeight = integerAttribute(newSizeTag, 'height', oldHeight);
+  const heightDelta = newHeight - oldHeight;
+  return replaceTableInOwningParagraph(
+    paragraphXml,
+    tableBlock,
+    insertedTable,
+    heightDelta,
+  );
+}
+
+function clonePictureXml(sourceXml, sectionXml, patch) {
+  const pictureIds = [...sectionXml.matchAll(/<hp:pic\b[^>]*\bid="(\d+)"/g)].map((match) => Number(match[1]));
+  const instanceIds = [...sectionXml.matchAll(/<hp:pic\b[^>]*\binstid="(\d+)"/g)].map((match) => Number(match[1]));
+  const zOrders = [...sectionXml.matchAll(/<hp:pic\b[^>]*\bzOrder="(\d+)"/g)].map((match) => Number(match[1]));
+  let next = sourceXml.replace(/<hp:pic\b[^>]*>/, (tag) => {
+    let patched = setXmlAttribute(tag, 'id', Math.max(0, ...pictureIds) + 1);
+    patched = setXmlAttribute(patched, 'instid', Math.max(0, ...instanceIds) + 1);
+    patched = setXmlAttribute(patched, 'zOrder', patch.zOrder ?? (Math.max(-1, ...zOrders) + 1));
+    return patched;
+  });
+  next = next.replace(/<hp:sz\b[^>]*\/>/, (tag) => {
+    let patched = tag;
+    if (patch.width !== undefined) patched = setTagAttribute(patched, 'width', patch.width);
+    if (patch.height !== undefined) patched = setTagAttribute(patched, 'height', patch.height);
+    return patched;
+  });
+  next = next.replace(/<hp:pos\b[^>]*\/>/, (tag) => {
+    let patched = tag;
+    if (patch.vertOffset !== undefined) patched = setTagAttribute(patched, 'vertOffset', patch.vertOffset);
+    if (patch.horzOffset !== undefined) patched = setTagAttribute(patched, 'horzOffset', patch.horzOffset);
+    return patched;
+  });
+  return next;
+}
+
+function insertPictureIntoCellXml(cellXml, sourcePictureXml, sectionXml, patch) {
+  const subList = extractSubList(cellXml);
+  const paragraphs = findBlocks(subList.inner, 'p');
+  const paragraphIndex = patch.targetParagraphIndex ?? 0;
+  const paragraph = paragraphs[paragraphIndex];
+  assert.ok(paragraph, `image.cloneToCell targetParagraphIndex out of range: ${paragraphIndex}`);
+  const pictureXml = clonePictureXml(sourcePictureXml, sectionXml, patch);
+  let paragraphXml = paragraph.xml;
+  if (/<hp:run\b[^>]*\/>/.test(paragraphXml)) {
+    paragraphXml = paragraphXml.replace(/<hp:run\b([^>]*)\/>/, `<hp:run$1>${pictureXml}</hp:run>`);
+  } else if (/<\/hp:run>/.test(paragraphXml)) {
+    paragraphXml = paragraphXml.replace('</hp:run>', `${pictureXml}</hp:run>`);
+  } else {
+    paragraphXml = paragraphXml.replace(/(<hp:p\b[^>]*>)/, `$1<hp:run>${pictureXml}</hp:run>`);
+  }
+  const paragraphStart = subList.innerStart + paragraph.start;
+  const paragraphEnd = subList.innerStart + paragraph.end;
+  return `${cellXml.slice(0, paragraphStart)}${paragraphXml}${cellXml.slice(paragraphEnd)}`;
 }
 
 function extractSubList(cellXml) {
@@ -746,7 +1175,7 @@ function applyCellOuterStyleXml(cellXml, cellStyle = {}) {
 function paragraphTemplateFromXml(paragraphXml, fallbackParagraphXml = '', overrideStyleIds = {}) {
   const sourcePOpen = paragraphXml.match(/<hp:p\b[^>]*>/)?.[0] ?? null;
   const fallbackPOpen = fallbackParagraphXml.match(/<hp:p\b[^>]*>/)?.[0] ?? null;
-  let pOpen = fallbackPOpen ?? sourcePOpen
+  let pOpen = sourcePOpen ?? fallbackPOpen
     ?? '<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">';
   const normalizedOverrides = normalizeStyleIds(overrideStyleIds);
   for (const attr of ['paraPrIDRef', 'styleIDRef']) {
@@ -759,20 +1188,127 @@ function paragraphTemplateFromXml(paragraphXml, fallbackParagraphXml = '', overr
   const lineSeg = paragraphXml.match(/<hp:lineseg\b[^>]*\/>/)?.[0]
     ?? fallbackParagraphXml.match(/<hp:lineseg\b[^>]*\/>/)?.[0]
     ?? '<hp:lineseg textpos="0" vertpos="0" vertsize="1100" textheight="1100" baseline="935" spacing="660" horzpos="0" horzsize="32000" flags="393216"/>';
-  const vertStep = Number(firstMatch(lineSeg, /vertsize="(\d+)"/, '1100')) + 660;
-  return { pOpen, charPrIDRef, lineSeg, vertStep };
+  const vertSize = Number(firstMatch(lineSeg, /vertsize="(\d+)"/, '1100'));
+  const spacing = Number(firstMatch(lineSeg, /spacing="(\d+)"/, '660'));
+  const startVertPos = Number(firstMatch(lineSeg, /vertpos="(\d+)"/, '0'));
+  const horzSize = Number(firstMatch(lineSeg, /horzsize="(\d+)"/, '32000'));
+  const vertStep = Math.max(1, vertSize + spacing);
+  return {
+    pOpen,
+    charPrIDRef,
+    lineSeg,
+    vertSize,
+    spacing,
+    startVertPos,
+    horzSize,
+    vertStep,
+  };
 }
 
-function buildLineSeg(template, index) {
-  const vertpos = Math.max(0, index * template.vertStep);
+function buildLineSeg(template, textpos, vertpos) {
   return template.lineSeg
-    .replace(/\btextpos="[^"]*"/, 'textpos="0"')
-    .replace(/\bvertpos="[^"]*"/, `vertpos="${vertpos}"`);
+    .replace(/\btextpos="[^"]*"/, `textpos="${textpos}"`)
+    .replace(/\bvertpos="[^"]*"/, `vertpos="${Math.max(0, Math.round(vertpos))}"`);
 }
 
-function buildParagraphXml(line, template, index) {
+function visualTextUnits(text) {
+  let units = 0;
+  for (const character of String(text ?? '')) {
+    if (/\s/u.test(character)) units += 0.35;
+    else if (/[\u0000-\u007f]/u.test(character)) units += 0.55;
+    else units += 1;
+  }
+  return units;
+}
+
+function wrappedLineStartOffsets(line, maxWidthUnits) {
+  const source = String(line ?? '');
+  if (!source || !maxWidthUnits || visualTextUnits(source) <= maxWidthUnits) {
+    return [0];
+  }
+  const tokens = [...source.matchAll(/\S+\s*/g)];
+  if (!tokens.length) return [0];
+  const offsets = [tokens[0].index ?? 0];
+  let lineWidth = visualTextUnits(tokens[0][0]);
+  for (const token of tokens.slice(1)) {
+    const tokenWidth = visualTextUnits(token[0]);
+    if (lineWidth > 0 && lineWidth + tokenWidth > maxWidthUnits) {
+      offsets.push(token.index ?? 0);
+      lineWidth = tokenWidth;
+    } else {
+      lineWidth += tokenWidth;
+    }
+  }
+  return offsets;
+}
+
+function buildParagraphXml(line, template, startVertPos = template.startVertPos) {
+  // HWP units track glyph height closely. Full-width Korean/CJK characters use
+  // roughly one height unit while Latin letters, digits, and spaces are narrower.
+  // A weighted capacity avoids both Korean overflow and overly conservative
+  // wrapping of mixed address/amount text.
+  const maxWidthUnits = Math.max(4, (template.horzSize / Math.max(1, template.vertSize)) * 1.05);
+  const offsets = wrappedLineStartOffsets(line, maxWidthUnits);
   const text = escapeXmlText(line);
-  return `${template.pOpen}<hp:run charPrIDRef="${template.charPrIDRef}"><hp:t>${text}</hp:t></hp:run><hp:linesegarray>${buildLineSeg(template, index)}</hp:linesegarray></hp:p>`;
+  const lineSegs = offsets.map((textpos, index) => (
+    buildLineSeg(template, textpos, startVertPos + (index * template.vertStep))
+  )).join('');
+  return {
+    xml: `${template.pOpen}<hp:run charPrIDRef="${template.charPrIDRef}"><hp:t>${text}</hp:t></hp:run><hp:linesegarray>${lineSegs}</hp:linesegarray></hp:p>`,
+    lineCount: offsets.length,
+    nextVertPos: startVertPos + (offsets.length * template.vertStep),
+    maxBottom: startVertPos + ((offsets.length - 1) * template.vertStep) + template.vertSize,
+  };
+}
+
+function cloneParagraphTemplateXml(paragraphXml, styleIds, startVertPos) {
+  const lineSegs = [...paragraphXml.matchAll(/<hp:lineseg\b[^>]*\/>/g)].map((match) => match[0]);
+  if (!lineSegs.length) return null;
+  const firstVertPos = Number(firstMatch(lineSegs[0], /\bvertpos="(\d+)"/, '0'));
+  const delta = startVertPos - firstVertPos;
+  const xml = applyParagraphStyleIdsXml(
+    paragraphXml.replace(/<hp:lineseg\b[^>]*\/>/g, (tag) => {
+      const vertPos = Number(firstMatch(tag, /\bvertpos="(\d+)"/, '0'));
+      return tag.replace(/\bvertpos="[^"]*"/, `vertpos="${Math.max(0, vertPos + delta)}"`);
+    }),
+    styleIds,
+  );
+  const last = lineSegs.at(-1);
+  const lastVertPos = Number(firstMatch(last, /\bvertpos="(\d+)"/, '0')) + delta;
+  const vertSize = Number(firstMatch(last, /\bvertsize="(\d+)"/, '1100'));
+  const spacing = Number(firstMatch(last, /\bspacing="(\d+)"/, '660'));
+  return {
+    xml,
+    lineCount: lineSegs.length,
+    nextVertPos: lastVertPos + vertSize + spacing,
+    maxBottom: lastVertPos + vertSize,
+  };
+}
+
+export function replaceLeadingTabTemplateTextXml(paragraphXml, line) {
+  const desiredText = String(line ?? '');
+  const leadingTabs = desiredText.match(/^\t+/u)?.[0].length ?? 0;
+  const tabControls = [...paragraphXml.matchAll(/<hp:tab\b[^>]*\/>/g)].map((match) => match[0]);
+  if (!tabControls.length || leadingTabs !== tabControls.length) return null;
+
+  let replaced = false;
+  const nextXml = paragraphXml.replace(
+    /<hp:t\b([^>]*)>([\s\S]*?)<\/hp:t>/,
+    (match, attrs, inner) => {
+      if (!/<hp:tab\b[^>]*\/>/.test(inner)) return match;
+      const unsupportedControls = inner
+        .replace(/<hp:tab\b[^>]*\/>/g, '')
+        .match(/<[^>]+>/);
+      if (unsupportedControls) return match;
+      replaced = true;
+      return `<hp:t${attrs}>${tabControls.join('')}${escapeXmlText(desiredText.slice(leadingTabs))}</hp:t>`;
+    },
+  );
+  return replaced ? nextXml : null;
+}
+
+function comparableParagraphText(value) {
+  return String(value ?? '').replace(/\s+/gu, '');
 }
 
 const CELL_DRAWING_CONTROL_PATTERN = /<hp:(?:pic|container)\b/;
@@ -785,13 +1321,43 @@ function replaceCellTextXml(cellXml, text, options = {}) {
   }
   const subList = extractSubList(cellXml);
   const paragraphs = findBlocks(subList.inner, 'p');
-  const template = paragraphTemplateFromXml(
-    options.templateParagraphXml ?? paragraphs[0]?.xml ?? '',
-    paragraphs[0]?.xml ?? '',
-    options.styleIds,
-  );
   const lines = String(text ?? '').split('\n');
-  const nextParagraphs = (lines.length ? lines : ['']).map((line, index) => buildParagraphXml(line, template, index)).join('');
+  const logicalLines = lines.length ? lines : [''];
+  let cursor = null;
+  const nextParagraphs = logicalLines.map((line, index) => {
+    const explicitTemplateIndex = options.paragraphTemplateIndices?.[index];
+    const sourceXml = explicitTemplateIndex !== undefined && explicitTemplateIndex !== null
+      ? paragraphs[Number(explicitTemplateIndex)]?.xml ?? ''
+      : options.templateParagraphXml
+      ?? paragraphs[index]?.xml
+      ?? paragraphs.at(-1)?.xml
+      ?? '';
+    const fallbackXml = paragraphs[index]?.xml ?? paragraphs.at(-1)?.xml ?? '';
+    const paragraphStyleIds = options.paragraphStyleIds?.[index] ?? options.styleIds;
+    const template = paragraphTemplateFromXml(sourceXml, fallbackXml, paragraphStyleIds);
+    if (cursor === null) cursor = template.startVertPos;
+    if (explicitTemplateIndex !== undefined && explicitTemplateIndex !== null
+      && comparableParagraphText(xmlVisibleText(sourceXml)) === comparableParagraphText(line)) {
+      const cloned = cloneParagraphTemplateXml(sourceXml, paragraphStyleIds, cursor);
+      if (cloned) {
+        cursor = cloned.nextVertPos;
+        return cloned.xml;
+      }
+    }
+    if (explicitTemplateIndex !== undefined && explicitTemplateIndex !== null) {
+      const tabPreservingXml = replaceLeadingTabTemplateTextXml(sourceXml, line);
+      const cloned = tabPreservingXml
+        ? cloneParagraphTemplateXml(tabPreservingXml, paragraphStyleIds, cursor)
+        : null;
+      if (cloned) {
+        cursor = cloned.nextVertPos;
+        return cloned.xml;
+      }
+    }
+    const built = buildParagraphXml(line, template, cursor);
+    cursor = built.nextVertPos;
+    return built.xml;
+  }).join('');
   const textPatched = `${cellXml.slice(0, subList.innerStart)}${nextParagraphs}${cellXml.slice(subList.innerEnd)}`;
   return applyCellOuterStyleXml(textPatched, options.cellStyle);
 }
@@ -827,7 +1393,12 @@ function insertParagraphTextAfterXml(paragraphXml, text, options = {}) {
     options.styleIds,
   );
   const lines = String(text ?? '').split(/\r?\n/);
-  const inserted = (lines.length ? lines : ['']).map((line, index) => buildParagraphXml(line, template, index)).join('');
+  let cursor = options.startVertPos ?? template.startVertPos;
+  const inserted = (lines.length ? lines : ['']).map((line) => {
+    const built = buildParagraphXml(line, template, cursor);
+    cursor = built.nextVertPos;
+    return built.xml;
+  }).join('');
   return `${paragraphXml}${inserted}`;
 }
 
@@ -915,18 +1486,57 @@ function replaceRectTextBoxText(sectionXml, replacements) {
   return next;
 }
 
-function patchSectionXml(sectionXml, sectionIndex, cellPatches, paragraphPatches, paragraphInsertPatches = [], shapePatches = [], textBoxPatches = []) {
+function patchSectionXml(
+  sectionXml,
+  sectionIndex,
+  cellPatches,
+  paragraphPatches,
+  paragraphInsertPatches = [],
+  paragraphDeletePatches = [],
+  tableRowInsertPatches = [],
+  tableSizePatches = [],
+  cellSizePatches = [],
+  pictureClonePatches = [],
+  shapePatches = [],
+  textBoxPatches = [],
+) {
   let next = sectionXml;
   const sectionCellPatches = cellPatches.filter((patch) => patch.section === sectionIndex);
   const sectionParagraphPatches = paragraphPatches.filter((patch) => patch.section === sectionIndex);
   const sectionParagraphInsertPatches = paragraphInsertPatches.filter((patch) => patch.section === sectionIndex);
+  const sectionParagraphDeletePatches = paragraphDeletePatches.filter((patch) => patch.section === sectionIndex);
+  const sectionTableRowInsertPatches = tableRowInsertPatches.filter((patch) => patch.section === sectionIndex);
+  const sectionTableSizePatches = tableSizePatches.filter((patch) => patch.section === sectionIndex);
+  const sectionCellSizePatches = cellSizePatches.filter((patch) => patch.section === sectionIndex);
+  const sectionPictureClonePatches = pictureClonePatches.filter((patch) => patch.section === sectionIndex);
   const sectionShapePatches = shapePatches.filter((patch) => patch.section === sectionIndex);
   const sectionTextBoxPatches = textBoxPatches.filter((patch) => patch.section === sectionIndex);
+
+  if (sectionTableRowInsertPatches.length) {
+    for (const patch of sectionTableRowInsertPatches) {
+      const paragraphs = findTopLevelParagraphs(next);
+      const paragraph = paragraphs[patch.para];
+      if (!paragraph) {
+        throw new Error(`paragraph XML index not found for table row insert: ${patch.para}`);
+      }
+      const tables = patch.xmlTableId
+        ? findAllBlocks(paragraph.xml, 'tbl')
+        : findBlocks(paragraph.xml, 'tbl');
+      const table = patch.xmlTableId
+        ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+        : tables[patch.tableOrderInParagraph];
+      if (!table) {
+        throw new Error(`table XML index not found for row insert: para ${patch.para}, tableOrder ${patch.tableOrderInParagraph}`);
+      }
+      const inserted = insertTableRowsInOwningParagraph(paragraph.xml, table, patch);
+      next = `${next.slice(0, paragraph.start)}${inserted}${next.slice(paragraph.end)}`;
+    }
+  }
 
   if (sectionCellPatches.length) {
     const uniqueCellPatches = [
       ...new Map(sectionCellPatches.map((patch) => [
-        `${patch.section}:${patch.para}:${patch.tableOrderInParagraph}:${patch.cellIndex}`,
+        `${patch.section}:${patch.para}:${patch.xmlTableId ?? patch.tableOrderInParagraph}:${patch.cellIndex}`,
         patch,
       ])).values(),
     ];
@@ -936,8 +1546,12 @@ function patchSectionXml(sectionXml, sectionIndex, cellPatches, paragraphPatches
       if (!paragraph) {
         throw new Error(`paragraph XML index not found for table patch: ${patch.para}`);
       }
-      const tables = findBlocks(paragraph.xml, 'tbl');
-      const table = tables[patch.tableOrderInParagraph];
+      const tables = patch.xmlTableId
+        ? findAllBlocks(paragraph.xml, 'tbl')
+        : findBlocks(paragraph.xml, 'tbl');
+      const table = patch.xmlTableId
+        ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+        : tables[patch.tableOrderInParagraph];
       if (!table) {
         throw new Error(`table XML index not found: para ${patch.para}, tableOrder ${patch.tableOrderInParagraph}`);
       }
@@ -954,12 +1568,72 @@ function patchSectionXml(sectionXml, sectionIndex, cellPatches, paragraphPatches
         xml: replaceCellTextXml(cell.xml, patch.text, {
           templateParagraphXml: patch.templateParagraphXml,
           styleIds: patch.styleIds,
+          paragraphStyleIds: patch.paragraphStyleIds,
+          paragraphTemplateIndices: patch.paragraphTemplateIndices,
           cellStyle: patch.cellStyle,
         }),
       };
     });
     for (const patch of replacements.sort((a, b) => b.start - a.start)) {
       next = `${next.slice(0, patch.start)}${patch.xml}${next.slice(patch.end)}`;
+    }
+  }
+
+  if (sectionTableSizePatches.length) {
+    // Table-size edits may target an outer table and one of its nested tables in
+    // the same paragraph. Building all replacements from one stale XML snapshot
+    // makes the later outer-table replacement overwrite the nested-table edit.
+    // Re-resolve each target against the latest XML so overlapping edits compose.
+    for (const patch of sectionTableSizePatches) {
+      const paragraphs = findTopLevelParagraphs(next);
+      const paragraph = paragraphs[patch.para];
+      if (!paragraph) throw new Error(`paragraph XML index not found for table size: ${patch.para}`);
+      const tables = patch.xmlTableId ? findAllBlocks(paragraph.xml, 'tbl') : findBlocks(paragraph.xml, 'tbl');
+      const table = patch.xmlTableId
+        ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+        : tables[patch.tableOrderInParagraph];
+      if (!table) throw new Error(`table XML index not found for table size: ${patch.xmlTableId ?? patch.tableOrderInParagraph}`);
+      const resized = resizeTableInOwningParagraph(paragraph.xml, table, patch);
+      next = `${next.slice(0, paragraph.start)}${resized}${next.slice(paragraph.end)}`;
+    }
+  }
+
+  if (sectionCellSizePatches.length) {
+    for (const patch of sectionCellSizePatches) {
+      const paragraphs = findTopLevelParagraphs(next);
+      const paragraph = paragraphs[patch.para];
+      if (!paragraph) throw new Error(`paragraph XML index not found for cell size: ${patch.para}`);
+      const tables = patch.xmlTableId ? findAllBlocks(paragraph.xml, 'tbl') : findBlocks(paragraph.xml, 'tbl');
+      const table = patch.xmlTableId
+        ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+        : tables[patch.tableOrderInParagraph];
+      if (!table) throw new Error(`table XML index not found for cell size: ${patch.xmlTableId ?? patch.tableOrderInParagraph}`);
+      const cell = findBlocks(table.xml, 'tc')[patch.cellIndex];
+      if (!cell) throw new Error(`cell XML index not found for cell size: ${patch.cellIndex}`);
+      const resizedCellXml = setCellSizeXml(cell.xml, patch);
+      const start = paragraph.start + table.start + cell.start;
+      const end = paragraph.start + table.start + cell.end;
+      next = `${next.slice(0, start)}${resizedCellXml}${next.slice(end)}`;
+    }
+  }
+
+  if (sectionPictureClonePatches.length) {
+    for (const patch of sectionPictureClonePatches) {
+      const paragraphs = findTopLevelParagraphs(next);
+      const paragraph = paragraphs[patch.para];
+      if (!paragraph) throw new Error(`paragraph XML index not found for picture clone: ${patch.para}`);
+      const tables = patch.xmlTableId ? findAllBlocks(paragraph.xml, 'tbl') : findBlocks(paragraph.xml, 'tbl');
+      const table = patch.xmlTableId
+        ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+        : tables[patch.tableOrderInParagraph];
+      if (!table) throw new Error(`table XML index not found for picture clone: ${patch.xmlTableId ?? patch.tableOrderInParagraph}`);
+      const cells = findBlocks(table.xml, 'tc');
+      const cell = cells[patch.cellIndex];
+      if (!cell) throw new Error(`cell XML index not found for picture clone: ${patch.cellIndex}`);
+      const cellXml = insertPictureIntoCellXml(cell.xml, patch.sourcePictureXml, next, patch);
+      const start = paragraph.start + table.start + cell.start;
+      const end = paragraph.start + table.start + cell.end;
+      next = `${next.slice(0, start)}${cellXml}${next.slice(end)}`;
     }
   }
 
@@ -977,13 +1651,16 @@ function patchSectionXml(sectionXml, sectionIndex, cellPatches, paragraphPatches
 
   if (sectionParagraphInsertPatches.length) {
     const uniqueInsertPatches = [...new Map(sectionParagraphInsertPatches.map((patch) => [`${patch.section}:${patch.para}:${patch.opId}`, patch])).values()];
-    const bodyParagraphs = findTopLevelParagraphs(next);
     for (const patch of [...uniqueInsertPatches].sort((a, b) => b.para - a.para)) {
+      const bodyParagraphs = findTopLevelParagraphs(next);
       const paragraph = bodyParagraphs[patch.para];
       if (!paragraph) {
         throw new Error(`paragraph XML index not found for insert: ${patch.para}`);
       }
-      next = `${next.slice(0, paragraph.start)}${insertParagraphTextAfterXml(paragraph.xml, patch.text, { styleIds: patch.styleIds })}${next.slice(paragraph.end)}`;
+      next = `${next.slice(0, paragraph.start)}${insertParagraphTextAfterXml(paragraph.xml, patch.text, {
+        templateParagraphXml: patch.templateParagraphXml,
+        styleIds: patch.styleIds,
+      })}${next.slice(paragraph.end)}`;
     }
   }
 
@@ -993,6 +1670,20 @@ function patchSectionXml(sectionXml, sectionIndex, cellPatches, paragraphPatches
 
   for (const patch of sectionTextBoxPatches) {
     next = replaceRectTextBoxText(next, patch.replacements);
+  }
+
+  if (sectionParagraphDeletePatches.length) {
+    const paragraphNumbers = [...new Set(sectionParagraphDeletePatches.flatMap((patch) => patch.paras))]
+      .sort((a, b) => b - a);
+    const bodyParagraphs = findTopLevelParagraphs(next);
+    assert.ok(bodyParagraphs.length - paragraphNumbers.length >= 1, 'text.deleteParagraphs must leave at least one paragraph in each section');
+    for (const para of paragraphNumbers) {
+      const paragraph = bodyParagraphs[para];
+      if (!paragraph) {
+        throw new Error(`paragraph XML index not found for delete: ${para}`);
+      }
+      next = `${next.slice(0, paragraph.start)}${next.slice(paragraph.end)}`;
+    }
   }
 
   return next;
@@ -1005,7 +1696,9 @@ function extractCellXmlFromPackage(inputBytes, table, cellIndex) {
   assert.ok(sectionXml, `${sectionName} not found`);
   const paragraph = findTopLevelParagraphs(sectionXml)[table.para];
   assert.ok(paragraph, `paragraph XML index not found: ${table.para}`);
-  const tableXml = findBlocks(paragraph.xml, 'tbl')[table.tableOrderInParagraph];
+  const tableXml = table.packageOnly
+    ? findAllBlocks(paragraph.xml, 'tbl').find((block, ordinal) => packageTableId(table.section, table.para, block.xml, ordinal) === table.id)
+    : findBlocks(paragraph.xml, 'tbl')[table.tableOrderInParagraph];
   assert.ok(tableXml, `table XML index not found: ${table.id}`);
   const cellXml = findBlocks(tableXml.xml, 'tc')[cellIndex];
   assert.ok(cellXml, `cell XML index not found: ${table.id} cell ${cellIndex}`);
@@ -1022,6 +1715,22 @@ function extractParagraphXmlFromPackage(inputBytes, location) {
   const paragraphXml = findTopLevelParagraphs(sectionXml)[paragraph];
   assert.ok(paragraphXml, `paragraph XML index not found: ${paragraph}`);
   return paragraphXml.xml;
+}
+
+function extractPictureXmlFromPackage(inputBytes, pictureId) {
+  const match = String(pictureId ?? '').match(/^pic_(\d+)$/);
+  assert.ok(match, `invalid picture ID: ${pictureId}`);
+  const targetIndex = Number(match[1]);
+  const entries = readZip(inputBytes);
+  let index = 0;
+  for (const sectionName of [...entries.keys()].filter((name) => /^Contents\/section\d+\.xml$/i.test(name)).sort()) {
+    const sectionXml = entries.get(sectionName)?.toString('utf8') ?? '';
+    for (const picture of findAllBlocks(sectionXml, 'pic')) {
+      if (index === targetIndex) return picture.xml;
+      index += 1;
+    }
+  }
+  throw new Error(`picture not found: ${pictureId}`);
 }
 
 function firstCellParagraphXml(cellXml) {
@@ -1477,6 +2186,11 @@ export class HwpxApiSession {
     this.cellPatches = [];
     this.paragraphPatches = [];
     this.paragraphInsertPatches = [];
+    this.paragraphDeletePatches = [];
+    this.tableRowInsertPatches = [];
+    this.tableSizePatches = [];
+    this.cellSizePatches = [];
+    this.pictureClonePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -1498,7 +2212,9 @@ export class HwpxApiSession {
       sections.push({ section, paragraphCount, paragraphs });
     }
 
-    const tables = discoverTables(this.doc);
+    const nativeTables = discoverTables(this.doc);
+    const nestedTables = discoverNestedPackageTables(this.inputBytes);
+    const tables = [...nativeTables, ...nestedTables];
     const styleGraph = readStyleGraph(this.doc);
     const objectGraph = readPackageObjects(this.inputBytes);
     const editableTargets = buildEditableTargets(sections, tables);
@@ -1521,6 +2237,7 @@ export class HwpxApiSession {
         })),
       },
       objectGraph,
+      nestedTableCount: nestedTables.length,
       editableTargets,
       fields: tryJson(() => this.doc.getFieldList()) ?? [],
       warnings: tryJson(() => this.doc.getValidationWarnings()) ?? null,
@@ -1540,7 +2257,18 @@ export class HwpxApiSession {
   }
 
   objectInventory() {
-    return readPackageObjects(this.inputBytes);
+    const objects = readPackageObjects(this.inputBytes);
+    const nestedTables = discoverNestedPackageTables(this.inputBytes);
+    return {
+      ...objects,
+      nestedTables: nestedTables.map((table) => ({
+        id: table.id,
+        section: table.section,
+        paragraph: table.para,
+        depth: table.xmlDepth,
+        dims: table.dims,
+      })),
+    };
   }
 
   findTable(predicate) {
@@ -1634,6 +2362,13 @@ export class HwpxApiSession {
     const table = this.tableFromLocation(location);
     const cell = this.cellFromLocation(table, location);
     return firstCellParagraphXml(extractCellXmlFromPackage(this.inputBytes, table, cell.cellIndex));
+  }
+
+  paragraphTemplateXml(location) {
+    if (location?.tableId || location?.table || location?.cell || location?.tableCell) {
+      return this.cellTemplateParagraphXml(location);
+    }
+    return extractParagraphXmlFromPackage(this.inputBytes, location);
   }
 
   paragraphStyleIds(location) {
@@ -1740,6 +2475,8 @@ export class HwpxApiSession {
         },
         text,
         styleSource: command.styleSource ?? command.cloneStyleFrom ?? command.sourceLocation,
+        paragraphStyleIds: command.paragraphStyleIds,
+        paragraphTemplateIndices: command.paragraphTemplateIndices,
       }];
     }
 
@@ -1762,6 +2499,8 @@ export class HwpxApiSession {
         layout: cellCommand.layout ?? command.layout,
         fitOptions: cellCommand.fitOptions ?? command.fitOptions,
         styleSource: cellCommand.styleSource ?? cellCommand.cloneStyleFrom ?? command.styleSource ?? command.cloneStyleFrom,
+        paragraphStyleIds: cellCommand.paragraphStyleIds ?? command.paragraphStyleIds,
+        paragraphTemplateIndices: cellCommand.paragraphTemplateIndices ?? command.paragraphTemplateIndices,
       }));
     }
 
@@ -1797,6 +2536,50 @@ export class HwpxApiSession {
         target: { native: paragraph },
         text,
         styleSource: command.styleSource,
+      }];
+    }
+
+    if (key === 'textdeleteparagraphs') {
+      return [{
+        ...command,
+        opId,
+        op: 'deleteParagraphs',
+        locations: command.locations.map((item) => normalizeParagraphLocation(item)),
+      }];
+    }
+
+    if (key === 'tableinsertrows') {
+      return [{
+        ...command,
+        opId,
+        op: 'insertTableRows',
+        target: command.target ?? command.location,
+        rowIndex: Number(command.rowIndex),
+        count: Number(command.count),
+        templateRow: Number(command.templateRow),
+        clearText: command.clearText !== false,
+      }];
+    }
+
+    if (key === 'tablesetsize') {
+      return [{
+        ...command,
+        opId,
+        op: 'setTableSize',
+        target: command.target ?? command.location,
+        width: command.width === undefined ? undefined : Number(command.width),
+        height: command.height === undefined ? undefined : Number(command.height),
+      }];
+    }
+
+    if (key === 'tablesetcellsize') {
+      return [{
+        ...command,
+        opId,
+        op: 'setCellSize',
+        target: command.target ?? command.location,
+        width: command.width === undefined ? undefined : Number(command.width),
+        height: command.height === undefined ? undefined : Number(command.height),
       }];
     }
 
@@ -1863,6 +2646,17 @@ export class HwpxApiSession {
         op: 'image.generateAndReplace',
         imageName: command.imageName ?? command.target?.imageName ?? command.target?.name ?? location.imageName ?? location.name,
         generator: command.generator ?? command.image ?? command.chart ?? command.content ?? {},
+      }];
+    }
+
+    if (key === 'imageclonetocell') {
+      return [{
+        ...command,
+        opId,
+        op: 'image.cloneToCell',
+        target: command.target ?? command.location,
+        sourcePictureId: command.sourcePictureId,
+        targetParagraphIndex: Number(command.targetParagraphIndex ?? 0),
       }];
     }
 
@@ -1944,6 +2738,15 @@ export class HwpxApiSession {
 
   commandsBatch(ops) {
     validateHwpxCommands(ops);
+    const locationChangingOps = ops.filter((op) => [
+      'text.deleteParagraphs',
+      'table.insertRows',
+    ].includes(resolveHwpxCommand(op)?.op));
+    if (locationChangingOps.length > 0 && ops.length !== 1) {
+      const error = new Error('text.deleteParagraphs and table.insertRows must run alone because they invalidate paragraph and table-cell locations.');
+      error.code = 'HWPX_LOCATION_CHANGING_BATCH_UNSUPPORTED';
+      throw error;
+    }
     if (ops.some(op => resolveHwpxCommand(op)?.op === 'text.replaceTracked')) {
       if (ops.length !== 1) {
         const error = new Error(
@@ -1965,6 +2768,11 @@ export class HwpxApiSession {
       this.cellPatches = [];
       this.paragraphPatches = [];
       this.paragraphInsertPatches = [];
+      this.paragraphDeletePatches = [];
+      this.tableRowInsertPatches = [];
+      this.tableSizePatches = [];
+      this.cellSizePatches = [];
+      this.pictureClonePatches = [];
       this.packagePatches = [];
       this.shapePatches = [];
       this.textBoxPatches = [];
@@ -1984,6 +2792,11 @@ export class HwpxApiSession {
     this.cellPatches = [];
     this.paragraphPatches = [];
     this.paragraphInsertPatches = [];
+    this.paragraphDeletePatches = [];
+    this.tableRowInsertPatches = [];
+    this.tableSizePatches = [];
+    this.cellSizePatches = [];
+    this.pictureClonePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -2056,6 +2869,11 @@ export class HwpxApiSession {
     this.cellPatches = [];
     this.paragraphPatches = [];
     this.paragraphInsertPatches = [];
+    this.paragraphDeletePatches = [];
+    this.tableRowInsertPatches = [];
+    this.tableSizePatches = [];
+    this.cellSizePatches = [];
+    this.pictureClonePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -2080,17 +2898,21 @@ export class HwpxApiSession {
         const shouldFit = op.fit === true || op.layout?.fit === true || op.fitOptions;
         const fit = shouldFit ? this.fitText(op.target, op.text, op.fitOptions ?? op.layout ?? {}) : null;
         const text = fit?.text ?? op.text;
-        const templateParagraphXml = op.styleSource ? this.cellTemplateParagraphXml(op.styleSource) : null;
         const styleIds = this.resolveParagraphStyleIds(op);
-        setCellTextWithApi(this.doc, table, cell.cellIndex, text);
+        const paragraphStyleIds = op.paragraphStyleIds?.map((item) => (
+          item === null ? null : mergeStyleIds(styleIds, item)
+        ));
+        if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, text);
         this.cellPatches.push({
           section: table.section,
           para: table.para,
           tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
           cellIndex: cell.cellIndex,
           text,
-          templateParagraphXml,
           styleIds,
+          paragraphStyleIds,
+          paragraphTemplateIndices: op.paragraphTemplateIndices,
           opId: op.opId,
         });
         results.push({ opId: op.opId, ok: true, target: cell.id, action: 'table.writeCell', fit });
@@ -2107,8 +2929,123 @@ export class HwpxApiSession {
       } else if (op.op === 'insertParagraphAfter') {
         const { section, paragraph } = op.target.native;
         const styleIds = this.resolveParagraphStyleIds(op);
-        this.paragraphInsertPatches.push({ section, para: paragraph, text: op.text, styleIds, opId: op.opId });
+        const templateParagraphXml = op.styleSource ? this.paragraphTemplateXml(op.styleSource) : null;
+        this.paragraphInsertPatches.push({
+          section,
+          para: paragraph,
+          text: op.text,
+          templateParagraphXml,
+          styleIds,
+          opId: op.opId,
+        });
         results.push({ opId: op.opId, ok: true, target: `s${section}_p${paragraph}`, action: 'text.insertAfterParagraph' });
+      } else if (op.op === 'deleteParagraphs') {
+        const bySection = new Map();
+        for (const location of op.locations) {
+          const { section, paragraph } = location;
+          assert.ok(Number.isInteger(section) && section >= 0, 'text.deleteParagraphs requires a valid section');
+          assert.ok(Number.isInteger(paragraph) && paragraph >= 0 && paragraph < this.doc.getParagraphCount(section), `text.deleteParagraphs paragraph out of range: ${section}:${paragraph}`);
+          const paras = bySection.get(section) ?? [];
+          paras.push(paragraph);
+          bySection.set(section, paras);
+        }
+        for (const [section, paras] of bySection) {
+          assert.ok(this.doc.getParagraphCount(section) - paras.length >= 1, 'text.deleteParagraphs must leave at least one paragraph in each section');
+          this.paragraphDeletePatches.push({ section, paras, opId: op.opId });
+        }
+        results.push({ opId: op.opId, ok: true, action: 'text.deleteParagraphs', paragraphCount: op.locations.length });
+      } else if (op.op === 'insertTableRows') {
+        const table = this.tableFromLocation(op.target);
+        assert.ok(op.rowIndex >= 0 && op.rowIndex <= table.dims.rowCount, `table.insertRows rowIndex out of range: ${op.rowIndex}`);
+        assert.ok(op.templateRow >= 0 && op.templateRow < table.dims.rowCount, `table.insertRows templateRow out of range: ${op.templateRow}`);
+        this.tableRowInsertPatches.push({
+          section: table.section,
+          para: table.para,
+          tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
+          rowIndex: op.rowIndex,
+          count: op.count,
+          templateRow: op.templateRow,
+          clearText: op.clearText,
+          extendBoundarySpans: op.extendBoundarySpans,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'table.insertRows',
+          target: table.id,
+          rowIndex: op.rowIndex,
+          insertedRowCount: op.count,
+          resultingRowCount: table.dims.rowCount + op.count,
+        });
+      } else if (op.op === 'setTableSize') {
+        const table = this.tableFromLocation(op.target);
+        this.tableSizePatches.push({
+          section: table.section,
+          para: table.para,
+          tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
+          width: op.width,
+          height: op.height,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'table.setSize',
+          target: table.id,
+          width: op.width,
+          height: op.height,
+        });
+      } else if (op.op === 'setCellSize') {
+        const table = this.tableFromLocation(op.target);
+        const cell = this.cellFromLocation(table, op.target);
+        this.cellSizePatches.push({
+          section: table.section,
+          para: table.para,
+          tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
+          cellIndex: cell.cellIndex,
+          width: op.width,
+          height: op.height,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'table.setCellSize',
+          target: cell.id,
+          width: op.width,
+          height: op.height,
+        });
+      } else if (op.op === 'image.cloneToCell') {
+        const table = this.tableFromLocation(op.target);
+        const cell = this.cellFromLocation(table, op.target);
+        const sourcePictureXml = extractPictureXmlFromPackage(this.inputBytes, op.sourcePictureId);
+        this.pictureClonePatches.push({
+          section: table.section,
+          para: table.para,
+          tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
+          cellIndex: cell.cellIndex,
+          sourcePictureXml,
+          sourcePictureId: op.sourcePictureId,
+          targetParagraphIndex: op.targetParagraphIndex,
+          width: op.width,
+          height: op.height,
+          vertOffset: op.vertOffset,
+          horzOffset: op.horzOffset,
+          zOrder: op.zOrder,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'image.cloneToCell',
+          target: cell.id,
+          sourcePictureId: op.sourcePictureId,
+        });
       } else if (op.op === 'replaceText') {
         const { section, para } = op.target.native;
         const styleIds = this.paragraphStyleIds({
@@ -2141,16 +3078,15 @@ export class HwpxApiSession {
         const table = this.tableFromLocation(op.target);
         const cell = this.cellFromLocation(table, op.target);
         const target = this.inspectTarget(op.target);
-        const templateParagraphXml = this.cellTemplateParagraphXml(op.styleSource);
         const styleIds = this.resolveParagraphStyleIds(op);
-        setCellTextWithApi(this.doc, table, cell.cellIndex, target.currentText);
+        if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, target.currentText);
         this.cellPatches.push({
           section: table.section,
           para: table.para,
           tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
           cellIndex: cell.cellIndex,
           text: target.currentText,
-          templateParagraphXml,
           styleIds,
           opId: op.opId,
         });
@@ -2162,15 +3098,14 @@ export class HwpxApiSession {
         if (target.kind === 'cell') {
           const table = this.tableFromLocation(op.target);
           const cell = this.cellFromLocation(table, op.target);
-          const templateParagraphXml = op.styleSource ? this.cellTemplateParagraphXml(op.styleSource) : null;
-          setCellTextWithApi(this.doc, table, cell.cellIndex, nextText);
+          if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, nextText);
           this.cellPatches.push({
             section: table.section,
             para: table.para,
             tableOrderInParagraph: table.tableOrderInParagraph,
+            xmlTableId: table.packageOnly ? table.id : null,
             cellIndex: cell.cellIndex,
             text: nextText,
-            templateParagraphXml,
             styleIds,
             opId: op.opId,
           });
@@ -2190,11 +3125,12 @@ export class HwpxApiSession {
         const cell = this.cellFromLocation(table, op.target);
         const target = this.inspectTarget(op.target);
         const cellStyle = this.resolveCellStyle(op);
-        setCellTextWithApi(this.doc, table, cell.cellIndex, target.currentText);
+        if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, target.currentText);
         this.cellPatches.push({
           section: table.section,
           para: table.para,
           tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
           cellIndex: cell.cellIndex,
           text: target.currentText,
           cellStyle,
@@ -2321,7 +3257,9 @@ export class HwpxApiSession {
       assert.equal(this.trackedChangePatches.length, 1, 'tracked changes are committed sequentially');
       assert.equal(
         this.cellPatches.length + this.paragraphPatches.length
-          + this.paragraphInsertPatches.length + this.packagePatches.length
+          + this.paragraphInsertPatches.length + this.paragraphDeletePatches.length
+          + this.tableRowInsertPatches.length + this.tableSizePatches.length + this.cellSizePatches.length
+          + this.pictureClonePatches.length + this.packagePatches.length
           + this.shapePatches.length + this.textBoxPatches.length,
         0,
         'tracked changes cannot share an unsafe save stage with other patch types',
@@ -2337,7 +3275,11 @@ export class HwpxApiSession {
       };
     }
 
-    if (!this.cellPatches.length && !this.paragraphPatches.length && !this.paragraphInsertPatches.length && !this.packagePatches.length && !this.shapePatches.length && !this.textBoxPatches.length) {
+    if (!this.cellPatches.length && !this.paragraphPatches.length
+      && !this.paragraphInsertPatches.length && !this.paragraphDeletePatches.length
+      && !this.tableRowInsertPatches.length && !this.tableSizePatches.length && !this.cellSizePatches.length
+      && !this.pictureClonePatches.length && !this.packagePatches.length
+      && !this.shapePatches.length && !this.textBoxPatches.length) {
       return {
         bytes: Buffer.from(this.inputBytes),
         revision: this.revision,
@@ -2350,6 +3292,11 @@ export class HwpxApiSession {
       ...this.cellPatches.map((patch) => patch.section),
       ...this.paragraphPatches.map((patch) => patch.section),
       ...this.paragraphInsertPatches.map((patch) => patch.section),
+      ...this.paragraphDeletePatches.map((patch) => patch.section),
+      ...this.tableRowInsertPatches.map((patch) => patch.section),
+      ...this.tableSizePatches.map((patch) => patch.section),
+      ...this.cellSizePatches.map((patch) => patch.section),
+      ...this.pictureClonePatches.map((patch) => patch.section),
       ...this.shapePatches.map((patch) => patch.section),
       ...this.textBoxPatches.map((patch) => patch.section),
     ]);
@@ -2363,6 +3310,11 @@ export class HwpxApiSession {
         this.cellPatches,
         this.paragraphPatches,
         this.paragraphInsertPatches,
+        this.paragraphDeletePatches,
+        this.tableRowInsertPatches,
+        this.tableSizePatches,
+        this.cellSizePatches,
+        this.pictureClonePatches,
         this.shapePatches,
         this.textBoxPatches,
       );

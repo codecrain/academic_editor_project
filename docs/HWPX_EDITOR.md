@@ -20,7 +20,7 @@ Canonical entrypoints:
 
 ## Capability status
 
-The HWPX catalog exposes 32 canonical commands and every entry currently
+The HWPX catalog exposes 37 canonical commands and every entry currently
 reports `readiness=available`. `execution` still identifies the actual path
 used by an operation, such as the native RHWP path, structural adapter, or
 preserve-package adapter. It is evidence about implementation, not a readiness
@@ -34,10 +34,14 @@ text.replaceTracked
 insertText
 deleteRange
 appendParagraph
+text.deleteParagraphs
 table.writeCell
-table.writeCells
 table.writeRichCell
+table.writeCells
 table.applyCellStyle
+table.insertRows
+table.setSize
+table.setCellSize
 table.create
 table.insertCaption
 style.applyText
@@ -51,6 +55,7 @@ list.applyNumbering
 layout.fitText
 image.replace
 image.insertAfterParagraph
+image.cloneToCell
 image.generateAndReplace
 setDocumentMetadata
 defineStyle

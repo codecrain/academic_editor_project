@@ -1590,6 +1590,12 @@ function resolveHwpxCellTarget(command, context) {
     );
     cellIndex = firstSpecifiedInteger(native.cellIndex, cellIndex);
     cellParagraphIndex = firstSpecifiedInteger(
+      target.cellParagraphIndex,
+      target.cellParaIndex,
+      target.cellPara,
+      direct.cellParagraphIndex,
+      direct.cellParaIndex,
+      direct.cellPara,
       native.cellParagraphIndex,
       native.cellParaIndex,
       cellParagraphIndex,

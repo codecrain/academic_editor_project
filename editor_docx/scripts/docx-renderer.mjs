@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -126,19 +126,31 @@ function normalizeSelectedPages(pages) {
   return normalized;
 }
 
-function assertInsideDirectory(root, candidatePath) {
-  const resolvedRoot = path.resolve(root);
-  const resolved = path.isAbsolute(String(candidatePath || ''))
+async function assertInsideDirectory(root, candidatePath) {
+  const lexicalRoot = path.resolve(root);
+  const lexicalCandidate = path.isAbsolute(String(candidatePath || ''))
     ? path.resolve(String(candidatePath))
-    : path.resolve(resolvedRoot, String(candidatePath || ''));
-  if (resolved !== resolvedRoot && !resolved.startsWith(`${resolvedRoot}${path.sep}`)) {
+    : path.resolve(lexicalRoot, String(candidatePath || ''));
+  const resolvedRoot = await realpath(lexicalRoot);
+  let resolved;
+  try {
+    resolved = await realpath(lexicalCandidate);
+  } catch (error) {
+    const lexicalRelative = path.relative(lexicalRoot, lexicalCandidate);
+    if (lexicalRelative === '..' || lexicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(lexicalRelative)) {
+      throw new Error('DOCX renderer returned a file outside its isolated output directory.');
+    }
+    throw error;
+  }
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
     throw new Error('DOCX renderer returned a file outside its isolated output directory.');
   }
   return resolved;
 }
 
 async function readVerifiedOutput(root, descriptor, kind) {
-  const outputPath = assertInsideDirectory(root, descriptor?.path);
+  const outputPath = await assertInsideDirectory(root, descriptor?.path);
   const bytes = await readFile(outputPath);
   const actualSha256 = sha256(bytes);
   if (descriptor?.sha256 && String(descriptor.sha256).toLowerCase() !== actualSha256) {

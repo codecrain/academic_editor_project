@@ -12,6 +12,9 @@ superseded design notes are intentionally not published as documentation.
 - [HWPX_EDITOR.md](HWPX_EDITOR.md): HWPX engine capabilities, limits, and
   acceptance criteria.
 - [HWPX_MCP_API.md](HWPX_MCP_API.md): concise HWPX MCP workflow and examples.
+- [PDF_EDITOR.md](PDF_EDITOR.md): PDF engine scope, safe-edit limits, and
+  save/reopen/render acceptance criteria.
+- [PDF_MCP_API.md](PDF_MCP_API.md): concise PDF MCP workflow and examples.
 - [DOCX_IFRAME_INTEGRATION.md](DOCX_IFRAME_INTEGRATION.md): mixed-section page
   preservation, the implemented iframe bridge, and the proposed host/editor
   context-menu messaging contract.
@@ -22,10 +25,13 @@ superseded design notes are intentionally not published as documentation.
 
 ## Executable sources of truth
 
-- `editor_docx/scripts/docx-command-catalog.mjs`: 29 canonical DOCX commands.
-- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 32 canonical HWPX commands.
+- `editor_docx/scripts/docx-command-catalog.mjs`: 31 canonical DOCX commands, including stable reference controls.
+- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 37 canonical HWPX commands.
+- `editor_pdf/scripts/pdf-command-catalog.mjs`: 6 canonical PDF commands for
+  additive page-content edits.
 - `editor_common/editor-mcp-tool-factory.mjs`: shared MCP schema factory.
-- `editor_server/editor-mcp.mjs`: 16 DOCX and 16 HWPX public MCP tools.
+- `editor_server/editor-mcp.mjs`: 16 public MCP tools for each of DOCX, HWPX,
+  and PDF (48 total).
 - `editor_server/editor-gateway.mjs`: shared HTTP transport, WOPI, session, and
   artifact gateway.
 - `editor_common/document-api-core.mjs`: format-neutral revision and session
@@ -37,11 +43,12 @@ contract gates so such drift is treated as a test failure.
 
 ## Source and product boundary
 
-`editor_docx/` and `editor_hwpx/` are separate editor engines. They do not
-import each other's implementation. Engine code shares only the format-neutral
-modules under `editor_common/` and the server transport under `editor_server/`.
-Repository-wide orchestration belongs in `editor_common/scripts/`; it may start,
-stop, deploy, or verify both engines without becoming part of either engine.
+`editor_docx/`, `editor_hwpx/`, and `editor_pdf/` are separate editor engines.
+They do not import each other's implementation. Engine code shares only the
+format-neutral modules under `editor_common/` and the server transport under
+`editor_server/`. Repository-wide orchestration belongs in
+`editor_common/scripts/`; it may start, stop, deploy, or verify engines without
+becoming part of any engine.
 Compatibility entrypoints under each engine are thin re-exports; they do not
 duplicate gateway or MCP implementation.
 

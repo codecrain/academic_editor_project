@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Academic PDF Editor</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand" aria-label="Academic PDF Editor">
+      <span class="brand-mark">A</span>
+      <span class="brand-name">Academic PDF</span>
+    </div>
+    <div class="document-meta">
+      <span id="documentName">새 PDF</span>
+      <span id="saveState" class="save-state">파일을 열어 주세요</span>
+    </div>
+    <nav class="toolbar" aria-label="PDF 편집 도구">
+      <button id="openButton" class="tool-button primary" type="button" title="PDF 열기">
+        <span class="tool-icon">↥</span><span>열기</span>
+      </button>
+      <span class="divider"></span>
+      <button class="tool-button active" data-tool="select" type="button" title="선택">
+        <span class="tool-icon">↖</span><span>선택</span>
+      </button>
+      <button class="tool-button" data-tool="text" type="button" title="텍스트 추가">
+        <span class="tool-icon text-icon">T</span><span>텍스트</span>
+      </button>
+      <button class="tool-button" data-tool="highlight" type="button" title="형광펜 영역 추가">
+        <span class="tool-icon highlight-icon">▰</span><span>형광펜</span>
+      </button>
+      <button class="tool-button" data-tool="draw" type="button" title="자유롭게 그리기">
+        <span class="tool-icon">〰</span><span>그리기</span>
+      </button>
+      <button id="signatureButton" class="tool-button" type="button" title="손서명 추가">
+        <span class="tool-icon signature-icon">⌁</span><span>서명</span>
+      </button>
+      <button id="imageButton" class="tool-button" type="button" title="이미지 추가">
+        <span class="tool-icon">▧</span><span>이미지</span>
+      </button>
+      <span class="divider"></span>
+      <button id="undoButton" class="icon-button" type="button" title="실행 취소" disabled>↶</button>
+      <button id="rotateButton" class="icon-button" type="button" title="현재 페이지 시계 방향 회전" disabled>↻</button>
+    </nav>
+    <div class="header-actions">
+      <button id="saveButton" class="save-button" type="button" disabled>PDF 저장</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside id="pageSidebar" class="page-sidebar" aria-label="페이지 목록">
+      <div class="sidebar-title">페이지</div>
+      <div id="thumbnailList" class="thumbnail-list"></div>
+    </aside>
+
+    <section class="document-area">
+      <div id="emptyState" class="empty-state">
+        <div class="empty-icon">PDF</div>
+        <h1>PDF를 열어 편집하세요</h1>
+        <p>텍스트, 형광펜, 손그림, 서명과 이미지를 원본 페이지 위에 추가할 수 있습니다.</p>
+        <button id="emptyOpenButton" type="button">PDF 파일 선택</button>
+        <small>파일은 브라우저 안에서 처리되며 외부 서비스로 전송되지 않습니다.</small>
+      </div>
+      <div id="canvasScroller" class="canvas-scroller hidden">
+        <div id="pageShell" class="page-shell">
+          <canvas id="pdfCanvas" aria-label="PDF 페이지"></canvas>
+          <canvas id="overlayCanvas" aria-label="PDF 편집 레이어"></canvas>
+          <textarea id="textEditor" class="text-editor hidden" aria-label="추가할 텍스트" placeholder="텍스트 입력 후 Ctrl+Enter"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <aside class="properties-panel" aria-label="편집 속성">
+      <div class="property-section">
+        <h2>도구 속성</h2>
+        <label>색상 <input id="toolColor" type="color" value="#172033"></label>
+        <label>크기 <input id="toolSize" type="range" min="1" max="36" value="14"><output id="toolSizeValue">14</output></label>
+      </div>
+      <div class="property-section guidance">
+        <h2>현재 도구</h2>
+        <strong id="activeToolLabel">선택</strong>
+        <p id="activeToolHelp">페이지를 확인하거나 다른 편집 도구를 선택하세요.</p>
+      </div>
+      <div class="property-section safety-note">
+        <h2>편집 범위</h2>
+        <p>현재 버전은 원본 내용을 보존한 채 새 내용을 추가합니다. 기존 본문 객체 직접 교체는 아직 활성화하지 않았습니다.</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="status-bar">
+    <div class="page-controls">
+      <button id="previousPage" type="button" title="이전 페이지" disabled>‹</button>
+      <span><input id="pageNumber" type="number" min="1" value="1" disabled> / <span id="pageCount">0</span></span>
+      <button id="nextPage" type="button" title="다음 페이지" disabled>›</button>
+    </div>
+    <div id="statusMessage" role="status">준비</div>
+    <div class="zoom-controls">
+      <button id="zoomOut" type="button" disabled>−</button>
+      <span id="zoomValue">100%</span>
+      <button id="zoomIn" type="button" disabled>＋</button>
+    </div>
+  </footer>
+
+  <dialog id="signatureDialog" class="signature-dialog">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <div><h2>손서명 만들기</h2><p>마우스나 펜으로 서명한 뒤 페이지에서 놓을 위치를 클릭하세요.</p></div>
+        <button class="dialog-close" value="cancel" aria-label="닫기">×</button>
+      </div>
+      <canvas id="signatureCanvas" width="720" height="240"></canvas>
+      <div class="dialog-actions">
+        <button id="clearSignature" type="button">지우기</button>
+        <span></span>
+        <button value="cancel">취소</button>
+        <button id="useSignature" class="primary-action" type="button">서명 사용</button>
+      </div>
+    </form>
+  </dialog>
+
+  <input id="pdfFileInput" type="file" accept="application/pdf,.pdf" hidden>
+  <input id="imageFileInput" type="file" accept="image/png,image/jpeg" hidden>
+  <script src="./vendor/pdf-lib.min.js"></script>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

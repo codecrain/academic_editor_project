@@ -15,6 +15,7 @@ Thumbs.db
 .build/
 build/
 dist/
+.tmp/
 coverage/
 output/
 .qa/

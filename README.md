@@ -20,15 +20,17 @@ the open-source tree.
 - Public debranding patch files applied before compilation.
 - Runtime start/status/stop scripts for native pm2 and Docker fallback.
 - License and compliance documentation.
-- Unified DOCX/HWPX REST and MCP editing contracts.
+- Unified DOCX/HWPX/PDF REST and MCP editing contracts.
+- A browser PDF editor for safe additive page-content edits.
 - A versioned 100-case public-sector HWPX acceptance suite.
 
-DOCX and HWPX are separate editor engines. `editor_docx/` owns the
+DOCX, HWPX, and PDF are separate editor engines. `editor_docx/` owns the
 Collabora/WOPI implementation and `editor_hwpx/` owns RHWP Studio and HWPX
-package mutation. Engine code shares only the format-neutral modules in
+package mutation. `editor_pdf/` owns PDF.js rendering and PDF overlay editing.
+Engine code shares only the format-neutral modules in
 `editor_common/` and the HTTP/MCP/WOPI transport in `editor_server/`.
 Repository-wide start, stop, deployment, compliance, and development checks
-live under `editor_common/scripts/`; those tools orchestrate both engines but
+live under `editor_common/scripts/`; those tools orchestrate all engines but
 do not merge their implementations. Compatibility scripts under each engine
 are thin re-exports of the shared server, and no engine imports the other
 engine's implementation.
@@ -40,6 +42,9 @@ acceptance corpus is under
 DOCX mixed-page preservation, the current iframe bridge, and the proposed
 host-owned context-action contract are specified in
 [docs/DOCX_IFRAME_INTEGRATION.md](docs/DOCX_IFRAME_INTEGRATION.md).
+PDF limits and its MCP contract are documented in
+[docs/PDF_EDITOR.md](docs/PDF_EDITOR.md) and
+[docs/PDF_MCP_API.md](docs/PDF_MCP_API.md).
 
 The private service repository owns the WOPI host, authentication, storage,
 database, project/report UI, and deployment secrets.
@@ -73,29 +78,32 @@ npm run stop
 
 `npm run dev` starts the existing DOCX document editor runtime and the
 self-hosted HWP/HWPX Studio runtime from `editor_hwpx/`. `npm run stop` stops
-only those editor runtimes. Local dev defaults to these stable subpaths:
+only those editor runtimes. The gateway serves the separate PDF editor once
+its `editor_pdf/` dependencies are installed. Local dev defaults to these
+stable subpaths:
 
 - DOCX discovery: `http://127.0.0.1:9980/docx/hosting/discovery`
 - HWP/HWPX Studio: `http://127.0.0.1:11004/hwpx/`
+- PDF editor: `http://127.0.0.1:11000/pdf/`
 
 ## MCP Endpoint
 
 The editor gateway exposes a Streamable HTTP MCP endpoint at `/mcp`. Transport
 requests are stateless, while each opened document is an isolated,
 revision-bound server session that must be finalized or discarded.
-It implements `initialize`, `ping`, `tools/list`, and `tools/call` for both
-DOCX and HWPX open/read/target/inspect/apply/quality/render/PDF/finalize
+It implements `initialize`, `ping`, `tools/list`, and `tools/call` for DOCX,
+HWPX, and PDF open/read/target/inspect/apply/quality/render/finalize
 workflows.
 Finalization returns an opaque `artifactId`; an authenticated application
-server retrieves bytes with the matching `editor_docx_artifact_read` or
-`editor_hwpx_artifact_read`. The calling application owns any user-approval
+server retrieves bytes with the matching format-specific `*_artifact_read`
+tool. The calling application owns any user-approval
 policy. The agent and browser never receive a server-local artifact path.
 `artifact_read` does not delete bytes: the caller verifies the reported hash
 and saved package, then calls the matching `artifact_delete`. Opportunistic TTL
 pruning runs during artifact-producing operations using
 `EDITOR_MCP_ARTIFACT_TTL_MS` (24 hours by default).
 
-Agents must call the matching `editor_docx_discard` or `editor_hwpx_discard`
+Agents must call the matching format-specific `*_discard`
 with `documentId` and the current `baseRevision` when an edit is cancelled or cannot be
 finalized. Discard closes the isolated session and clears its MCP
 inspection/inventory/quality/lock state without creating an artifact; repeated
@@ -146,6 +154,7 @@ Full contract and acceptance checks:
 npm.cmd run test:runtime
 npm.cmd run test:docx-api
 npm.cmd run test:hwpx-api
+npm.cmd run test:pdf-api
 npm.cmd run test:hwpx-dataset
 npm.cmd run test:hwpx-evaluation
 ```

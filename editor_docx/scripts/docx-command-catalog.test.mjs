@@ -18,6 +18,8 @@ const EXECUTABLE_OPS = new Set([
   'text.replaceTracked',
   'text.insert',
   'text.delete',
+  'reference.insert',
+  'reference.remove',
   'paragraph.append',
   'paragraph.applyNamedStyle',
   'style.setRunStyle',
@@ -39,7 +41,7 @@ const EXECUTABLE_OPS = new Set([
 ]);
 
 test('DOCX command catalog is the complete unique public contract', () => {
-  assert.equal(DOCX_COMMAND_CATALOG.length, 29);
+  assert.equal(DOCX_COMMAND_CATALOG.length, 31);
   assert.equal(new Set(DOCX_COMMAND_OPS).size, DOCX_COMMAND_OPS.length);
   assert.deepEqual(getDocxCommandCatalog().commands, DOCX_COMMAND_CATALOG);
 
@@ -50,6 +52,27 @@ test('DOCX command catalog is the complete unique public contract', () => {
       assert.equal(resolveDocxCommand(alias), entry, `${alias} did not resolve to ${entry.op}`);
     }
   }
+});
+
+test('DOCX catalog validates reusable rich paragraph and table composition payloads', () => {
+  assert.doesNotThrow(() => validateDocxCommands([{
+    op: 'appendParagraph',
+    text: 'AB',
+    segments: [{ text: 'A', style: { bold: true } }, { text: 'B' }],
+  }]));
+  assert.doesNotThrow(() => validateDocxCommands([{
+    op: 'table.create',
+    rows: 1,
+    cols: 3,
+    columnWidths: [1000, 2000, 3000],
+    cells: [[{ cellStyle: { gridSpan: 2 }, text: 'AB' }, { text: 'C' }]],
+  }]));
+  assert.throws(() => validateDocxCommands([{
+    op: 'appendParagraph', text: 'AB', segments: [{ text: 'A' }],
+  }]), /concatenate exactly/);
+  assert.throws(() => validateDocxCommands([{
+    op: 'table.create', rows: 1, cols: 2, columnWidths: [1000],
+  }]), /one positive integer per logical column/);
 });
 
 test('every catalog command and alias normalizes through the production DOCX session', () => {

@@ -10,6 +10,7 @@ import {
   createZip,
   generatePngBytes,
   getDocumentXml,
+  getDocumentVisibleText,
   getZipText,
   readZip,
   resolveDocxTextTarget,
@@ -119,6 +120,21 @@ test('DOCX API preserve save returns original bytes when no commands run', () =>
   assert.equal(saved.validation.sourceFormat, 'docx');
 });
 
+test('DOCX API serializes empty authored paragraphs without corrupting following visible text', () => {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Start'] }));
+  session.apply([
+    { op: 'appendParagraph', text: '' },
+    { op: 'appendParagraph', text: 'After empty paragraph' },
+  ]);
+
+  const reopened = new DocxApiSession(session.save().bytes);
+  assert.deepEqual(
+    reopened.readJson().blocks.map((block) => block.text),
+    ['Start', '', 'After empty paragraph'],
+  );
+  assert.equal(getDocumentVisibleText(session.save().bytes), 'StartAfter empty paragraph');
+});
+
 test('DOCX API read/target/object APIs expose editable guidance', () => {
   const session = new DocxApiSession(createStyledDocx());
   const json = session.readJson();
@@ -134,6 +150,88 @@ test('DOCX API read/target/object APIs expose editable guidance', () => {
   assert.equal(session.objectInventory().images[0].name, 'word/media/image1.png');
   assert.equal(session.objectInventory().pictures[0].relationshipId, 'rIdImage1');
   assert.ok(session.qualityCheck().ok);
+});
+
+test('DOCX references keep a stable occurrence through insert, save, reopen, nearby edit, and exact removal', () => {
+  const occurrenceId = '01K123456789ABCDEFGHJKMNPQ';
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Evidence supports the claim.'] }));
+  session.apply([{
+    op: 'reference.insert',
+    target: { range: { start: { nodeId: 'p_0', offset: 27 } } },
+    occurrenceId,
+    displayText: '[1]',
+    tooltip: 'Lee (2026). Stable citations.',
+  }]);
+
+  const inserted = session.readJson();
+  assert.equal(inserted.references.length, 1);
+  assert.equal(inserted.references[0].occurrenceId, occurrenceId);
+  assert.equal(inserted.references[0].displayText, '[1]');
+  assert.equal(inserted.references[0].tooltip, 'Lee (2026). Stable citations.');
+  assert.equal(inserted.blocks[0].text, 'Evidence supports the claim[1].');
+
+  const reopened = new DocxApiSession(session.save().bytes);
+  assert.equal(reopened.readJson().references[0].tag, `tlooto-ref:${occurrenceId}`);
+  reopened.apply([{
+    op: 'text.insert',
+    target: { range: { start: { nodeId: 'p_0', offset: 0 } } },
+    text: 'Strong ',
+  }]);
+  assert.equal(reopened.readJson().blocks[0].text, 'Strong Evidence supports the claim[1].');
+  assert.equal(reopened.readJson().references[0].occurrenceId, occurrenceId);
+
+  const savedAgain = new DocxApiSession(reopened.save().bytes);
+  const removalBaseline = savedAgain.readJson();
+  savedAgain.apply([{ op: 'reference.remove', occurrenceId }]);
+  assert.equal(savedAgain.readJson().references.length, 0);
+  assert.equal(savedAgain.readJson().blocks[0].text, 'Strong Evidence supports the claim.');
+  const removalQuality = savedAgain.qualityCheck({ baselineJson: removalBaseline });
+  assert.equal(removalQuality.ok, true);
+  assert.equal(
+    removalQuality.issues.some((issue) => issue.code === 'structural-marker-loss'),
+    false,
+  );
+});
+
+test('DOCX reference insertion uses the end of a resolved non-collapsed text range', () => {
+  const sentence = 'Evidence supports the claim.';
+  const occurrenceId = '01K123456789ABCDEFGHJKMNPQ';
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: [sentence] }));
+
+  session.apply([{
+    op: 'reference.insert',
+    target: session.resolveText(sentence),
+    occurrenceId,
+    displayText: '[1]',
+    tooltip: 'Registered source',
+  }]);
+
+  assert.equal(session.readJson().blocks[0].text, `${sentence}[1]`);
+  assert.equal(session.readJson().references[0].occurrenceId, occurrenceId);
+});
+
+test('DOCX reference commands reject duplicate ids, overlapping edits, and whole-paragraph rebuilds', () => {
+  const occurrenceId = '01K123456789ABCDEFGHJKMNPQ';
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Claim here.'] }));
+  const insert = {
+    op: 'reference.insert',
+    target: { range: { start: { nodeId: 'p_0', offset: 5 } } },
+    occurrenceId,
+    displayText: '[7]',
+    tooltip: 'Registered source',
+  };
+  session.apply([insert]);
+  assert.throws(() => session.apply([insert]), /already exists/);
+  assert.throws(() => session.apply([{
+    op: 'text.delete',
+    target: { range: { start: { nodeId: 'p_0', offset: 5 }, end: { nodeId: 'p_0', offset: 8 } } },
+  }]), /overlaps a document reference/);
+  assert.throws(() => session.apply([{
+    op: 'text.replaceParagraph',
+    location: { paragraph: { number: 0 } },
+    text: 'Replacement',
+  }]), /cannot rebuild a paragraph containing document references/);
+  assert.equal(session.readJson().references[0].occurrenceId, occurrenceId);
 });
 
 test('DOCX API exposes every native section and preserves mixed page orientation', () => {
@@ -191,6 +289,76 @@ test('setPageSetup changes every native section only when section is explicitly 
   const reopened = new DocxApiSession(session.save().bytes);
   assert.deepEqual(reopened.readJson().sections.map((section) => section.pageSetup.width), [15840, 15840, 15840]);
   assert.deepEqual(reopened.readJson().sections.map((section) => section.pageSetup.orientation), ['landscape', 'landscape', 'landscape']);
+});
+
+test('DOCX composition primitives preserve rich runs, table geometry, page borders, and dynamic page fields', () => {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['blank'] }));
+  session.apply([
+    {
+      op: 'appendParagraph',
+      text: 'Bold and plain',
+      paragraphStyle: { align: 'center', pageBreakBefore: true, spacingAfter: 0 },
+      segments: [
+        { text: 'Bold', style: { bold: true, fontFamily: 'NanumBarunGothic', fontSize: 14 } },
+        { text: ' and plain', style: { fontFamily: 'NanumBarunGothic', fontSize: 10 } },
+      ],
+    },
+    {
+      op: 'table.create',
+      rows: 2,
+      cols: 3,
+      columnWidths: [1200, 2400, 3600],
+      rowStyles: [{ height: 420, heightRule: 'exact', isHeader: true }, { cantSplit: true }],
+      tableStyle: {
+        width: 7200,
+        widthType: 'dxa',
+        align: 'center',
+        layout: 'fixed',
+        borders: { all: { value: 'single', color: '222222', size: 6 } },
+        cellMargins: { top: 60, left: 80, bottom: 60, right: 80 },
+      },
+      cells: [
+        [
+          {
+            cellStyle: { gridSpan: 2, fill: 'E7E6E6', verticalAlign: 'center' },
+            paragraphs: [{ text: 'Merged header', segments: [{ text: 'Merged header', style: { bold: true } }] }],
+          },
+          { text: 'C' },
+        ],
+        [
+          { cellStyle: { vMerge: 'restart' }, text: 'A' },
+          { text: 'B' },
+          { text: 'C' },
+        ],
+      ],
+    },
+    {
+      op: 'setPageSetup',
+      width: 11906,
+      height: 16838,
+      margins: { top: 1440, right: 1440, bottom: 1440, left: 1440 },
+      pageBorders: { all: { value: 'single', color: '000000', size: 8, space: 24 }, offsetFrom: 'page' },
+    },
+    {
+      op: 'setHeaderFooter',
+      footer: {
+        paragraphStyle: { align: 'center' },
+        segments: [{ text: '– ' }, { field: 'PAGE' }, { text: ' –' }],
+      },
+    },
+  ]);
+
+  const documentXml = getDocumentXml(session.save().bytes);
+  assert.match(documentXml, /<w:pageBreakBefore\/>/);
+  assert.match(documentXml, /<w:gridCol w:w="1200"\/>/);
+  assert.match(documentXml, /<w:gridSpan w:val="2"\/>/);
+  assert.match(documentXml, /<w:trHeight w:val="420" w:hRule="exact"\/>/);
+  assert.match(documentXml, /<w:tblBorders>/);
+  assert.match(documentXml, /<w:tblCellMar>/);
+  assert.match(documentXml, /<w:pgBorders w:offsetFrom="page"/);
+  const footerXml = getZipText(session.save().bytes, 'word/footer1.xml');
+  assert.match(footerXml, /<w:instrText xml:space="preserve"> PAGE <\/w:instrText>/);
+  assert.match(footerXml, /– /);
 });
 
 test('DOCX API preserves real custom section page ratios during a content edit', () => {
@@ -285,6 +453,10 @@ test('DOCX quality check fails closed when a section page ratio changes unexpect
   assert.ok(report.issues.some((issue) => issue.code === 'section-layout-changed'));
   assert.equal(
     session.qualityCheck({ baselineJson: baseline, allowSectionLayoutChanges: true }).ok,
+    true,
+  );
+  assert.equal(
+    session.qualityCheck({ baselineJson: baseline, allowedSectionLayoutChanges: [1] }).ok,
     true,
   );
 });

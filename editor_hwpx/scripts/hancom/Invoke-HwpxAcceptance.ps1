@@ -3,6 +3,8 @@ param(
   [Parameter(Mandatory = $true)][string]$ResavedPath,
   [Parameter(Mandatory = $true)][string]$PdfPath,
   [Parameter(Mandatory = $true)][string]$EvidencePath,
+  [string]$PageImageDirectory = '',
+  [switch]$SkipPdf,
   [switch]$DryRun
 )
 
@@ -16,6 +18,7 @@ $resolvedEvidence = [IO.Path]::GetFullPath($EvidencePath)
 if ($DryRun) {
   $result = [ordered]@{
     status = 'dry-run'
+    mode = if ($SkipPdf) { 'open-resave' } else { 'open-resave-pdf' }
     opened = $false
     repairDialog = $false
     resaved = $false
@@ -23,6 +26,8 @@ if ($DryRun) {
     ownedPids = @()
     remainingOwnedPids = @()
     pageCount = 0
+    paginationStable = $false
+    pageImages = @()
     inputPath = [IO.Path]::GetFullPath($InputPath)
     resavedPath = [IO.Path]::GetFullPath($ResavedPath)
     pdfPath = [IO.Path]::GetFullPath($PdfPath)
@@ -32,7 +37,9 @@ else {
   $result = Invoke-HwpxOpenResavePdf `
     -InputPath $InputPath `
     -ResavedPath $ResavedPath `
-    -PdfPath $PdfPath
+    -PdfPath $PdfPath `
+    -PageImageDirectory $PageImageDirectory `
+    -SkipPdf:$SkipPdf
 }
 
 $json = $result | ConvertTo-Json -Depth 8

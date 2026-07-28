@@ -82,6 +82,33 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'insertText', target: { range: { start: { nodeId: 'p_1', offset: 5 } } }, text: 'inserted text' },
   }),
   command({
+    op: 'reference.insert', category: 'reference', precondition: 'target_inspect',
+    description: 'Insert a stable document-reference occurrence as a tagged DOCX content control with hover text. A collapsed range inserts at that point; a non-collapsed text range inserts after the range.',
+    required: ['target', 'occurrenceId', 'displayText'],
+    fields: {
+      target: targetField,
+      occurrenceId: 'Server-issued 26 character ULID. Never invent or reuse one at a second position.',
+      displayText: 'Visible citation marker such as [3].',
+      tooltip: 'Optional short citation preview shown by compatible DOCX editors on hover.',
+    },
+    example: {
+      op: 'reference.insert',
+      target: { range: { start: { nodeId: 'p_1', offset: 24 } } },
+      occurrenceId: '01K123456789ABCDEFGHJKMNPQ',
+      displayText: '[3]',
+      tooltip: 'Author (2026). Article title.',
+    },
+  }),
+  command({
+    op: 'reference.remove', category: 'reference',
+    description: 'Remove one tagged document-reference occurrence by its stable server-issued ULID.',
+    required: ['occurrenceId'],
+    fields: {
+      occurrenceId: 'Exact occurrence ULID returned by read-json references.',
+    },
+    example: { op: 'reference.remove', occurrenceId: '01K123456789ABCDEFGHJKMNPQ' },
+  }),
+  command({
     op: 'deleteRange', category: 'text', precondition: 'target_inspect',
     normalizeAs: 'text.delete',
     description: 'Delete an inspected DOCX text range.', required: ['target'], aliases: ['text.delete'],
@@ -96,6 +123,7 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
       text: 'New paragraph text.',
       paragraphStyle: 'Optional paragraph style object. To use a named style, pass { styleId: "StyleId" }; never pass the style ID as a bare string.',
       runStyle: 'Optional run style object.',
+      segments: 'Optional ordered rich-text runs. Each item contains text and an optional style/runStyle object; concatenated text must equal text.',
     },
     example: { op: 'appendParagraph', text: 'New concluding paragraph.', paragraphStyle: { styleId: 'BodyText' } },
   }),
@@ -128,8 +156,18 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
   }),
   command({
     op: 'table.create', category: 'table',
-    description: 'Append a new DOCX table.', required: ['rows', 'cols'], aliases: ['createTable'],
-    fields: { rows: 'Positive integer row count.', cols: 'Positive integer column count.', cellStyle: 'Optional default cell style.', paragraphStyle: 'Optional default paragraph style.', runStyle: 'Optional default run style.' },
+    description: 'Append a new DOCX table, optionally with complete reusable geometry, merge, row, cell, paragraph, and rich-run definitions.', required: ['rows', 'cols'], aliases: ['createTable'],
+    fields: {
+      rows: 'Positive physical row count.',
+      cols: 'Positive logical grid column count.',
+      columnWidths: 'Optional array of logical grid widths in twentieths of a point.',
+      rowStyles: 'Optional row style array with height, heightRule, cantSplit, and isHeader.',
+      cells: 'Optional physical cell matrix. Cells may contain cellStyle and a paragraphs array; paragraphs may contain rich segments.',
+      tableStyle: 'Optional structured table style with styleId, width, widthType, align, layout, and look.',
+      cellStyle: 'Optional default cell style, including width, fill, borders, gridSpan, and vMerge.',
+      paragraphStyle: 'Optional default paragraph style.',
+      runStyle: 'Optional default run style.',
+    },
     example: { op: 'table.create', rows: 2, cols: 3 },
   }),
   command({
@@ -225,6 +263,7 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
       widthEmu: 'Positive inline-image width in English Metric Units.',
       heightEmu: 'Positive inline-image height in English Metric Units.',
       altText: 'Optional accessible image description.',
+      align: 'Optional picture paragraph alignment: left, center, or right.',
       caption: 'Optional caption paragraph inserted immediately below the image.',
       captionParagraphStyle: 'Optional caption paragraph style object; use { styleId: "StyleId" } for a named style.',
       captionRunStyle: 'Optional caption run style object.',
@@ -260,13 +299,13 @@ const DOCX_COMMAND_CATALOG = Object.freeze([
   command({
     op: 'setPageSetup', category: 'package',
     description: 'Set one DOCX section page size, orientation, and margins without flattening other section layouts.', required: ['width', 'height'], anyOf: [['margins', 'marginTop']],
-    fields: { section: 'Zero-based native section index, or all. Defaults to section 0 for backward compatibility.', width: 'Page width in twentieths of a point.', height: 'Page height in twentieths of a point.', orientation: 'portrait or landscape.', margins: 'Object with top, right, bottom, left and optional header/footer/gutter.', marginTop: 'Legacy flat top margin; use with marginRight, marginBottom, and marginLeft.' },
+    fields: { section: 'Zero-based native section index, or all. Defaults to section 0 for backward compatibility.', width: 'Page width in twentieths of a point.', height: 'Page height in twentieths of a point.', orientation: 'portrait or landscape.', margins: 'Object with top, right, bottom, left and optional header/footer/gutter.', marginTop: 'Legacy flat top margin; use with marginRight, marginBottom, and marginLeft.', pageBorders: 'Optional reusable page-border definition. Use all for shared color, size, space, and value, then optionally override individual sides.' },
     example: { op: 'setPageSetup', section: 1, width: 16838, height: 11906, orientation: 'landscape', margins: { top: 1440, right: 1440, bottom: 1440, left: 1440 } },
   }),
   command({
     op: 'setHeaderFooter', category: 'package',
-    description: 'Set or replace the default DOCX header, footer, or both.', anyOf: [['header', 'footer', 'text']],
-    fields: { header: 'Header text.', footer: 'Footer text.', text: 'Legacy alias for header.', align: 'left, center, or right.' },
+    description: 'Set or replace the default DOCX header, footer, or both, including structured PAGE and NUMPAGES fields.', anyOf: [['header', 'footer', 'text']],
+    fields: { header: 'Header text or a structured object with segments.', footer: 'Footer text or a structured object with text/field segments.', text: 'Legacy alias for header.', align: 'left, center, or right.', runStyle: 'Optional default header/footer run style.' },
     example: { op: 'setHeaderFooter', header: 'Double-anonymized submission', footer: 'Page footer' },
   }),
   command({
@@ -346,9 +385,13 @@ function requiredFieldIsValid(entry, commandValue, field) {
 }
 
 function alternativeFieldIsValid(entry, commandValue, field) {
-  if ((entry.op === 'setDocumentMetadata' || entry.op === 'setHeaderFooter')
-    && Object.hasOwn(commandValue, field)) {
+  if (entry.op === 'setDocumentMetadata' && Object.hasOwn(commandValue, field)) {
     return typeof commandValue[field] === 'string';
+  }
+  if (entry.op === 'setHeaderFooter' && Object.hasOwn(commandValue, field)) {
+    const value = commandValue[field];
+    return typeof value === 'string'
+      || (value && typeof value === 'object' && !Array.isArray(value) && hasMeaningfulValue(value));
   }
   return hasMeaningfulValue(commandValue[field]);
 }
@@ -527,6 +570,25 @@ function validateDocxCommands(commands) {
     if (entry.op === 'table.create') {
       if (!Number.isInteger(value.rows) || value.rows <= 0 || !Number.isInteger(value.cols) || value.cols <= 0) {
         throw new Error('table.create rows and cols must be positive integers.');
+      }
+      if (value.columnWidths !== undefined && (!Array.isArray(value.columnWidths)
+        || value.columnWidths.length !== value.cols
+        || value.columnWidths.some((width) => !Number.isInteger(width) || width <= 0))) {
+        throw new Error('table.create columnWidths must contain one positive integer per logical column.');
+      }
+      if (value.cells !== undefined && (!Array.isArray(value.cells) || value.cells.length !== value.rows
+        || value.cells.some((row) => !Array.isArray(row) || row.length === 0))) {
+        throw new Error('table.create cells must contain one nonempty physical-cell array per row.');
+      }
+    }
+    if (entry.op === 'appendParagraph' && value.segments !== undefined) {
+      if (!Array.isArray(value.segments) || value.segments.length === 0
+        || value.segments.some((segment) => !segment || typeof segment !== 'object'
+          || Array.isArray(segment) || typeof segment.text !== 'string')) {
+        throw new Error('appendParagraph segments must be a nonempty array of text/style objects.');
+      }
+      if (value.segments.map((segment) => segment.text).join('') !== value.text) {
+        throw new Error('appendParagraph segment text must concatenate exactly to text.');
       }
     }
     if (entry.op === 'image.insertAfterParagraph') {

@@ -145,10 +145,32 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'text.deleteParagraphs',
+    category: 'text',
+    description: 'Delete one or more inspected top-level body paragraphs, including any tables or controls anchored in those paragraphs.',
+    required: ['locations'],
+    precondition: 'target_inspect',
+    fields: {
+      locations: 'Nonempty array of exact paragraph locations returned by target_map or target_inspect.',
+    },
+    example: {
+      op: 'text.deleteParagraphs',
+      locations: [
+        { paragraph: { section: 0, number: 3 } },
+        { paragraph: { section: 0, number: 4 } },
+      ],
+    },
+    notes: [
+      'This is a package-preserving structural deletion and may intentionally remove tables or other controls anchored in the selected paragraphs.',
+      'Run it alone in a batch because all later paragraph and table locations change after deletion.',
+    ],
+  }),
+  command({
     op: 'table.writeCell',
     category: 'table',
     description: 'Replace one inspected table cell, optionally fitting text and cloning paragraph style IDs.',
     required: ['location', 'text'],
+    optional: ['fit', 'fitOptions', 'styleSource', 'paragraphStyleIds', 'paragraphTemplateIndices'],
     aliases: ['setCellText'],
     precondition: 'target_inspect',
     fields: {
@@ -157,6 +179,8 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       fit: 'Boolean: fit text before writing.',
       fitOptions: 'Optional fit limits.',
       styleSource: styleSourceField,
+      paragraphStyleIds: 'Optional array aligned to newline-delimited cell paragraphs. Each entry may override paraPrIDRef, styleIDRef, or charPrIDRef for that paragraph.',
+      paragraphTemplateIndices: 'Optional array aligned to newline-delimited cell paragraphs. Each entry may reuse one zero-based paragraph from the original cell; exact text preserves all inline controls, while an equal number of leading tab characters preserves and rewrites structural tab controls.',
     },
     example: { op: 'table.writeCell', location: { tableId: 'tbl_0', cell: { number: 1 } }, text: '18,420' },
   }),
@@ -165,8 +189,15 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Replace one inspected table cell and clone paragraph/character style IDs from another inspected location.',
     required: ['location', 'styleSource', 'text'],
+    optional: ['paragraphStyleIds', 'paragraphTemplateIndices'],
     precondition: 'target_inspect',
-    fields: { location: locationField, styleSource: styleSourceField, text: 'Complete cell text.' },
+    fields: {
+      location: locationField,
+      styleSource: styleSourceField,
+      text: 'Complete cell text.',
+      paragraphStyleIds: 'Optional array aligned to newline-delimited cell paragraphs for mixed paragraph styles inside one cell.',
+      paragraphTemplateIndices: 'Optional source paragraph indices for preserving structured tabs and inline controls.',
+    },
     example: {
       op: 'table.writeRichCell',
       location: { tableId: 'tbl_0', cell: { number: 1 } },
@@ -179,12 +210,15 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Write multiple inspected table cells in one atomic batch.',
     required: ['cells'],
+    optional: ['tableId', 'fit', 'fitOptions', 'paragraphStyleIds', 'paragraphTemplateIndices'],
     precondition: 'target_inspect',
     fields: {
       tableId: 'Default table ID for cells that omit tableId.',
       cells: 'Nonempty array containing cell/location, text, and optional styleSource/fit options.',
       fit: 'Default fit flag.',
       fitOptions: 'Default fit limits.',
+      paragraphStyleIds: 'Optional per-cell array aligned to that cell text paragraphs.',
+      paragraphTemplateIndices: 'Optional per-cell array of original paragraph indices aligned to the replacement text.',
     },
     example: {
       op: 'table.writeCells',
@@ -213,6 +247,70 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       op: 'table.applyCellStyle',
       target: { tableId: 'tbl_0', cell: { number: 1 } },
       styleSource: { tableId: 'tbl_0', cell: { number: 0 } },
+    },
+  }),
+  command({
+    op: 'table.insertRows',
+    category: 'table',
+    description: 'Insert cloned rows into an inspected HWPX table while preserving column spans, cell styles, and crossing row merges.',
+    required: ['target', 'rowIndex', 'count', 'templateRow'],
+    optional: ['clearText', 'extendBoundarySpans'],
+    precondition: 'target_inspect',
+    fields: {
+      target: 'Exact inspected cell location identifying the table to change.',
+      rowIndex: 'Zero-based row index before which new rows are inserted; rowCount appends.',
+      count: 'Number of rows to insert, from 1 through 20.',
+      templateRow: 'Existing zero-based row whose cell geometry and styles are cloned.',
+      clearText: 'Whether cloned cell text is cleared; defaults to true.',
+      extendBoundarySpans: 'When true, a multi-row merged cell ending exactly at rowIndex is extended across the inserted rows.',
+    },
+    example: {
+      op: 'table.insertRows',
+      target: { tableId: 'tbl_0', cell: { number: 0 } },
+      rowIndex: 3,
+      count: 2,
+      templateRow: 2,
+      clearText: true,
+      extendBoundarySpans: true,
+    },
+    notes: [
+      'Run it alone in a batch, then inspect the table again at the returned revision before writing the new cells.',
+    ],
+  }),
+  command({
+    op: 'table.setSize',
+    category: 'table',
+    description: 'Set the declared width and/or height of an inspected HWPX table without reconstructing the package.',
+    required: ['target'],
+    anyOf: [['width', 'height']],
+    precondition: 'target_inspect',
+    fields: {
+      target: 'Exact inspected cell location identifying the table to resize.',
+      width: 'Optional positive table width in HWP units.',
+      height: 'Optional positive table height in HWP units.',
+    },
+    example: {
+      op: 'table.setSize',
+      target: { tableId: 'tbl_0', cell: { number: 0 } },
+      height: 70902,
+    },
+  }),
+  command({
+    op: 'table.setCellSize',
+    category: 'table',
+    description: 'Set the width and/or height of one inspected HWPX table cell without changing its content or style.',
+    required: ['target'],
+    anyOf: [['width', 'height']],
+    precondition: 'target_inspect',
+    fields: {
+      target: 'Exact inspected table-cell location to resize.',
+      width: 'Optional positive cell width in HWP units.',
+      height: 'Optional positive cell height in HWP units.',
+    },
+    example: {
+      op: 'table.setCellSize',
+      target: { tableId: 'tbl_0', cell: { number: 4 } },
+      height: 15932,
     },
   }),
   command({
@@ -444,6 +542,32 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'image.cloneToCell',
+    category: 'image',
+    description: 'Clone an existing picture control discovered by object_inventory into a paragraph of an inspected table cell.',
+    required: ['target', 'sourcePictureId'],
+    optional: ['targetParagraphIndex', 'width', 'height', 'vertOffset', 'horzOffset', 'zOrder'],
+    precondition: 'target_inspect',
+    fields: {
+      target: 'Exact inspected destination table-cell location.',
+      sourcePictureId: 'Stable picture ID returned by object_inventory, such as pic_0.',
+      targetParagraphIndex: 'Zero-based paragraph inside the destination cell; defaults to 0.',
+      width: 'Optional positive picture width in HWP units.',
+      height: 'Optional positive picture height in HWP units.',
+      vertOffset: 'Optional nonnegative vertical offset in HWP units.',
+      horzOffset: 'Optional nonnegative horizontal offset in HWP units.',
+      zOrder: 'Optional nonnegative z-order.',
+    },
+    example: {
+      op: 'image.cloneToCell',
+      target: { tableId: 'tbl_1', cell: { number: 2 } },
+      sourcePictureId: 'pic_0',
+      targetParagraphIndex: 7,
+      vertOffset: 1035,
+      horzOffset: 32860,
+    },
+  }),
+  command({
     op: 'image.generateAndReplace',
     category: 'image',
     description: 'Generate a deterministic PNG chart-like image from numeric values and replace an existing PNG package entry.',
@@ -640,7 +764,11 @@ const SINGLE_TARGET_INSPECTION_OPS = new Set([
   'setRunStyle',
   'setParagraphStyle',
   'image.insertAfterParagraph',
+  'image.cloneToCell',
   'insertFootnote',
+  'table.insertRows',
+  'table.setSize',
+  'table.setCellSize',
 ]);
 
 function nonNegativeInteger(value) {
@@ -723,6 +851,10 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
   } else if (entry.op === 'style.clone') {
     add(commandValue.target, 'target');
     add(commandValue.source, 'source');
+  } else if (entry.op === 'text.deleteParagraphs') {
+    for (const [index, location] of commandValue.locations.entries()) {
+      add(location, `locations[${index}]`);
+    }
   }
   return targets;
 }
@@ -733,6 +865,35 @@ function requiredInspectionTargets(commands, entries = null) {
     const entry = resolved[index];
     return entry?.precondition === 'target_inspect' ? commandInspectionTargets(value, entry, index) : [];
   });
+}
+
+function validateParagraphStyleIds(value, paragraphCount, label) {
+  if (!Array.isArray(value) || value.length !== paragraphCount) {
+    throw new Error(`${label} paragraphStyleIds must contain exactly one entry per newline-delimited paragraph.`);
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null) continue;
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${label} paragraphStyleIds[${index}] must be an object or null.`);
+    }
+    const declared = [
+      entry.paraPrIDRef ?? entry.paraPrId ?? entry.paraShapeId ?? entry.paragraphStyleId,
+      entry.styleIDRef ?? entry.styleId ?? entry.namedStyleId,
+      entry.charPrIDRef ?? entry.charPrId ?? entry.charShapeId ?? entry.textStyleId,
+    ].filter((item) => item !== undefined);
+    if (!declared.length || declared.some((item) => !Number.isInteger(Number(item)) || Number(item) < 0)) {
+      throw new Error(`${label} paragraphStyleIds[${index}] must contain nonnegative integer style IDs.`);
+    }
+  }
+}
+
+function validateParagraphTemplateIndices(value, paragraphCount, label) {
+  if (!Array.isArray(value) || value.length !== paragraphCount) {
+    throw new Error(`${label} paragraphTemplateIndices must contain exactly one entry per newline-delimited paragraph.`);
+  }
+  if (value.some((entry) => entry !== null && (!Number.isInteger(Number(entry)) || Number(entry) < 0))) {
+    throw new Error(`${label} paragraphTemplateIndices entries must be nonnegative integers or null.`);
+  }
 }
 
 function validateHwpxCommands(commands) {
@@ -782,6 +943,83 @@ function validateHwpxCommands(commands) {
           throw new Error(`table.writeCells cells[${cellIndex}] requires a text string; an empty string explicitly clears the cell.`);
         }
       });
+    }
+    if (entry.op === 'text.deleteParagraphs') {
+      if (!Array.isArray(value.locations) || value.locations.length === 0 || value.locations.length > 500) {
+        throw new Error('text.deleteParagraphs locations must contain 1 through 500 paragraph locations.');
+      }
+      const keys = value.locations.map((location) => stableHwpxTargetKey(location));
+      if (keys.some((key) => !key.startsWith('paragraph:'))) {
+        throw new Error('text.deleteParagraphs locations must identify top-level paragraphs.');
+      }
+      if (new Set(keys).size !== keys.length) {
+        throw new Error('text.deleteParagraphs locations must be unique.');
+      }
+    }
+    if (['table.writeCell', 'table.writeRichCell'].includes(entry.op) && value.paragraphStyleIds !== undefined) {
+      validateParagraphStyleIds(value.paragraphStyleIds, String(value.text ?? '').split('\n').length, entry.op);
+    }
+    if (['table.writeCell', 'table.writeRichCell'].includes(entry.op) && value.paragraphTemplateIndices !== undefined) {
+      validateParagraphTemplateIndices(value.paragraphTemplateIndices, String(value.text ?? '').split('\n').length, entry.op);
+    }
+    if (entry.op === 'table.writeCells') {
+      for (const [cellIndex, cell] of value.cells.entries()) {
+        const paragraphStyleIds = cell.paragraphStyleIds ?? value.paragraphStyleIds;
+        if (paragraphStyleIds !== undefined) {
+          validateParagraphStyleIds(
+            paragraphStyleIds,
+            String(cell.text ?? '').split('\n').length,
+            `table.writeCells cells[${cellIndex}]`,
+          );
+        }
+        const paragraphTemplateIndices = cell.paragraphTemplateIndices ?? value.paragraphTemplateIndices;
+        if (paragraphTemplateIndices !== undefined) {
+          validateParagraphTemplateIndices(
+            paragraphTemplateIndices,
+            String(cell.text ?? '').split('\n').length,
+            `table.writeCells cells[${cellIndex}]`,
+          );
+        }
+      }
+    }
+    if (entry.op === 'table.insertRows') {
+      for (const field of ['rowIndex', 'templateRow']) {
+        if (nonNegativeInteger(value[field]) === null) {
+          throw new Error(`table.insertRows ${field} must be a nonnegative integer.`);
+        }
+      }
+      const count = nonNegativeInteger(value.count);
+      if (count === null || count < 1 || count > 20) {
+        throw new Error('table.insertRows count must be an integer from 1 through 20.');
+      }
+      if (value.clearText !== undefined && typeof value.clearText !== 'boolean') {
+        throw new Error('table.insertRows clearText must be a boolean.');
+      }
+      if (value.extendBoundarySpans !== undefined && typeof value.extendBoundarySpans !== 'boolean') {
+        throw new Error('table.insertRows extendBoundarySpans must be a boolean.');
+      }
+    }
+    if (entry.op === 'table.setSize' || entry.op === 'table.setCellSize') {
+      for (const field of ['width', 'height']) {
+        if (value[field] !== undefined && (!Number.isInteger(Number(value[field])) || Number(value[field]) <= 0)) {
+          throw new Error(`${entry.op} ${field} must be a positive integer.`);
+        }
+      }
+    }
+    if (entry.op === 'image.cloneToCell') {
+      if (!/^pic_\d+$/.test(String(value.sourcePictureId ?? ''))) {
+        throw new Error('image.cloneToCell sourcePictureId must be a picture ID returned by object_inventory.');
+      }
+      for (const field of ['targetParagraphIndex', 'vertOffset', 'horzOffset', 'zOrder']) {
+        if (value[field] !== undefined && nonNegativeInteger(value[field]) === null) {
+          throw new Error(`image.cloneToCell ${field} must be a nonnegative integer.`);
+        }
+      }
+      for (const field of ['width', 'height']) {
+        if (value[field] !== undefined && (!Number.isInteger(Number(value[field])) || Number(value[field]) <= 0)) {
+          throw new Error(`image.cloneToCell ${field} must be a positive integer.`);
+        }
+      }
     }
     if (entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering') {
       if (!Array.isArray(value.items) || value.items.length === 0

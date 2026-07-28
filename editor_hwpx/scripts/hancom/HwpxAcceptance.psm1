@@ -72,11 +72,61 @@ function Test-FilePrefix {
   }
 }
 
+function Get-HwpPageCountValue {
+  param([Parameter(Mandatory = $true)]$HwpObject)
+  try {
+    $pageCount = [int]$HwpObject.PageCount
+    if ($pageCount -gt 0) { return $pageCount }
+  }
+  catch {}
+  try {
+    $summaryAction = $HwpObject.CreateAction('DocSummaryInfo')
+    $summarySet = $summaryAction.CreateSet()
+    [void]$summaryAction.GetDefault($summarySet)
+    [void]$summaryAction.Execute($summarySet)
+    return [int]$summarySet.Item('Pages')
+  }
+  catch {
+    return 0
+  }
+}
+
+function Wait-HwpStablePageCount {
+  param(
+    [Parameter(Mandatory = $true)]$HwpObject,
+    [int]$TimeoutSeconds = 10,
+    [int]$RequiredStableReads = 3
+  )
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  $lastPageCount = 0
+  $stableReads = 0
+  while ([DateTime]::UtcNow -lt $deadline) {
+    $candidate = Get-HwpPageCountValue -HwpObject $HwpObject
+    if ($candidate -gt 0 -and $candidate -eq $lastPageCount) {
+      $stableReads += 1
+    }
+    elseif ($candidate -gt 0) {
+      $lastPageCount = $candidate
+      $stableReads = 1
+    }
+    else {
+      $stableReads = 0
+    }
+    if ($stableReads -ge $RequiredStableReads) {
+      return [ordered]@{ pageCount = $lastPageCount; stable = $true }
+    }
+    Start-Sleep -Milliseconds 250
+  }
+  return [ordered]@{ pageCount = $lastPageCount; stable = $false }
+}
+
 function Invoke-HwpxOpenResavePdf {
   param(
     [Parameter(Mandatory = $true)][string]$InputPath,
     [Parameter(Mandatory = $true)][string]$ResavedPath,
-    [Parameter(Mandatory = $true)][string]$PdfPath
+    [Parameter(Mandatory = $true)][string]$PdfPath,
+    [string]$PageImageDirectory = '',
+    [switch]$SkipPdf
   )
 
   $resolvedInput = (Resolve-Path -LiteralPath $InputPath -ErrorAction Stop).Path
@@ -90,7 +140,9 @@ function Invoke-HwpxOpenResavePdf {
   }
 
   [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resolvedResaved)) | Out-Null
-  [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resolvedPdf)) | Out-Null
+  if (-not $SkipPdf) {
+    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($resolvedPdf)) | Out-Null
+  }
 
   $beforePids = @(Get-HwpProcessIds)
   $ownedPids = @()
@@ -99,6 +151,8 @@ function Invoke-HwpxOpenResavePdf {
   $resaved = $false
   $pdfExported = $false
   $pageCount = 0
+  $paginationStable = $false
+  $pageImages = @()
   $registeredSecurityModule = $false
   $securityModuleName = ''
   $failureMessage = ''
@@ -126,10 +180,31 @@ function Invoke-HwpxOpenResavePdf {
     $opened = [bool]$hwp.Open($resolvedInput, '', '')
     if (-not $opened) { throw 'Hancom Open returned False.' }
     try {
-      $pageCount = [int]$hwp.PageCount
+      [void]$hwp.HAction.Run('MoveDocEnd')
+      [void]$hwp.HAction.Run('MoveDocBegin')
     }
-    catch {
-      $pageCount = 0
+    catch {}
+    $pagination = Wait-HwpStablePageCount -HwpObject $hwp
+    $pageCount = [int]$pagination.pageCount
+    $paginationStable = [bool]$pagination.stable
+    if (-not $paginationStable) { throw 'Hancom pagination did not stabilize before SaveAs.' }
+
+    if (-not [string]::IsNullOrWhiteSpace($PageImageDirectory)) {
+      $resolvedPageImageDirectory = [IO.Path]::GetFullPath($PageImageDirectory)
+      [IO.Directory]::CreateDirectory($resolvedPageImageDirectory) | Out-Null
+      for ($pageIndex = 0; $pageIndex -lt $pageCount; $pageIndex += 1) {
+        $pageImagePath = Join-Path $resolvedPageImageDirectory ('page-{0:D3}.bmp' -f ($pageIndex + 1))
+        $created = [bool]$hwp.CreatePageImage($pageImagePath, $pageIndex, 96, 24, 'bmp')
+        if (-not $created -or -not (Test-Path -LiteralPath $pageImagePath)) {
+          throw "Hancom CreatePageImage failed for page $($pageIndex + 1)."
+        }
+        $pageImages += [ordered]@{
+          page = $pageIndex + 1
+          path = $pageImagePath
+          byteLength = (Get-Item -LiteralPath $pageImagePath).Length
+          sha256 = Get-FileSha256 -LiteralPath $pageImagePath
+        }
+      }
     }
 
     $resaved = [bool]$hwp.SaveAs($resolvedResaved, 'HWPX', '')
@@ -141,20 +216,22 @@ function Invoke-HwpxOpenResavePdf {
       throw 'Hancom resaved output does not have HWPX ZIP magic.'
     }
 
-    $pdfParameterSet = $hwp.HParameterSet.HFileOpenSave
-    $null = $hwp.HAction.GetDefault('FileSaveAs_S', $pdfParameterSet.HSet)
-    $pdfParameterSet.filename = $resolvedPdf
-    $pdfParameterSet.Format = 'PDF'
-    $pdfParameterSet.Attributes = 0
-    $pdfExported = [bool]$hwp.HAction.Execute('FileSaveAs_S', $pdfParameterSet.HSet)
-    if (-not $pdfExported) {
-      $pdfExported = [bool]$hwp.SaveAs($resolvedPdf, 'PDF', '')
-    }
-    if (-not $pdfExported -or -not (Test-Path -LiteralPath $resolvedPdf)) {
-      throw 'Hancom PDF export did not create an output file.'
-    }
-    if (-not (Test-FilePrefix -LiteralPath $resolvedPdf -Prefix ([Text.Encoding]::ASCII.GetBytes('%PDF-')))) {
-      throw 'Hancom PDF output has an invalid signature.'
+    if (-not $SkipPdf) {
+      $pdfParameterSet = $hwp.HParameterSet.HFileOpenSave
+      $null = $hwp.HAction.GetDefault('FileSaveAs_S', $pdfParameterSet.HSet)
+      $pdfParameterSet.filename = $resolvedPdf
+      $pdfParameterSet.Format = 'PDF'
+      $pdfParameterSet.Attributes = 0
+      $pdfExported = [bool]$hwp.HAction.Execute('FileSaveAs_S', $pdfParameterSet.HSet)
+      if (-not $pdfExported) {
+        $pdfExported = [bool]$hwp.SaveAs($resolvedPdf, 'PDF', '')
+      }
+      if (-not $pdfExported -or -not (Test-Path -LiteralPath $resolvedPdf)) {
+        throw 'Hancom PDF export did not create an output file.'
+      }
+      if (-not (Test-FilePrefix -LiteralPath $resolvedPdf -Prefix ([Text.Encoding]::ASCII.GetBytes('%PDF-')))) {
+        throw 'Hancom PDF output has an invalid signature.'
+      }
     }
   }
   catch {
@@ -178,13 +255,14 @@ function Invoke-HwpxOpenResavePdf {
   $remainingOwnedPids = @(
     Get-HwpProcessIds | Where-Object { $ownedPids -contains $_ }
   )
-  $passed = $opened -and $resaved -and $pdfExported -and
+  $passed = $opened -and $resaved -and ($SkipPdf -or $pdfExported) -and
     (Test-Path -LiteralPath $resolvedResaved) -and
-    (Test-Path -LiteralPath $resolvedPdf) -and
+    ($SkipPdf -or (Test-Path -LiteralPath $resolvedPdf)) -and
     $remainingOwnedPids.Count -eq 0
 
   return [ordered]@{
     status = if ($passed) { 'passed' } else { 'failed' }
+    mode = if ($SkipPdf) { 'open-resave' } else { 'open-resave-pdf' }
     opened = $opened
     repairDialog = $false
     resaved = $resaved
@@ -194,6 +272,8 @@ function Invoke-HwpxOpenResavePdf {
     ownedPids = @($ownedPids)
     remainingOwnedPids = @($remainingOwnedPids)
     pageCount = $pageCount
+    paginationStable = $paginationStable
+    pageImages = @($pageImages)
     inputPath = $resolvedInput
     resavedPath = $resolvedResaved
     pdfPath = $resolvedPdf

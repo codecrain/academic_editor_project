@@ -12,10 +12,12 @@ import { fileURLToPath } from 'node:url';
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
+import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 
 const formatAdapters = new Map([
   [docxAdapter.format, docxAdapter],
   [hwpxAdapter.format, hwpxAdapter],
+  [pdfAdapter.format, pdfAdapter],
 ]);
 const EditorDocumentStore = docxAdapter.documentStoreClass;
 const DEFAULT_EDITOR_TOKEN_TTL_MS = docxAdapter.defaultDocumentTokenTtlMs;
@@ -41,6 +43,7 @@ const STATIC_MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
   ['.js', 'text/javascript; charset=utf-8'],
+  ['.mjs', 'text/javascript; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.map', 'application/json; charset=utf-8'],
   ['.png', 'image/png'],
@@ -160,6 +163,11 @@ function shouldPrefixDocxServiceRoot(pathname, docxServiceRoot) {
 function isHwpxPath(pathname, hwpxBasePath) {
   const base = hwpxBasePath.replace(/\/$/, '');
   return pathname === base || pathname.startsWith(`${base}/`);
+}
+
+function isPdfPath(pathname, pdfBasePath) {
+  const normalizedBasePath = normalizeBasePath(pdfBasePath || '/pdf/');
+  return pathname === normalizedBasePath.slice(0, -1) || pathname.startsWith(normalizedBasePath);
 }
 
 function resolveStaticPath(staticRoot, basePath, pathname) {
@@ -570,7 +578,7 @@ function sendStaticFile(req, res, filePath) {
 }
 
 function isEditorApiPath(pathname) {
-  return /^\/v1\/(?:docx|hwpx)\//.test(pathname);
+  return /^\/v1\/(?:docx|hwpx|pdf)\//.test(pathname);
 }
 
 async function readJsonBody(req) {
@@ -975,6 +983,7 @@ function projectDocumentSummary(json) {
     paragraphCount: (json.sections ?? []).reduce((sum, section) => sum + (section.paragraphs?.length ?? 0), 0),
     blockCount: json.blocks?.length ?? 0,
     tableCount: tables.length,
+    referenceCount: json.references?.length ?? 0,
     cellCount: tables.reduce((sum, table) => sum + (table.cells?.length ?? 0), 0),
     styleCount: json.styleGraph?.count ?? json.styleGraph?.styles?.length ?? 0,
     objectCounts: {
@@ -1032,8 +1041,8 @@ function paginateMcpItems({ items, offset, limit, envelope, nextCursor }) {
 
 function normalizeReadQuery(args = {}) {
   const view = String(args.view ?? 'summary');
-  if (!['summary', 'blocks', 'tables'].includes(view)) {
-    throw new Error('view must be summary, blocks, or tables.');
+  if (!['summary', 'blocks', 'tables', 'references'].includes(view)) {
+    throw new Error('view must be summary, blocks, tables, or references.');
   }
   return {
     view,
@@ -1063,7 +1072,17 @@ function boundedDocxReadPage(state, documentId, session, args = {}) {
     ? [projectDocumentSummary(json)]
     : query.view === 'blocks'
       ? (json.blocks ?? []).map((block) => projectBlock(block, query.textPreviewChars))
-      : (json.tables ?? []).map((table) => projectTable(table, query.textPreviewChars, query.cellPreviewLimit));
+      : query.view === 'tables'
+        ? (json.tables ?? []).map((table) => projectTable(table, query.textPreviewChars, query.cellPreviewLimit))
+        : (json.references ?? []).map((reference) => ({
+          occurrenceId: reference.occurrenceId,
+          tag: reference.tag,
+          displayText: reference.displayText,
+          tooltip: reference.tooltip,
+          paragraphId: reference.paragraphId,
+          native: reference.native,
+          order: reference.order,
+        }));
   const effectiveLimit = query.view === 'summary' ? 1 : query.limit;
   const makeCursor = (nextOffset) => encodeMcpCursor(state, {
     documentId,
@@ -1264,6 +1283,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     filename: body.filename || `document.${fmt}`,
     sourceBytes: Buffer.from(bytes),
     baselineJson: json,
+    intentionalSectionLayoutChanges: new Set(),
     session,
     createdAt: now,
     lastAccessedAt: now,
@@ -1411,7 +1431,12 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       return true;
     }
     assertMutationPreconditions(record, 'apply', body, commands);
-    const result = session.apply(commands);
+    const result = await session.apply(commands);
+    for (const command of commands) {
+      if (String(command?.op ?? '').replace(/[^a-z0-9]/gi, '').toLowerCase() === 'setpagesetup') {
+        record.intentionalSectionLayoutChanges.add(command.section === 'all' ? 'all' : Number(command.section ?? 0));
+      }
+    }
     clearRecordPreconditions(record);
     sendJson(res, 200, { ...result, warnings: [] });
     return true;
@@ -1420,7 +1445,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     || actionPath === 'documents/save-checkpoint') {
     const checkpoint = actionPath === 'documents/save-checkpoint';
     assertMutationPreconditions(record, checkpoint ? 'save-checkpoint' : 'save-source', body);
-    const saved = session.save();
+    const saved = await session.save();
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : bytesRefForSavedDocument(config, body.filename || record.filename);
     mkdirSync(path.dirname(outputPath), { recursive: true });
     await writeFile(outputPath, saved.bytes);
@@ -1438,7 +1463,10 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   }
   if (actionPath === 'quality/check' || actionPath === 'health/check') {
     const { baseRevision } = assertMutationPreconditions(record, 'quality-check', body);
-    const quality = session.qualityCheck({ baselineJson: record.baselineJson });
+    const quality = await session.qualityCheck({
+      baselineJson: record.baselineJson,
+      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
+    });
     recordPreconditions(record).qualityRevision = qualityAllowsFinalization(quality, fmt)
       ? baseRevision
       : null;
@@ -1458,7 +1486,14 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 200, { page: pages[0], pages, renderer: 'rhwp-svg' });
       return true;
     }
-    const rendered = await renderDocxBytes(config, session.save().bytes, [pageNumber]);
+    if (fmt === 'pdf') {
+      const saved = await session.save();
+      const rendered = await (config.pdfRenderer || pdfAdapter.renderPages)(saved.bytes, { pages: [pageNumber] });
+      const response = publicRenderedPages(rendered, session.revision);
+      sendJson(res, 200, { ...response, page: response.pages[0] });
+      return true;
+    }
+    const rendered = await renderDocxBytes(config, (await session.save()).bytes, [pageNumber]);
     const response = publicRenderedPages(rendered, session.revision);
     sendJson(res, 200, { ...response, page: response.pages[0] });
     return true;
@@ -1473,16 +1508,40 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 200, { pages: renderHwpxSvgPages(session, hwpxPages), renderer: 'rhwp-svg' });
       return true;
     }
-    const rendered = await renderDocxBytes(config, session.save().bytes, pages);
+    if (fmt === 'pdf') {
+      const saved = await session.save();
+      const rendered = await (config.pdfRenderer || pdfAdapter.renderPages)(saved.bytes, { pages });
+      sendJson(res, 200, publicRenderedPages(rendered, session.revision));
+      return true;
+    }
+    const rendered = await renderDocxBytes(config, (await session.save()).bytes, pages);
     sendJson(res, 200, publicRenderedPages(rendered, session.revision));
     return true;
   }
   if (actionPath === 'quality/render-compare') {
-    const quality = session.qualityCheck({ baselineJson: record.baselineJson });
+    const quality = await session.qualityCheck({
+      baselineJson: record.baselineJson,
+      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
+    });
     if (fmt === 'docx') {
       const pages = renderPageSelection(body, 'first');
       const baselineRendered = await renderDocxBytes(config, record.sourceBytes, pages);
-      const currentRendered = await renderDocxBytes(config, session.save().bytes, pages);
+      const currentRendered = await renderDocxBytes(config, (await session.save()).bytes, pages);
+      sendJson(res, 200, {
+        ok: quality.ok,
+        revision: session.revision,
+        quality,
+        baseline: publicRenderedPages(baselineRendered, 1),
+        current: publicRenderedPages(currentRendered, session.revision),
+        visualComparisonRequired: true,
+      });
+      return true;
+    }
+    if (fmt === 'pdf') {
+      const pages = renderPageSelection(body, 'first');
+      const baselineRendered = await (config.pdfRenderer || pdfAdapter.renderPages)(record.sourceBytes, { pages });
+      const currentSaved = await session.save();
+      const currentRendered = await (config.pdfRenderer || pdfAdapter.renderPages)(currentSaved.bytes, { pages });
       sendJson(res, 200, {
         ok: quality.ok,
         revision: session.revision,
@@ -1516,7 +1575,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   }
   if (actionPath === 'documents/export-pdf' || actionPath === 'export' && body.type === 'pdf') {
     assertMutationPreconditions(record, 'export-pdf', body);
-    const sourceBytes = session.save().bytes;
+    const sourceBytes = (await session.save()).bytes;
     const rendered = fmt === 'hwpx'
       ? await (config.hwpxPdfRenderer || hwpxAdapter.renderPages)(sourceBytes, {
         pages: 'all',
@@ -1524,7 +1583,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         timeoutMs: config.hwpxPdfTimeoutMs,
         tempRoot: config.hwpxPdfTempRoot,
       })
-      : await renderDocxBytes(config, sourceBytes, 'none');
+      : fmt === 'pdf'
+        ? await (config.pdfRenderer || pdfAdapter.renderPages)(sourceBytes, { pages: 'none' })
+        : await renderDocxBytes(config, sourceBytes, 'none');
     const pdf = fmt === 'hwpx' ? rendered : rendered.pdf;
     const filename = path.basename(String(body.filename || record.filename || `edited.${fmt}`)).replace(/\.(?:docx|hwpx|pdf)$/i, '') || 'edited';
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : '';
@@ -1551,20 +1612,20 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
 }
 
 async function handleEditorApi(req, res, config, state, pathname) {
-  const openMatch = pathname.match(/^\/v1\/(docx|hwpx)\/(?:documents\/open|sessions)$/);
+  const openMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/(?:documents\/open|sessions)$/);
   if (openMatch) {
     return handleEditorApiOpen(req, res, config, state, openMatch[1]);
   }
-  const collectionMatch = pathname.match(/^\/v1\/(docx|hwpx)\/(?:documents|sessions)$/);
+  const collectionMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/(?:documents|sessions)$/);
   if (collectionMatch) {
     sendJson(res, 405, { ok: false, message: 'Method not allowed. Use POST to open a document.' }, { Allow: 'POST' });
     return true;
   }
-  const documentMatch = pathname.match(/^\/v1\/(docx|hwpx)\/documents\/([^/]+)\/(.+)$/);
+  const documentMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/documents\/([^/]+)\/(.+)$/);
   if (documentMatch) {
     return handleEditorApiAction(req, res, config, state, documentMatch[1], documentMatch[2], documentMatch[3]);
   }
-  const sessionMatch = pathname.match(/^\/v1\/(docx|hwpx)\/sessions\/([^/]+)\/(.+)$/);
+  const sessionMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/sessions\/([^/]+)\/(.+)$/);
   if (sessionMatch) {
     return handleEditorApiAction(req, res, config, state, sessionMatch[1], sessionMatch[2], sessionMatch[3]);
   }
@@ -1598,6 +1659,50 @@ function handleHwpxStaticRequest(req, res, config, pathname) {
     }
   }
 
+  sendStaticFile(req, res, filePath);
+  return true;
+}
+
+const PDF_VENDOR_FILES = Object.freeze(new Map([
+  ['pdf.mjs', ['pdfjs-dist', 'legacy', 'build', 'pdf.mjs']],
+  ['pdf.worker.mjs', ['pdfjs-dist', 'legacy', 'build', 'pdf.worker.mjs']],
+  ['pdf-lib.min.js', ['pdf-lib', 'dist', 'pdf-lib.min.js']],
+]));
+
+function handlePdfStaticRequest(req, res, config, pathname) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendText(res, 405, 'Method not allowed');
+    return true;
+  }
+  const basePath = normalizeBasePath(config.pdfBasePath || '/pdf/');
+  const relative = pathname === basePath.slice(0, -1)
+    ? ''
+    : decodeURIComponent(pathname.slice(basePath.length));
+  if (relative.startsWith('vendor/')) {
+    const vendorFile = PDF_VENDOR_FILES.get(relative.slice('vendor/'.length));
+    if (!vendorFile) {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+    const filePath = path.join(config.pdfVendorRoot, ...vendorFile);
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      sendText(res, 502, 'PDF editor dependencies are not installed. Run npm install in editor_pdf.');
+      return true;
+    }
+    sendStaticFile(req, res, filePath);
+    return true;
+  }
+  let filePath = resolveStaticPath(config.pdfStaticRoot, basePath, pathname);
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    const hasExtension = Boolean(path.extname(pathname));
+    const fallbackPath = path.join(config.pdfStaticRoot, 'index.html');
+    if (!hasExtension && existsSync(fallbackPath) && statSync(fallbackPath).isFile()) {
+      filePath = fallbackPath;
+    } else {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+  }
   sendStaticFile(req, res, filePath);
   return true;
 }
@@ -2236,14 +2341,15 @@ function qualityAllowsFinalization(quality, fmt) {
   if (quality?.ok !== true || quality?.stable === false || !Array.isArray(quality?.issues)) {
     return false;
   }
-  if (fmt === 'hwpx') {
+  if (fmt === 'hwpx' || fmt === 'pdf') {
     return quality.issues.every((issue) => issue?.severity !== 'error');
   }
   return quality.issues.every((issue) => issue?.severity === 'info');
 }
 
 async function executeEditorMcpTool(req, config, state, name, args = {}) {
-  const fmt = name.startsWith('editor_hwpx_') ? 'hwpx' : 'docx';
+  const fmt = name.match(/^editor_(docx|hwpx|pdf)_/)?.[1];
+  if (!fmt) throw new Error(`Unknown editor MCP tool prefix: ${name}`);
   const toolPrefix = `editor_${fmt}`;
   const adapter = formatAdapters.get(fmt);
   if (!adapter) throw new Error(`unsupported format: ${fmt}`);
@@ -2460,6 +2566,9 @@ function createGatewayServer(config) {
     mcpPath: '/mcp',
     internalBearerToken: '',
     mcpAllowBytesRef: false,
+    pdfBasePath: '/pdf/',
+    pdfStaticRoot: path.join(repoRoot, 'editor_pdf', 'public'),
+    pdfVendorRoot: path.join(repoRoot, 'editor_pdf', 'node_modules'),
     ...config,
   };
   config.documentLocks ??= new Map();
@@ -2569,6 +2678,10 @@ function createGatewayServer(config) {
         return;
       }
 
+      if (isPdfPath(pathname, config.pdfBasePath) && handlePdfStaticRequest(req, res, config, pathname)) {
+        return;
+      }
+
       const targetOrigin = resolveTargetOrigin(req, config);
       if (targetOrigin) {
         proxyHttpRequest(req, res, targetOrigin, resolveProxyHeaderOptions(req, targetOrigin, config));
@@ -2607,6 +2720,7 @@ function buildConfigFromEnv() {
   const port = parsePositiveInteger(readEnv('EDITOR_GATEWAY_PORT', '11004'), 11004);
   const docxServiceRoot = normalizeServiceRoot(readEnv('EDITOR_SERVICE_ROOT', '/docx'));
   const hwpxBasePath = normalizeBasePath(readEnv('RHWP_STUDIO_BASE_PATH', '/hwpx/'));
+  const pdfBasePath = normalizeBasePath(readEnv('EDITOR_PDF_BASE_PATH', '/pdf/'));
   const publicOrigin = normalizeOrigin(readEnv(
     'ACADEMIC_EDITOR_API_ORIGIN',
     readEnv('EDITOR_GATEWAY_PUBLIC_ORIGIN', `http://${host}:${port}`),
@@ -2639,12 +2753,19 @@ function buildConfigFromEnv() {
     publicOrigin,
     docxServiceRoot,
     hwpxBasePath,
+    pdfBasePath,
     docxRuntimeOrigin: normalizeOrigin(
       readEnv('EDITOR_GATEWAY_DOCX_ORIGIN', `http://127.0.0.1:${readEnv('EDITOR_HOST_PORT', '9980')}`),
     ),
     hwpxRuntimeOrigin: normalizeOptionalOrigin(readEnv('EDITOR_GATEWAY_HWPX_ORIGIN', '')),
     hwpxStaticRoot: path.resolve(
       readEnv('EDITOR_GATEWAY_HWPX_STATIC_ROOT', path.join(repoRoot, 'editor_hwpx', 'rhwp-studio', 'dist')),
+    ),
+    pdfStaticRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_PDF_STATIC_ROOT', path.join(repoRoot, 'editor_pdf', 'public')),
+    ),
+    pdfVendorRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_PDF_VENDOR_ROOT', path.join(repoRoot, 'editor_pdf', 'node_modules')),
     ),
     wopiBaseUrl,
     sampleDocxPath: path.resolve(readEnv('EDITOR_GATEWAY_SAMPLE_DOCX', DEFAULT_GATEWAY_DOCX)),
@@ -2731,6 +2852,7 @@ export {
   isDocxRootPath,
   isDocxRuntimePath,
   isHwpxPath,
+  isPdfPath,
   normalizeBasePath,
   normalizeServiceRoot,
   main,

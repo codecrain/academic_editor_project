@@ -8,10 +8,13 @@ const {
   HwpxApiSession,
   initHwpxRuntime,
   readZip,
+  replaceLeadingTabTemplateTextXml,
 } = hwpxApiUtils;
 
 const ESG_FIXTURE_PATH = 'editor_hwpx/samples/api-fixtures/esg-original.hwpx';
 const PUBLIC_BRIEFING_FIXTURE_PATH = 'evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-briefing.hwpx';
+
+const NESTED_TABLE_FIXTURE_PATH = 'editor_hwpx/samples/2025년 기부·답례품 실적 지자체 보고서_양식.hwpx';
 
 test('HWPX API preserve save returns original bytes when no commands run', async () => {
   await initHwpxRuntime();
@@ -20,6 +23,20 @@ test('HWPX API preserve save returns original bytes when no commands run', async
   const saved = session.save();
   assert.equal(Buffer.compare(input, saved.bytes), 0);
   assert.equal(saved.validation.pageCount, 2);
+});
+
+test('HWPX Node runtime text measurement honors the WASM font-text callback signature', async () => {
+  await initHwpxRuntime();
+  assert.equal(globalThis.measureTextWidth('1000px serif', '가A '), 1900);
+});
+
+test('HWPX paragraph template replacement preserves matching leading tab controls', () => {
+  const paragraph = '<hp:p paraPrIDRef="22" styleIDRef="17"><hp:run charPrIDRef="23"><hp:t><hp:tab width="4000" leader="0" type="1"/><hp:tab width="4000" leader="0" type="1"/> 책임자 : (인)</hp:t></hp:run><hp:linesegarray><hp:lineseg textpos="0" vertpos="100" vertsize="1000" spacing="600"/></hp:linesegarray></hp:p>';
+  const replaced = replaceLeadingTabTemplateTextXml(paragraph, '\t\t 연구책임자 : 신해용 (인)');
+  assert.ok(replaced);
+  assert.equal((replaced.match(/<hp:tab\b/g) ?? []).length, 2);
+  assert.match(replaced, /<hp:t><hp:tab[\s\S]* 연구책임자 : 신해용 \(인\)<\/hp:t>/);
+  assert.equal(replaceLeadingTabTemplateTextXml(paragraph, '\t 연구책임자 : 신해용 (인)'), null);
 });
 
 test('HWPX API reports encrypted public-sector packages with an actionable error code', async () => {
@@ -52,6 +69,56 @@ test('HWPX API keeps legacy setCellText compatibility for existing callers', asy
   const reopenedTable = reopened.tables.find((item) => item.id === table.id);
   assert.equal(reopenedTable.cells.find((cell) => cell.cellIndex === 1).text, 'ESG-TEST-001');
   assert.equal(saved.validation.pageCount, 2);
+});
+
+test('HWPX API writes mixed paragraph style IDs inside one table cell and reopens', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(ESG_FIXTURE_PATH));
+  const json = session.readJson();
+  const table = json.tables.find((item) => item.cells.length >= 2);
+  const target = table.cells[0];
+  const source = table.cells.find((cell) => (
+    cell.style?.paragraph?.paraShapeId !== target.style?.paragraph?.paraShapeId
+  )) ?? table.cells[1];
+  const firstStyle = session.paragraphStyleIds(target.location);
+  const secondStyle = session.paragraphStyleIds(source.location);
+
+  session.apply([{
+    op: 'table.writeCell',
+    location: target.location,
+    text: '혼합첫째\n혼합둘째',
+    paragraphStyleIds: [firstStyle, secondStyle],
+  }]);
+  const saved = session.save();
+  const sectionXml = readZip(saved.bytes).get('Contents/section0.xml').toString('utf8');
+  const paragraphTagBefore = (text) => {
+    const textOffset = sectionXml.indexOf(`<hp:t>${text}</hp:t>`);
+    assert.notEqual(textOffset, -1);
+    const paragraphOffset = sectionXml.lastIndexOf('<hp:p ', textOffset);
+    return sectionXml.slice(paragraphOffset, sectionXml.indexOf('>', paragraphOffset) + 1);
+  };
+  assert.match(paragraphTagBefore('혼합첫째'), new RegExp(`paraPrIDRef="${firstStyle.paraPrIDRef}"`));
+  assert.match(paragraphTagBefore('혼합둘째'), new RegExp(`paraPrIDRef="${secondStyle.paraPrIDRef}"`));
+  assert.doesNotThrow(() => new HwpxApiSession(saved.bytes));
+});
+
+test('HWPX API reuses matching original cell paragraph templates without flattening them', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(ESG_FIXTURE_PATH));
+  const table = session.readJson().tables.find((item) => item.id === 'tbl_1');
+  const target = table.cells.find((cell) => cell.paragraphs.length === 2 && cell.text.includes('\n'));
+  assert.ok(target);
+  session.apply([{
+    op: 'table.writeCell',
+    location: target.location,
+    text: target.text,
+    paragraphTemplateIndices: [0, 1],
+  }]);
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes).readJson();
+  const reopenedCell = reopened.tables.find((item) => item.id === table.id).cells[target.cellIndex];
+  assert.equal(reopenedCell.text, target.text);
+  assert.equal(reopenedCell.paragraphs.length, 2);
 });
 
 test('HWPX API read/target/layout APIs expose editable cell guidance', async () => {
@@ -92,6 +159,173 @@ test('HWPX API read/target/layout APIs expose editable cell guidance', async () 
   );
   assert.equal(wrapOnly.truncated, false);
   assert.ok(wrapOnly.lineCount > 1);
+});
+
+test('HWPX API text.deleteParagraphs removes inspected body blocks without reconstructing the package', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const before = session.readJson();
+  const tableParagraphs = new Set(before.tables.map((table) => table.para));
+  const candidates = before.sections[0].paragraphs
+    .filter((paragraph) => !tableParagraphs.has(paragraph.para))
+    .filter((paragraph) => paragraph.para > 0)
+    .slice(-2);
+  assert.equal(candidates.length, 2);
+
+  const applied = session.apply([{
+    commandId: 'delete-unused-paragraphs',
+    op: 'text.deleteParagraphs',
+    locations: candidates.map((paragraph) => paragraph.location ?? {
+      paragraph: { section: paragraph.section, number: paragraph.para },
+    }),
+  }]);
+  assert.equal(applied.results[0].paragraphCount, 2);
+
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes).readJson();
+  assert.equal(reopened.sections[0].paragraphCount, before.sections[0].paragraphCount - 2);
+  assert.equal(reopened.tables.length, before.tables.length);
+  assert.equal(reopened.objectGraph.images.length, before.objectGraph.images.length);
+  assert.notEqual(Buffer.compare(input, saved.bytes), 0);
+});
+
+test('HWPX API table.insertRows clones row geometry, clears new text, and reopens with stable table structure', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(ESG_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const before = session.readJson();
+  const table = before.tables.find((item) => item.dims.rowCount >= 3);
+  assert.ok(table);
+  const templateRow = table.dims.rowCount - 1;
+  const templateCells = table.cells.filter((cell) => cell.row === templateRow);
+  assert.ok(templateCells.length > 0);
+
+  const applied = session.apply([{
+    commandId: 'insert-review-rows',
+    op: 'table.insertRows',
+    target: table.cells[0].location,
+    rowIndex: table.dims.rowCount,
+    count: 2,
+    templateRow,
+  }]);
+  assert.equal(applied.results[0].resultingRowCount, table.dims.rowCount + 2);
+
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes).readJson();
+  const reopenedTable = reopened.tables.find((item) => item.id === table.id);
+  assert.equal(reopenedTable.dims.rowCount, table.dims.rowCount + 2);
+  assert.equal(reopenedTable.cells.length, table.cells.length + templateCells.length * 2);
+  for (const row of [table.dims.rowCount, table.dims.rowCount + 1]) {
+    const insertedCells = reopenedTable.cells.filter((cell) => cell.row === row);
+    assert.equal(insertedCells.length, templateCells.length);
+    assert.ok(insertedCells.every((cell) => cell.text === ''));
+  }
+  assert.equal(reopened.objectGraph.images.length, before.objectGraph.images.length);
+});
+
+test('HWPX API table.insertRows can extend merged cells ending at the insertion boundary', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH));
+  const table = session.readJson().tables.find((item) => (
+    item.dims.rowCount === 2 && item.cells.some((cell) => cell.row === 0 && cell.rowSpan === 2)
+  ));
+  assert.ok(table);
+  const spanningCell = table.cells.find((cell) => cell.row === 0 && cell.rowSpan === 2);
+  session.apply([{
+    op: 'table.insertRows',
+    target: table.cells[0].location,
+    rowIndex: 2,
+    count: 1,
+    templateRow: 1,
+    extendBoundarySpans: true,
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes).readJson();
+  const reopenedTable = reopened.tables.find((item) => item.id === table.id);
+  assert.equal(reopenedTable.dims.rowCount, 3);
+  assert.equal(
+    reopenedTable.cells.find((cell) => cell.cellIndex === spanningCell.cellIndex).rowSpan,
+    3,
+  );
+});
+
+test('HWPX API table.setSize updates package table geometry and reopens', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(ESG_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const table = session.readJson().tables[0];
+  session.apply([{
+    op: 'table.setSize',
+    target: table.cells[0].location,
+    height: 54321,
+  }]);
+  const saved = session.save();
+  const sectionXml = readZip(saved.bytes).get('Contents/section0.xml').toString('utf8');
+  assert.match(sectionXml, /<hp:tbl\b[\s\S]*?<hp:sz\b[^>]*height="54321"/);
+  assert.doesNotThrow(() => new HwpxApiSession(saved.bytes));
+});
+
+test('HWPX API table.setCellSize updates only inspected cell geometry and reopens', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(ESG_FIXTURE_PATH));
+  const table = session.readJson().tables[0];
+  const target = table.cells[1];
+  const originalText = target.text;
+  session.apply([{
+    op: 'table.setCellSize',
+    target: target.location,
+    width: 12345,
+    height: 6789,
+  }]);
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes).readJson();
+  const resized = reopened.tables[0].cells[1];
+  assert.equal(resized.style.cell.width, 12345);
+  assert.equal(resized.style.cell.height, 6789);
+  assert.equal(resized.text, originalText);
+});
+
+test('HWPX API table.setSize composes outer and nested table edits in one batch', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(NESTED_TABLE_FIXTURE_PATH));
+  const tables = session.readJson().tables;
+  const nested = tables.find((table) => table.id.startsWith('xtbl_'));
+  const outer = tables.find((table) => !table.id.startsWith('xtbl_') && table.para === nested?.para);
+  assert.ok(nested, 'nested package table fixture is required');
+  assert.ok(outer, 'outer table containing nested fixture is required');
+
+  session.apply([
+    { op: 'table.setSize', target: outer.cells[0].location, height: 54321 },
+    { op: 'table.setSize', target: nested.cells[0].location, height: 65432 },
+  ]);
+  const saved = session.save();
+  const sectionXml = readZip(saved.bytes).get('Contents/section0.xml').toString('utf8');
+  assert.match(sectionXml, /<hp:sz\b[^>]*height="54321"/);
+  assert.match(sectionXml, /<hp:sz\b[^>]*height="65432"/);
+  assert.doesNotThrow(() => new HwpxApiSession(saved.bytes));
+});
+
+test('HWPX API location-changing commands reject mixed batches before mutation', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(ESG_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const before = session.readJson();
+  const paragraph = before.sections[0].paragraphs[1];
+  assert.throws(
+    () => session.apply([
+      {
+        op: 'text.deleteParagraphs',
+        locations: [{ paragraph: { section: 0, number: paragraph.para } }],
+      },
+      {
+        op: 'text.replaceParagraph',
+        location: { paragraph: { section: 0, number: 0 } },
+        text: 'unchanged because the batch is rejected',
+      },
+    ]),
+    (error) => error?.code === 'HWPX_LOCATION_CHANGING_BATCH_UNSUPPORTED',
+  );
+  assert.equal(Buffer.compare(input, session.save().bytes), 0);
 });
 
 test('HWPX API table.writeRichCell can clone source cell text style through save and reopen', async () => {
@@ -352,6 +586,29 @@ test('HWPX API object inventory discovers embedded pictures in report templates'
   assert.ok(inventory.pictures.length >= 1);
   assert.ok(quality.objectSummary.pictureCount >= 1);
   assert.ok(quality.targetSummary.cellTargets >= 1);
+});
+
+test('HWPX API image.cloneToCell clones an inventoried picture into an inspected cell', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const beforePictures = session.objectInventory().pictures;
+  const target = session.readJson().tables[0].cells[0];
+  const beforeText = target.text;
+  session.apply([{
+    op: 'image.cloneToCell',
+    target: target.location,
+    sourcePictureId: beforePictures[0].id,
+    targetParagraphIndex: 0,
+    width: 2400,
+    height: 2400,
+    vertOffset: 100,
+    horzOffset: 200,
+  }]);
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes);
+  assert.equal(reopened.objectInventory().pictures.length, beforePictures.length + 1);
+  assert.equal(reopened.inspectTarget(target.location).currentText, beforeText);
 });
 
 test('HWPX API image.replace can update an embedded package image and reopen', async () => {

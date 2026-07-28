@@ -251,6 +251,22 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_save_checkpoint',
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
+      'editor_pdf_open',
+      'editor_pdf_discard',
+      'editor_pdf_read_json',
+      'editor_pdf_target_map',
+      'editor_pdf_target_find',
+      'editor_pdf_target_inspect',
+      'editor_pdf_object_inventory',
+      'editor_pdf_command_catalog',
+      'editor_pdf_apply',
+      'editor_pdf_render_pages',
+      'editor_pdf_quality_check',
+      'editor_pdf_export_pdf',
+      'editor_pdf_save_source',
+      'editor_pdf_save_checkpoint',
+      'editor_pdf_artifact_read',
+      'editor_pdf_artifact_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');
     assert.deepEqual(discardTool.inputSchema.required, ['documentId', 'baseRevision']);
@@ -1039,13 +1055,41 @@ test('MCP read and target streams stay bounded, complete, opaque, and revision-b
     assert.ok(legacyMap.editableTargets.paragraphs.length > 0);
     assert.deepEqual(legacyMap.editableTargets, legacyMap.locations);
 
+    const referenceTarget = { range: { start: { nodeId: 'p_0', offset: 0 } } };
+    const inspectedReferenceTarget = await mcp('editor_docx_target_inspect', {
+      documentId: opened.documentId,
+      locations: [referenceTarget],
+    });
+    assert.equal(inspectedReferenceTarget.result.isError, false);
+
     const appliedCall = await mcp('editor_docx_apply', {
       documentId: opened.documentId,
       baseRevision: opened.revision,
-      commands: [{ op: 'setDocumentMetadata', title: 'revision two' }],
+      commands: [
+        { op: 'setDocumentMetadata', title: 'revision two' },
+        {
+          op: 'reference.insert',
+          target: referenceTarget,
+          occurrenceId: '01K123456789ABCDEFGHJKMNPQ',
+          displayText: '[1]',
+          tooltip: 'Registered source',
+        },
+      ],
     });
     assert.equal(appliedCall.result.isError, false, JSON.stringify(appliedCall.result.structuredContent));
     assert.equal(appliedCall.result.structuredContent.revision, 2);
+
+    const referenceCall = await mcp('editor_docx_read_json', {
+      documentId: opened.documentId,
+      view: 'references',
+      limit: 100,
+    });
+    const referencePage = referenceCall.result.structuredContent;
+    assert.equal(referencePage.revision, 2);
+    assert.equal(referencePage.total, 1);
+    assert.equal(referencePage.items[0].occurrenceId, '01K123456789ABCDEFGHJKMNPQ');
+    assert.equal(referencePage.items[0].tooltip, 'Registered source');
+    assertBounded(referenceCall);
 
     const staleCall = await mcp('editor_docx_read_json', {
       documentId: opened.documentId,

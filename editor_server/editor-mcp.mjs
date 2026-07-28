@@ -1,6 +1,7 @@
 import { createEditorMcpTools } from '../editor_common/editor-mcp-tool-factory.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
+import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -9,6 +10,7 @@ const DOCX_MCP_TOOLS = createEditorMcpTools({
   format: 'docx',
   commandCategories: docxAdapter.commandCategories,
   commandOps: docxAdapter.commandOps,
+  readViews: ['summary', 'blocks', 'tables', 'references'],
 });
 
 const HWPX_MCP_TOOLS = createEditorMcpTools({
@@ -17,7 +19,13 @@ const HWPX_MCP_TOOLS = createEditorMcpTools({
   commandOps: hwpxAdapter.commandOps,
 });
 
-const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS]);
+const PDF_MCP_TOOLS = createEditorMcpTools({
+  format: 'pdf',
+  commandCategories: pdfAdapter.commandCategories,
+  commandOps: pdfAdapter.commandOps,
+});
+
+const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS, ...PDF_MCP_TOOLS]);
 
 const toolByName = new Map(EDITOR_MCP_TOOLS.map((tool) => [tool.name, tool]));
 
@@ -222,6 +230,7 @@ export {
   DOCX_MCP_TOOLS,
   EDITOR_MCP_TOOLS,
   HWPX_MCP_TOOLS,
+  PDF_MCP_TOOLS,
   handleEditorMcpJsonRpc,
   normalizeProtocolVersion,
   redactBinaryFields,

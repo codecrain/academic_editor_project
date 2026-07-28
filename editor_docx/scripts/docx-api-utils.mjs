@@ -482,6 +482,62 @@ function restoreParagraphStructuralFragments(replacement, template) {
   return next;
 }
 
+const REFERENCE_OCCURRENCE_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+function referenceControlsFromXml(xml, paragraphs = discoverParagraphs(xml)) {
+  const references = [];
+  const pattern = /<w:sdt\b[\s\S]*?<\/w:sdt>/g;
+  let match;
+  while ((match = pattern.exec(String(xml || '')))) {
+    const tag = firstMatch(match[0], /<w:tag\b[^>]*\bw:val="([^"]+)"/, '');
+    const occurrenceId = String(tag).startsWith('tlooto-ref:') ? String(tag).slice('tlooto-ref:'.length) : '';
+    if (!REFERENCE_OCCURRENCE_ID_RE.test(occurrenceId)) continue;
+    const paragraph = paragraphs.find((candidate) => candidate.start <= match.index && candidate.end >= match.index + match[0].length);
+    const tooltip = firstMatch(match[0], /<w:hyperlink\b[^>]*\bw:tooltip="([^"]*)"/, null);
+    const alias = firstMatch(match[0], /<w:alias\b[^>]*\bw:val="([^"]*)"/, null);
+    references.push({
+      occurrenceId,
+      tag,
+      displayText: extractText(match[0]),
+      tooltip: tooltip ? unescapeXml(tooltip) : null,
+      alias: alias ? unescapeXml(alias) : null,
+      paragraphId: paragraph?.id ?? null,
+      native: paragraph ? { section: paragraph.section, para: paragraph.index } : null,
+      start: match.index,
+      end: match.index + match[0].length,
+    });
+  }
+  return references;
+}
+
+function referenceControlXml({ occurrenceId, displayText, tooltip, bookmarkId }) {
+  const bookmarkName = `tlooto_ref_${occurrenceId}`;
+  const alias = tooltip || displayText;
+  return '<w:sdt>'
+    + '<w:sdtPr>'
+    + `<w:alias w:val="${escapeXmlAttr(alias)}"/>`
+    + `<w:tag w:val="tlooto-ref:${escapeXmlAttr(occurrenceId)}"/>`
+    + '</w:sdtPr>'
+    + '<w:sdtContent>'
+    + `<w:bookmarkStart w:id="${bookmarkId}" w:name="${bookmarkName}"/>`
+    + `<w:hyperlink w:anchor="${bookmarkName}" w:tooltip="${escapeXmlAttr(tooltip || alias)}">`
+    + textRunXml(displayText)
+    + '</w:hyperlink>'
+    + `<w:bookmarkEnd w:id="${bookmarkId}"/>`
+    + '</w:sdtContent>'
+    + '</w:sdt>';
+}
+
+function paragraphReferenceSpans(paragraphXml) {
+  return referenceControlsFromXml(paragraphXml, [{
+    id: 'local', index: 0, section: 0, start: 0, end: paragraphXml.length,
+  }]).map((reference) => ({
+    ...reference,
+    textStart: extractText(paragraphXml.slice(0, reference.start)).length,
+    textEnd: extractText(paragraphXml.slice(0, reference.end)).length,
+  }));
+}
+
 function structuralIntegrityGraph(documentXml) {
   const count = (tagName) => (
     String(documentXml || '').match(new RegExp(`<w:${tagName}\\b`, 'g')) ?? []
@@ -502,6 +558,7 @@ function structuralIntegrityGraph(documentXml) {
     endnoteReferences: count('endnoteReference'),
     fieldCharacters: count('fldChar'),
     hyperlinks: count('hyperlink'),
+    referenceControls: referenceControlsFromXml(documentXml).length,
   };
 }
 
@@ -544,11 +601,23 @@ function runPropertiesXml(style = {}) {
   if (style.italic) {
     parts.push('<w:i/>');
   }
+  if (style.strike) {
+    parts.push('<w:strike/>');
+  }
+  if (style.smallCaps) {
+    parts.push('<w:smallCaps/>');
+  }
   if (style.underline) {
     parts.push(`<w:u w:val="${escapeXmlAttr(style.underline === true ? 'single' : style.underline)}"/>`);
   }
   if (style.textColor) {
     parts.push(`<w:color w:val="${String(style.textColor).replace(/^#/, '').toUpperCase()}"/>`);
+  }
+  if (style.highlight) {
+    parts.push(`<w:highlight w:val="${escapeXmlAttr(style.highlight)}"/>`);
+  }
+  if (style.vertAlign) {
+    parts.push(`<w:vertAlign w:val="${escapeXmlAttr(style.vertAlign)}"/>`);
   }
   if (style.fontSize) {
     parts.push(`<w:sz w:val="${Math.round(Number(style.fontSize) * 2)}"/>`);
@@ -568,14 +637,14 @@ function paragraphPropertiesXml(style = {}) {
   if (style.align) {
     parts.push(`<w:jc w:val="${escapeXmlAttr(style.align)}"/>`);
   }
-  if (style.spacingBefore || style.spacingAfter || style.lineSpacing) {
+  if (style.spacingBefore !== undefined || style.spacingAfter !== undefined || style.lineSpacing !== undefined) {
     parts.push(
-      `<w:spacing${style.spacingBefore ? ` w:before="${style.spacingBefore}"` : ''}${style.spacingAfter ? ` w:after="${style.spacingAfter}"` : ''}${style.lineSpacing ? ` w:line="${style.lineSpacing}" w:lineRule="auto"` : ''}/>`,
+      `<w:spacing${style.spacingBefore !== undefined ? ` w:before="${style.spacingBefore}"` : ''}${style.spacingAfter !== undefined ? ` w:after="${style.spacingAfter}"` : ''}${style.lineSpacing !== undefined ? ` w:line="${style.lineSpacing}" w:lineRule="${escapeXmlAttr(style.lineRule ?? 'auto')}"` : ''}/>`,
     );
   }
-  if (style.left || style.right || style.firstLine || style.hanging) {
+  if (style.left !== undefined || style.right !== undefined || style.firstLine !== undefined || style.hanging !== undefined) {
     parts.push(
-      `<w:ind${style.left ? ` w:left="${style.left}"` : ''}${style.right ? ` w:right="${style.right}"` : ''}${style.firstLine ? ` w:firstLine="${style.firstLine}"` : ''}${style.hanging ? ` w:hanging="${style.hanging}"` : ''}/>`,
+      `<w:ind${style.left !== undefined ? ` w:left="${style.left}"` : ''}${style.right !== undefined ? ` w:right="${style.right}"` : ''}${style.firstLine !== undefined ? ` w:firstLine="${style.firstLine}"` : ''}${style.hanging !== undefined ? ` w:hanging="${style.hanging}"` : ''}/>`,
     );
   }
   if (style.numId || style.ilvl !== undefined) {
@@ -584,22 +653,65 @@ function paragraphPropertiesXml(style = {}) {
   if (style.keepNext) {
     parts.push('<w:keepNext/>');
   }
+  if (style.keepLines) {
+    parts.push('<w:keepLines/>');
+  }
   if (style.pageBreakBefore) {
     parts.push('<w:pageBreakBefore/>');
+  }
+  if (style.shadingFill) {
+    parts.push(`<w:shd w:fill="${String(style.shadingFill).replace(/^#/, '').toUpperCase()}"/>`);
   }
   return parts.length ? `<w:pPr>${parts.join('')}</w:pPr>` : '';
 }
 
 function textRunXml(text, rPrXml = '') {
   const textValue = String(text ?? '');
-  const preserve = /^\s|\s$/.test(textValue) ? ' xml:space="preserve"' : '';
-  return `<w:r>${rPrXml}<w:t${preserve}>${escapeXmlText(textValue)}</w:t></w:r>`;
+  const content = textValue.split(/(\n|\t)/).map((token) => {
+    if (token === '\n') return '<w:br/>';
+    if (token === '\t') return '<w:tab/>';
+    if (token === '') return '';
+    const preserve = /^\s|\s$/.test(token) ? ' xml:space="preserve"' : '';
+    return `<w:t${preserve}>${escapeXmlText(token)}</w:t>`;
+  }).join('');
+  return `<w:r>${rPrXml}${content || '<w:t></w:t>'}</w:r>`;
 }
 
 function paragraphXml(text, options = {}) {
   const pPr = options.pPrXml ?? paragraphPropertiesXml(options.paragraphStyle);
-  const rPr = options.rPrXml ?? runPropertiesXml(options.runStyle);
-  return `<w:p>${pPr}${textRunXml(text, rPr)}</w:p>`;
+  const runs = Array.isArray(options.segments) && options.segments.length
+    ? options.segments.map((segment) => textRunXml(
+      segment.text,
+      segment.rPrXml ?? runPropertiesXml(segment.style ?? segment.runStyle),
+    )).join('')
+    : textRunXml(text, options.rPrXml ?? runPropertiesXml(options.runStyle));
+  return `<w:p>${pPr}${runs}</w:p>`;
+}
+
+function fieldRunXml(field, style = {}) {
+  const instruction = String(field ?? '').trim().toUpperCase();
+  assert.ok(['PAGE', 'NUMPAGES'].includes(instruction), `unsupported DOCX field: ${instruction}`);
+  const rPr = runPropertiesXml(style);
+  return `<w:r>${rPr}<w:fldChar w:fldCharType="begin"/></w:r>`
+    + `<w:r>${rPr}<w:instrText xml:space="preserve"> ${instruction} </w:instrText></w:r>`
+    + `<w:r>${rPr}<w:fldChar w:fldCharType="separate"/></w:r>`
+    + `<w:r>${rPr}<w:t>1</w:t></w:r>`
+    + `<w:r>${rPr}<w:fldChar w:fldCharType="end"/></w:r>`;
+}
+
+function headerFooterParagraphXml(value, fallbackStyle = {}) {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return paragraphXml(value ?? '', fallbackStyle);
+  }
+  const paragraphStyle = value.paragraphStyle ?? fallbackStyle.paragraphStyle;
+  const defaultRunStyle = value.runStyle ?? fallbackStyle.runStyle ?? {};
+  const segments = Array.isArray(value.segments) ? value.segments : [{ text: value.text ?? '' }];
+  const runs = segments.map((segment) => (
+    segment.field
+      ? fieldRunXml(segment.field, segment.style ?? segment.runStyle ?? defaultRunStyle)
+      : textRunXml(segment.text ?? '', runPropertiesXml(segment.style ?? segment.runStyle ?? defaultRunStyle))
+  )).join('');
+  return `<w:p>${paragraphPropertiesXml(paragraphStyle)}${runs}</w:p>`;
 }
 
 function paragraphsXmlFromText(text, options = {}) {
@@ -609,7 +721,10 @@ function paragraphsXmlFromText(text, options = {}) {
 
 function tableCellXml(text = '', options = {}) {
   const tcPr = options.tcPrXml ?? cellStyleXml(options.cellStyle);
-  return `<w:tc>${tcPr}${paragraphsXmlFromText(text, options)}</w:tc>`;
+  const paragraphs = Array.isArray(options.paragraphs) && options.paragraphs.length
+    ? options.paragraphs.map((paragraph) => paragraphXml(paragraph.text ?? '', paragraph)).join('')
+    : paragraphsXmlFromText(text, options);
+  return `<w:tc>${tcPr}${paragraphs}</w:tc>`;
 }
 
 function tableXml(rows, cols, options = {}) {
@@ -621,16 +736,56 @@ function tableXml(rows, cols, options = {}) {
   const defaultTableWidth = 9360;
   const baseGridWidth = Math.floor(defaultTableWidth / cols);
   const gridXml = Array.from({ length: cols }, (_, index) => {
-    const width = index === cols - 1
+    const width = options.columnWidths?.[index] ?? (index === cols - 1
       ? defaultTableWidth - (baseGridWidth * (cols - 1))
-      : baseGridWidth;
+      : baseGridWidth);
     return `<w:gridCol w:w="${width}"/>`;
   }).join('');
-  const rowXml = Array.from({ length: rows }, () => {
-    const cells = Array.from({ length: cols }, () => tableCellXml('', options)).join('');
-    return `<w:tr>${cells}</w:tr>`;
+  const rowXml = Array.from({ length: rows }, (_, rowIndex) => {
+    const rowDefinition = options.cells?.[rowIndex];
+    const cellDefinitions = Array.isArray(rowDefinition)
+      ? rowDefinition
+      : Array.from({ length: cols }, () => ({}));
+    const cells = cellDefinitions.map((cell = {}) => tableCellXml(cell.text ?? '', {
+      cellStyle: cell.cellStyle ?? options.cellStyle,
+      paragraphStyle: cell.paragraphStyle ?? options.paragraphStyle,
+      runStyle: cell.runStyle ?? options.runStyle,
+      paragraphs: cell.paragraphs,
+    })).join('');
+    const rowStyle = options.rowStyles?.[rowIndex] ?? {};
+    const rowProperties = [
+      rowStyle.height !== undefined
+        ? `<w:trHeight w:val="${escapeXmlAttr(rowStyle.height)}" w:hRule="${escapeXmlAttr(rowStyle.heightRule ?? 'atLeast')}"/>`
+        : '',
+      rowStyle.cantSplit ? '<w:cantSplit/>' : '',
+      rowStyle.isHeader ? '<w:tblHeader/>' : '',
+    ].join('');
+    return `<w:tr>${rowProperties ? `<w:trPr>${rowProperties}</w:trPr>` : ''}${cells}</w:tr>`;
   }).join('');
-  return `<w:tbl>${options.tblPrXml ?? '<w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>'}<w:tblGrid>${gridXml}</w:tblGrid>${rowXml}</w:tbl>`;
+  const tableStyle = options.tableStyle ?? {};
+  const tableBorders = tableStyle.borders ? (() => {
+    const defaults = tableStyle.borders.all ?? tableStyle.borders;
+    return `<w:tblBorders>${['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map((side) => {
+      const border = { ...defaults, ...(tableStyle.borders[side] ?? {}) };
+      return `<w:${side} w:val="${escapeXmlAttr(border.value ?? 'single')}" w:sz="${escapeXmlAttr(border.size ?? 4)}" w:space="${escapeXmlAttr(border.space ?? 0)}" w:color="${String(border.color ?? '000000').replace(/^#/, '').toUpperCase()}"/>`;
+    }).join('')}</w:tblBorders>`;
+  })() : '';
+  const tableCellMargins = tableStyle.cellMargins ? `<w:tblCellMar>${['top', 'left', 'bottom', 'right'].map((side) => (
+    tableStyle.cellMargins[side] !== undefined
+      ? `<w:${side} w:w="${escapeXmlAttr(tableStyle.cellMargins[side])}" w:type="dxa"/>`
+      : ''
+  )).join('')}</w:tblCellMar>` : '';
+  const tableProperties = [
+    tableStyle.styleId ? `<w:tblStyle w:val="${escapeXmlAttr(tableStyle.styleId)}"/>` : '',
+    `<w:tblW w:w="${escapeXmlAttr(tableStyle.width ?? 0)}" w:type="${escapeXmlAttr(tableStyle.widthType ?? 'auto')}"/>`,
+    tableStyle.align ? `<w:jc w:val="${escapeXmlAttr(tableStyle.align)}"/>` : '',
+    tableStyle.indent !== undefined ? `<w:tblInd w:w="${escapeXmlAttr(tableStyle.indent)}" w:type="dxa"/>` : '',
+    tableStyle.layout ? `<w:tblLayout w:type="${escapeXmlAttr(tableStyle.layout)}"/>` : '',
+    tableStyle.look ? `<w:tblLook w:val="${escapeXmlAttr(tableStyle.look)}"/>` : '',
+    tableBorders,
+    tableCellMargins,
+  ].join('');
+  return `<w:tbl>${options.tblPrXml ?? `<w:tblPr>${tableProperties}</w:tblPr>`}<w:tblGrid>${gridXml}</w:tblGrid>${rowXml}</w:tbl>`;
 }
 
 function inlineImageParagraphXml({
@@ -662,11 +817,20 @@ function cellStyleXml(style = {}) {
   if (style.gridSpan) {
     parts.push(`<w:gridSpan w:val="${escapeXmlAttr(style.gridSpan)}"/>`);
   }
+  if (style.vMerge) {
+    parts.push(style.vMerge === 'continue' ? '<w:vMerge/>' : `<w:vMerge w:val="${escapeXmlAttr(style.vMerge)}"/>`);
+  }
   if (style.margin || style.margins) {
     const margin = style.margin ?? style.margins;
     parts.push(`<w:tcMar>${['top', 'left', 'bottom', 'right'].map((side) => margin[side] ? `<w:${side} w:w="${escapeXmlAttr(margin[side])}" w:type="dxa"/>` : '').join('')}</w:tcMar>`);
   }
-  if (style.borderColor || style.borderSize) {
+  if (style.borders) {
+    const defaults = style.borders.all ?? style.borders;
+    parts.push(`<w:tcBorders>${['top', 'left', 'bottom', 'right'].map((side) => {
+      const border = { ...defaults, ...(style.borders[side] ?? {}) };
+      return `<w:${side} w:val="${escapeXmlAttr(border.value ?? 'single')}" w:sz="${escapeXmlAttr(border.size ?? 4)}" w:space="${escapeXmlAttr(border.space ?? 0)}" w:color="${String(border.color ?? 'BFBFBF').replace(/^#/, '').toUpperCase()}"/>`;
+    }).join('')}</w:tcBorders>`);
+  } else if (style.borderColor || style.borderSize) {
     const color = String(style.borderColor ?? 'BFBFBF').replace(/^#/, '').toUpperCase();
     const size = style.borderSize ?? 4;
     parts.push(`<w:tcBorders>${['top', 'left', 'bottom', 'right'].map((side) => `<w:${side} w:val="single" w:sz="${size}" w:space="0" w:color="${color}"/>`).join('')}</w:tcBorders>`);
@@ -1178,6 +1342,19 @@ function normalizeParagraphLocation(location = {}) {
   return coreNormalizeParagraphLocation(location);
 }
 
+function referenceInsertionOffset(target = {}) {
+  const range = target.range ?? {};
+  const native = target.native ?? {};
+  return Number(
+    native.offset
+      ?? native.endOffset
+      ?? native.startOffset
+      ?? range.end?.offset
+      ?? range.start?.offset
+      ?? 0,
+  );
+}
+
 function normalizeCellReference(cell = {}) {
   return coreNormalizeCellReference(cell);
 }
@@ -1321,6 +1498,7 @@ export class DocxApiSession {
     this.revision = 1;
     this.dirtyDocument = false;
     this.dirtyPackage = false;
+    this.intentionalReferenceIntegrityLoss = {};
     const trackedIds = [...this.documentXml.matchAll(/<w:(?:ins|del)\b[^>]*\bw:id="(\d+)"/g)]
       .map((match) => Number(match[1]))
       .filter(Number.isFinite);
@@ -1351,6 +1529,10 @@ export class DocxApiSession {
       return { ...table, native: { ...table.native, section } };
     });
     const objectGraph = readObjectGraph(this.entries, this.documentXml);
+    const references = referenceControlsFromXml(this.documentXml, paragraphs).map((reference, index) => ({
+      ...reference,
+      order: index + 1,
+    }));
     // DOCX pagination is a renderer concern. This value is deliberately retained
     // for backward compatibility, but must never be presented as a rendered page
     // count: fonts, tracked changes, fields, floating objects, and printer metrics
@@ -1372,6 +1554,7 @@ export class DocxApiSession {
         styleFingerprint: paragraph.styleFingerprint,
       })),
       tables,
+      references,
       styleGraph: readStyleGraph(this.entries),
       layoutGraph: {
         pageCount: pageCountEstimate,
@@ -1620,6 +1803,22 @@ export class DocxApiSession {
       return [{ ...command, opId, op: 'text.insert', target: command.target ?? location, text: commandText(command) }];
     }
 
+    if (catalogOp === 'reference.insert') {
+      return [{
+        ...command,
+        opId,
+        op: 'reference.insert',
+        target: command.target ?? location,
+        occurrenceId: String(command.occurrenceId ?? ''),
+        displayText: String(command.displayText ?? ''),
+        tooltip: command.tooltip == null ? '' : String(command.tooltip),
+      }];
+    }
+
+    if (catalogOp === 'reference.remove') {
+      return [{ ...command, opId, op: 'reference.remove', occurrenceId: String(command.occurrenceId ?? '') }];
+    }
+
     if (catalogOp === 'deleteRange') {
       return [{ ...command, opId, op: 'text.delete', target: command.target ?? location }];
     }
@@ -1756,6 +1955,16 @@ export class DocxApiSession {
         && (!Number.isInteger(command.rows) || command.rows <= 0 || !Number.isInteger(command.cols) || command.cols <= 0)) {
         throw new Error('table.create rows and cols must be positive integers.');
       }
+      if (entry.op === 'appendParagraph' && command.segments !== undefined) {
+        if (!Array.isArray(command.segments) || command.segments.length === 0
+          || command.segments.some((segment) => !segment || typeof segment !== 'object'
+            || Array.isArray(segment) || typeof segment.text !== 'string')) {
+          throw new Error('appendParagraph segments must be a nonempty array of text/style objects.');
+        }
+        if (command.segments.map((segment) => segment.text).join('') !== command.text) {
+          throw new Error('appendParagraph segment text must concatenate exactly to text.');
+        }
+      }
       if (entry.op === 'table.writeCells' && (!Array.isArray(command.cells) || command.cells.length === 0)) {
         throw new Error('table.writeCells requires a nonempty cells array.');
       }
@@ -1803,12 +2012,31 @@ export class DocxApiSession {
 
     for (const operation of operations) {
       if (operation.op === 'table.writeCell' || operation.op === 'text.replaceParagraph' || operation.op === 'layout.fitText') {
-        inspect(operation.location, `${operation.op}.location`);
+        const target = inspect(operation.location, `${operation.op}.location`);
+        if (operation.op === 'text.replaceParagraph') {
+          const paragraph = this.paragraphFromLocation(operation.location);
+          assert.equal(
+            paragraphReferenceSpans(paragraph.xml).length,
+            0,
+            `${operation.op} cannot rebuild a paragraph containing document references; use scoped text operations or reference.remove`,
+          );
+        } else if (target.kind === 'cell') {
+          const table = this.tableFromLocation(operation.location);
+          const cell = this.cellFromLocation(table, operation.location);
+          const tableBlock = elementBlocks(this.documentXml, 'tbl')[table.tableIndex];
+          const rows = tableRowsFromXml(tableBlock.xml);
+          assert.equal(
+            referenceControlsFromXml(rows[cell.row].cells[cell.col].cellBlock.xml).length,
+            0,
+            'table.writeCell cannot rebuild a cell containing document references; use scoped text operations or reference.remove',
+          );
+        }
         if (operation.styleSource) {
           inspect(operation.styleSource, `${operation.op}.styleSource`);
         }
       } else if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked'
         || operation.op === 'text.insert' || operation.op === 'text.delete'
+        || operation.op === 'reference.insert'
         || operation.op === 'style.setRunStyle' || operation.op === 'style.setParagraphStyle'
         || operation.op === 'insertFootnote') {
         const target = inspect(operation.target, `${operation.op}.target`);
@@ -1843,6 +2071,19 @@ export class DocxApiSession {
               `${operation.op}.expectedText does not match the current inspected range`,
             );
           }
+          const paragraph = this.paragraphFromLocation(operation.target);
+          const referenceSpans = paragraphReferenceSpans(paragraph.xml);
+          const overlapsReference = referenceSpans.some((reference) => (
+            operation.op === 'text.insert'
+              ? startOffset > reference.textStart && startOffset < reference.textEnd
+              : startOffset < reference.textEnd && endOffset > reference.textStart
+          ));
+          assert.ok(!overlapsReference,
+            `${operation.op}.target overlaps a document reference; use reference.remove for citation deletion`);
+          if (operation.op === 'text.replaceTracked') {
+            assert.equal(referenceSpans.length, 0,
+              'text.replaceTracked cannot edit a paragraph containing document references');
+          }
           if (operation.op === 'text.replace' || operation.op === 'text.replaceTracked') {
             const replacementText = String(operation.text ?? '');
             const prefix = target.currentText.slice(0, startOffset);
@@ -1866,7 +2107,27 @@ export class DocxApiSession {
                 'text.replaceTracked date must be ISO-8601 compatible');
             }
           }
+        } else if (operation.op === 'reference.insert') {
+          const offset = referenceInsertionOffset(operation.target);
+          assert.ok(Number.isInteger(offset) && offset >= 0 && offset <= target.currentText.length,
+            'reference.insert.target offset is outside the existing paragraph');
+          assert.ok(REFERENCE_OCCURRENCE_ID_RE.test(operation.occurrenceId),
+            'reference.insert.occurrenceId must be a 26 character ULID');
+          assert.ok(operation.displayText.length > 0 && operation.displayText.length <= 80,
+            'reference.insert.displayText must contain 1 to 80 characters');
+          assert.ok(operation.tooltip.length <= 255,
+            'reference.insert.tooltip must not exceed 255 characters');
+          assert.ok(!referenceControlsFromXml(this.documentXml).some((reference) => reference.occurrenceId === operation.occurrenceId),
+            'reference.insert occurrence already exists in this document');
+          assert.ok(!paragraphReferenceSpans(this.paragraphFromLocation(operation.target).xml)
+            .some((reference) => offset > reference.textStart && offset < reference.textEnd),
+          'reference.insert.target cannot be inside an existing document reference');
         }
+      } else if (operation.op === 'reference.remove') {
+        assert.ok(REFERENCE_OCCURRENCE_ID_RE.test(operation.occurrenceId),
+          'reference.remove.occurrenceId must be a 26 character ULID');
+        assert.ok(referenceControlsFromXml(this.documentXml).some((reference) => reference.occurrenceId === operation.occurrenceId),
+          'reference.remove occurrence does not exist in this document');
       } else if (operation.op === 'paragraph.applyNamedStyle') {
         inspect(operation.target, 'applyStyle.target');
         const styleId = String(operation.styleId ?? '').trim();
@@ -1926,6 +2187,7 @@ export class DocxApiSession {
       dirtyDocument: this.dirtyDocument,
       dirtyPackage: this.dirtyPackage,
       revision: this.revision,
+      intentionalReferenceIntegrityLoss: { ...this.intentionalReferenceIntegrityLoss },
     };
     const results = [];
     let mutated = false;
@@ -1953,8 +2215,20 @@ export class DocxApiSession {
         this.replaceTextRange(op);
         results.push({ opId: op.opId, ok: true, action: op.op });
         mutated = true;
+      } else if (op.op === 'reference.insert') {
+        const inserted = this.insertReferenceControl(op);
+        results.push({ opId: op.opId, ok: true, action: op.op, ...inserted });
+        mutated = true;
+      } else if (op.op === 'reference.remove') {
+        const removed = this.removeReferenceControl(op.occurrenceId);
+        results.push({ opId: op.opId, ok: true, action: op.op, ...removed });
+        mutated = true;
       } else if (op.op === 'paragraph.append') {
-        this.insertBeforeSectPr(paragraphXml(op.text, { paragraphStyle: op.paragraphStyle, runStyle: op.runStyle }));
+        this.insertBeforeSectPr(paragraphXml(op.text, {
+          paragraphStyle: op.paragraphStyle,
+          runStyle: op.runStyle,
+          segments: op.segments,
+        }));
         results.push({ opId: op.opId, ok: true, action: 'paragraph.append' });
         mutated = true;
       } else if (op.op === 'paragraph.applyNamedStyle') {
@@ -1975,6 +2249,10 @@ export class DocxApiSession {
           paragraphStyle: op.paragraphStyle,
           runStyle: op.runStyle,
           tblPrXml: op.tblPrXml,
+          columnWidths: op.columnWidths,
+          rowStyles: op.rowStyles,
+          cells: op.cells,
+          tableStyle: op.tableStyle,
         }));
         const createdTable = this.readJson().tables.at(-1);
         assert.ok(createdTable, 'table.create did not produce a discoverable table');
@@ -2057,6 +2335,7 @@ export class DocxApiSession {
       this.dirtyDocument = snapshot.dirtyDocument;
       this.dirtyPackage = snapshot.dirtyPackage;
       this.revision = snapshot.revision;
+      this.intentionalReferenceIntegrityLoss = snapshot.intentionalReferenceIntegrityLoss;
       throw error;
     }
     if (mutated) {
@@ -2118,10 +2397,109 @@ export class DocxApiSession {
     const startOffset = Number(native?.offset ?? range?.start?.offset ?? 0);
     const nativeEnd = Number.isFinite(Number(native?.length)) ? startOffset + Number(native.length) : undefined;
     const endOffset = op.op === 'text.insert' ? startOffset : (nativeEnd ?? range?.end?.offset ?? paragraph.text.length);
+    if (paragraphReferenceSpans(paragraph.xml).length) {
+      this.replaceTextRangePreservingReferences(paragraph, startOffset, endOffset,
+        op.op === 'text.delete' ? '' : String(op.text ?? ''));
+      return;
+    }
     const replacementText = op.op === 'text.delete'
       ? `${paragraph.text.slice(0, startOffset)}${paragraph.text.slice(endOffset)}`
       : `${paragraph.text.slice(0, startOffset)}${op.text}${paragraph.text.slice(endOffset)}`;
     this.replaceParagraphXml({ paragraph: { number: paragraphIndex } }, replacementText, { templateParagraphXml: paragraph.xml });
+  }
+
+  plainTextRuns(paragraphXml) {
+    const references = paragraphReferenceSpans(paragraphXml);
+    return elementBlocks(paragraphXml, 'r')
+      .filter((run) => !references.some((reference) => run.start >= reference.start && run.end <= reference.end))
+      .map((run) => ({
+        ...run,
+        text: extractText(run.xml),
+        textStart: extractText(paragraphXml.slice(0, run.start)).length,
+        textEnd: extractText(paragraphXml.slice(0, run.end)).length,
+        rPrXml: tagXml(run.xml, 'rPr'),
+      }));
+  }
+
+  replaceTextRangePreservingReferences(paragraph, startOffset, endOffset, replacementText) {
+    const runs = this.plainTextRuns(paragraph.xml);
+    const candidates = runs.filter((run) => (
+      startOffset === endOffset
+        ? startOffset >= run.textStart && startOffset <= run.textEnd
+        : startOffset < run.textEnd && endOffset > run.textStart
+    ));
+    assert.ok(candidates.length > 0,
+      'Scoped text edit did not resolve to a non-reference text run');
+    const replacements = [];
+    for (const [index, run] of candidates.entries()) {
+      assert.match(run.xml, /^<w:r\b[^>]*>(?:<w:rPr\b[\s\S]*?<\/w:rPr>|<w:rPr\b[^>]*\/>)?<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t><\/w:r>$/,
+        'Scoped edits next to references currently require ordinary text runs');
+      const localStart = Math.max(0, startOffset - run.textStart);
+      const localEnd = Math.min(run.text.length, endOffset - run.textStart);
+      const before = run.text.slice(0, localStart);
+      const after = run.text.slice(Math.max(localStart, localEnd));
+      const nextText = `${before}${index === 0 ? replacementText : ''}${after}`;
+      replacements.push({ start: run.start, end: run.end, xml: textRunXml(nextText, run.rPrXml) });
+    }
+    let next = paragraph.xml;
+    for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+      next = `${next.slice(0, replacement.start)}${replacement.xml}${next.slice(replacement.end)}`;
+    }
+    this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${next}${this.documentXml.slice(paragraph.end)}`;
+    this.dirtyDocument = true;
+  }
+
+  insertReferenceControl(op) {
+    const paragraph = this.paragraphFromLocation(op.target);
+    const offset = referenceInsertionOffset(op.target);
+    const bookmarkIds = [...this.documentXml.matchAll(/<w:bookmark(?:Start|End)\b[^>]*\bw:id="(\d+)"/g)]
+      .map((match) => Number(match[1]));
+    const controlXml = referenceControlXml({ ...op, bookmarkId: Math.max(-1, ...bookmarkIds) + 1 });
+    const referenceAtStart = paragraphReferenceSpans(paragraph.xml)
+      .find((reference) => reference.textStart === offset);
+    const referenceAtEnd = paragraphReferenceSpans(paragraph.xml)
+      .find((reference) => reference.textEnd === offset);
+    let next;
+    if (referenceAtStart) {
+      next = `${paragraph.xml.slice(0, referenceAtStart.start)}${controlXml}${paragraph.xml.slice(referenceAtStart.start)}`;
+    } else if (referenceAtEnd) {
+      next = `${paragraph.xml.slice(0, referenceAtEnd.end)}${controlXml}${paragraph.xml.slice(referenceAtEnd.end)}`;
+    } else {
+      const runs = this.plainTextRuns(paragraph.xml);
+      const run = runs.find((candidate) => offset >= candidate.textStart && offset <= candidate.textEnd);
+      if (run) {
+        assert.match(run.xml, /^<w:r\b[^>]*>(?:<w:rPr\b[\s\S]*?<\/w:rPr>|<w:rPr\b[^>]*\/>)?<w:t(?:\s[^>]*)?>[\s\S]*?<\/w:t><\/w:r>$/,
+          'reference.insert currently requires an ordinary text run at the target offset');
+        const localOffset = offset - run.textStart;
+        const before = run.text.slice(0, localOffset);
+        const after = run.text.slice(localOffset);
+        const replacement = `${before ? textRunXml(before, run.rPrXml) : ''}${controlXml}${after ? textRunXml(after, run.rPrXml) : ''}`;
+        next = `${paragraph.xml.slice(0, run.start)}${replacement}${paragraph.xml.slice(run.end)}`;
+      } else {
+        assert.equal(paragraph.text.length, 0,
+          'reference.insert target did not resolve to a text run or an empty paragraph');
+        next = paragraph.xml.replace('</w:p>', `${controlXml}</w:p>`);
+      }
+    }
+    this.documentXml = `${this.documentXml.slice(0, paragraph.start)}${next}${this.documentXml.slice(paragraph.end)}`;
+    this.dirtyDocument = true;
+    return { occurrenceId: op.occurrenceId, tag: `tlooto-ref:${op.occurrenceId}` };
+  }
+
+  removeReferenceControl(occurrenceId) {
+    const reference = referenceControlsFromXml(this.documentXml)
+      .find((candidate) => candidate.occurrenceId === occurrenceId);
+    assert.ok(reference, `reference occurrence not found: ${occurrenceId}`);
+    const removedIntegrity = structuralIntegrityGraph(
+      this.documentXml.slice(reference.start, reference.end),
+    );
+    for (const [key, count] of Object.entries(removedIntegrity)) {
+      this.intentionalReferenceIntegrityLoss[key] =
+        Number(this.intentionalReferenceIntegrityLoss[key] ?? 0) + Number(count ?? 0);
+    }
+    this.documentXml = `${this.documentXml.slice(0, reference.start)}${this.documentXml.slice(reference.end)}`;
+    this.dirtyDocument = true;
+    return { occurrenceId };
   }
 
   replaceTrackedTextRange(op) {
@@ -2438,7 +2816,19 @@ export class DocxApiSession {
     this.updateSectPr((body) => {
       const pgSz = `<w:pgSz w:w="${setup.width}" w:h="${setup.height}"${setup.orientation === 'landscape' ? ' w:orient="landscape"' : ''}/>`;
       const pgMar = `<w:pgMar w:top="${margins.top}" w:right="${margins.right}" w:bottom="${margins.bottom}" w:left="${margins.left}" w:header="${margins.header || 720}" w:footer="${margins.footer || 720}" w:gutter="${margins.gutter || 0}"/>`;
-      return replaceOrInsertChild(replaceOrInsertChild(body, /^/, 'pgSz', pgSz), /^/, 'pgMar', pgMar);
+      let next = replaceOrInsertChild(replaceOrInsertChild(body, /^/, 'pgSz', pgSz), /^/, 'pgMar', pgMar);
+      if (setup.pageBorders) {
+        const borderDefaults = setup.pageBorders.all ?? setup.pageBorders;
+        const sides = ['top', 'left', 'bottom', 'right'].map((side) => {
+          const border = setup.pageBorders[side] === false
+            ? { value: 'nil' }
+            : { ...borderDefaults, ...(setup.pageBorders[side] ?? {}) };
+          return `<w:${side} w:val="${escapeXmlAttr(border.value ?? 'single')}" w:sz="${escapeXmlAttr(border.size ?? 8)}" w:space="${escapeXmlAttr(border.space ?? 24)}" w:color="${String(border.color ?? '000000').replace(/^#/, '').toUpperCase()}"/>`;
+        }).join('');
+        const pageBorders = `<w:pgBorders w:offsetFrom="${escapeXmlAttr(setup.pageBorders.offsetFrom ?? 'page')}"${setup.pageBorders.display ? ` w:display="${escapeXmlAttr(setup.pageBorders.display)}"` : ''}>${sides}</w:pgBorders>`;
+        next = replaceOrInsertChild(next, /^/, 'pgBorders', pageBorders);
+      }
+      return next;
     }, setup.section ?? 0);
   }
 
@@ -2452,13 +2842,13 @@ export class DocxApiSession {
     if (header !== undefined) {
       this.ensureContentTypeOverride('/word/header1.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml');
       this.ensureDocumentRelationship('rIdHeader1', `${OFFICE_REL_NS}/header`, 'header1.xml');
-      this.entries.set('word/header1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="${WORD_NS}">${paragraphXml(header, { paragraphStyle: { align: op.align || 'center' } })}</w:hdr>`, 'utf8'));
+      this.entries.set('word/header1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr xmlns:w="${WORD_NS}">${headerFooterParagraphXml(header, { paragraphStyle: { align: op.align || 'center' }, runStyle: op.runStyle })}</w:hdr>`, 'utf8'));
       headerReferenceXml = '<w:headerReference w:type="default" r:id="rIdHeader1"/>';
     }
     if (footer !== undefined) {
       this.ensureContentTypeOverride('/word/footer1.xml', 'application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml');
       this.ensureDocumentRelationship('rIdFooter1', `${OFFICE_REL_NS}/footer`, 'footer1.xml');
-      this.entries.set('word/footer1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="${WORD_NS}">${paragraphXml(footer, { paragraphStyle: { align: op.align || 'center' } })}</w:ftr>`, 'utf8'));
+      this.entries.set('word/footer1.xml', Buffer.from(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:ftr xmlns:w="${WORD_NS}">${headerFooterParagraphXml(footer, { paragraphStyle: { align: op.align || 'center' }, runStyle: op.runStyle })}</w:ftr>`, 'utf8'));
       footerReferenceXml = '<w:footerReference w:type="default" r:id="rIdFooter1"/>';
     }
     this.updateSectPr((body) => {
@@ -2550,6 +2940,7 @@ export class DocxApiSession {
       heightEmu: op.heightEmu,
       docPrId,
       altText: op.altText ?? '',
+      align: op.align ?? 'center',
     });
     const captionParagraph = op.caption
       ? paragraphXml(op.caption, { paragraphStyle: op.captionParagraphStyle, runStyle: op.captionRunStyle })
@@ -2582,6 +2973,8 @@ export class DocxApiSession {
     issues.push(...tableCapacityRiskIssues(json));
     if (options.baselineJson) {
       if (!options.allowSectionLayoutChanges) {
+        const allowedSections = new Set(options.allowedSectionLayoutChanges ?? []);
+        const allSectionsAllowed = allowedSections.has('all');
         const pageLayout = (section) => ({
           section: section.section,
           pageSetup: section.pageSetup,
@@ -2590,7 +2983,13 @@ export class DocxApiSession {
         });
         const baselineLayouts = (options.baselineJson.sections ?? []).map(pageLayout);
         const currentLayouts = (json.sections ?? []).map(pageLayout);
-        if (JSON.stringify(currentLayouts) !== JSON.stringify(baselineLayouts)) {
+        const sectionCountChanged = currentLayouts.length !== baselineLayouts.length;
+        const unauthorizedLayoutChanged = !sectionCountChanged && currentLayouts.some((layout, index) => (
+          !allSectionsAllowed
+          && !allowedSections.has(index)
+          && JSON.stringify(layout) !== JSON.stringify(baselineLayouts[index])
+        ));
+        if (sectionCountChanged || unauthorizedLayoutChanged) {
           issues.push({
             severity: 'error',
             code: 'section-layout-changed',
@@ -2622,9 +3021,17 @@ export class DocxApiSession {
       if (baselineIntegrity && currentIntegrity) {
         const lost = Object.fromEntries(
           Object.keys(baselineIntegrity)
-            .filter((key) => Number(currentIntegrity[key] ?? 0) < Number(baselineIntegrity[key] ?? 0))
+            .filter((key) => Number(currentIntegrity[key] ?? 0) < Math.max(
+              0,
+              Number(baselineIntegrity[key] ?? 0)
+                - Number(this.intentionalReferenceIntegrityLoss[key] ?? 0),
+            ))
             .map((key) => [key, {
-              before: Number(baselineIntegrity[key] ?? 0),
+              before: Math.max(
+                0,
+                Number(baselineIntegrity[key] ?? 0)
+                  - Number(this.intentionalReferenceIntegrityLoss[key] ?? 0),
+              ),
               after: Number(currentIntegrity[key] ?? 0),
             }]),
         );

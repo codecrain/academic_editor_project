@@ -676,6 +676,9 @@ window.L.Map.WOPI = window.L.Handler.extend({
 		else if (msg.MessageId === 'Get_Document_UI_State') {
 			this._postMessage({msgId: 'Get_Document_UI_State_Resp', args: this._getDocumentUIState()});
 		}
+		else if (msg.MessageId === 'Restore_Document_UI_State') {
+			this._restoreDocumentUIState(msg.Values);
+		}
 		else if (msg.MessageId === 'Reset_Access_Token') {
 			if (msg.Values) {
 				// No ttl implies no expiry tracking, matching the legacy
@@ -1178,6 +1181,8 @@ window.L.Map.WOPI = window.L.Handler.extend({
 
 	_getDocumentUIState: function() {
 		const docLayer = this._map && this._map._docLayer;
+		const activeLayout = app.activeDocument && app.activeDocument.activeLayout;
+		const viewedRectangle = activeLayout && activeLayout.viewedRectangle;
 		const pageRectangles = app.file && app.file.writer && Array.isArray(app.file.writer.pageRectangleList)
 			? app.file.writer.pageRectangleList
 			: [];
@@ -1218,6 +1223,11 @@ window.L.Map.WOPI = window.L.Handler.extend({
 			CurrentPage: currentPage,
 			ZoomPercent: typeof this._map.getZoomPercent === 'function' ? this._map.getZoomPercent() : null,
 			ViewMode: multiPage ? 'multi-page' : 'single-page',
+			Viewport: viewedRectangle ? {
+				Unit: 'twip',
+				X: Number(viewedRectangle.pX1) || 0,
+				Y: Number(viewedRectangle.pY1) || 0
+			} : null,
 			PageGeometry: {
 				Unit: 'twip',
 				PageCount: pageRectangles.length,
@@ -1236,6 +1246,61 @@ window.L.Map.WOPI = window.L.Handler.extend({
 				Zoom: zoomVisibleCount > 1
 			}
 		};
+	},
+
+	_restoreDocumentUIState: function(values) {
+		const state = values && typeof values === 'object' ? values : {};
+		const requestedViewMode = state.ViewMode;
+		const requestedZoomPercent = Number(state.ZoomPercent);
+		const requestedPage = Number(state.CurrentPage);
+		const viewport = state.Viewport && typeof state.Viewport === 'object' ? state.Viewport : null;
+		const viewportX = viewport && viewport.Unit === 'twip' ? Number(viewport.X) : NaN;
+		const viewportY = viewport && viewport.Unit === 'twip' ? Number(viewport.Y) : NaN;
+		const map = this._map;
+		const activeLayout = app.activeDocument && app.activeDocument.activeLayout;
+		const pageRectangles = app.file && app.file.writer && Array.isArray(app.file.writer.pageRectangleList)
+			? app.file.writer.pageRectangleList
+			: [];
+
+		if (!map || !activeLayout) {
+			this._postMessage({
+				msgId: 'Restore_Document_UI_State_Resp',
+				args: {Applied: false, Error: 'Document layout is unavailable'}
+			});
+			return;
+		}
+
+		const currentMultiPage = Boolean(map.uiManager && map.uiManager.isMultiPageView());
+		const wantsMultiPage = requestedViewMode === 'multi-page';
+		if ((requestedViewMode === 'single-page' || wantsMultiPage) && wantsMultiPage !== currentMultiPage && app.dispatcher)
+			app.dispatcher.dispatch('multipageview');
+
+		if (Number.isFinite(requestedZoomPercent) && typeof map.getZoomIndex === 'function') {
+			const zoomIndex = map.getZoomIndex(requestedZoomPercent);
+			if (Number.isFinite(zoomIndex) && zoomIndex > 0)
+				map.setZoom(zoomIndex, {animate: false});
+		}
+
+		let scrollX = Number.isFinite(viewportX) ? Math.max(0, viewportX) : 0;
+		let scrollY = Number.isFinite(viewportY) ? Math.max(0, viewportY) : NaN;
+		if (!Number.isFinite(scrollY) && Number.isInteger(requestedPage) && requestedPage > 0 && requestedPage <= pageRectangles.length) {
+			const pageRectangle = pageRectangles[requestedPage - 1];
+			scrollY = Array.isArray(pageRectangle) ? Math.max(0, Number(pageRectangle[1]) || 0) : 0;
+		}
+
+		const self = this;
+		const finish = function() {
+			const nextLayout = app.activeDocument && app.activeDocument.activeLayout;
+			if (nextLayout && Number.isFinite(scrollY))
+				nextLayout.scrollTo(scrollX, scrollY);
+			self._postMessage({
+				msgId: 'Restore_Document_UI_State_Resp',
+				args: {Applied: true}
+			});
+		};
+		window.requestAnimationFrame(function() {
+			window.requestAnimationFrame(finish);
+		});
 	}
 });
 

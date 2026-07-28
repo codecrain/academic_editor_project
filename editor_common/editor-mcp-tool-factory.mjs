@@ -14,9 +14,10 @@ function createEditorMcpTools({
   commandCategories,
   commandOps,
   includePdf = true,
+  readViews = ['summary', 'blocks', 'tables'],
 }) {
   const normalizedFormat = String(format || '').toLowerCase();
-  if (!['docx', 'hwpx'].includes(normalizedFormat)) {
+  if (!['docx', 'hwpx', 'pdf'].includes(normalizedFormat)) {
     throw new Error(`Unsupported editor MCP format: ${format}`);
   }
   const label = normalizedFormat.toUpperCase();
@@ -56,10 +57,10 @@ function createEditorMcpTools({
     },
     {
       name: `${prefix}_read_json`,
-      description: `Read a bounded, revision-stable projection of the current ${label}. Start with summary, then page blocks or tables with the opaque nextCursor.`,
+      description: `Read a bounded, revision-stable projection of the current ${label}. Start with summary, then page the required view with the opaque nextCursor.`,
       inputSchema: objectSchema({
         documentId: documentIdProperty,
-        view: { type: 'string', enum: ['summary', 'blocks', 'tables'], default: 'summary' },
+        view: { type: 'string', enum: readViews, default: 'summary' },
         limit: { type: 'integer', minimum: 1, maximum: 100, default: 40 },
         cursor: { type: ['string', 'null'], minLength: 1, maxLength: 2048, description: 'Opaque nextCursor returned by the preceding page. It is bound to the document revision and original query.' },
         textPreviewChars: { type: 'integer', minimum: 32, maximum: 512, default: 200 },

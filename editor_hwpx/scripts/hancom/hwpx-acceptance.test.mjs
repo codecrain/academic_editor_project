@@ -33,14 +33,18 @@ test('Hancom harness dry-run records evidence without starting or stopping Hwp p
     '-ResavedPath', path.join(tempRoot, 'resaved.hwpx'),
     '-PdfPath', path.join(tempRoot, 'rendered.pdf'),
     '-EvidencePath', evidencePath,
+    '-SkipPdf',
     '-DryRun',
   ], { windowsHide: true });
 
   const result = JSON.parse(await readFile(evidencePath, 'utf8'));
   assert.equal(result.status, 'dry-run');
+  assert.equal(result.mode, 'open-resave');
   assert.equal(result.opened, false);
   assert.equal(result.resaved, false);
   assert.equal(result.pdfExported, false);
+  assert.equal(result.paginationStable, false);
+  assert.deepEqual(result.pageImages, []);
   assert.deepEqual(result.ownedPids, []);
   assert.equal(await hwpPids(), before);
 });

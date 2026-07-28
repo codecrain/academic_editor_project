@@ -1128,6 +1128,39 @@ test('style adapters treat direct cellIndex targets as table cells', () => {
   ]);
 });
 
+test('cell paragraph formatting honors an explicit paragraph index over the inspected cell default', () => {
+  const calls = [];
+  const doc = {
+    applyParaFormatInCell: (...args) => {
+      calls.push([...args.slice(0, 5), JSON.parse(args[5])]);
+      return '{"ok":true}';
+    },
+  };
+  const context = {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        cells: [{
+          cellIndex: 2,
+          native: {
+            sectionIndex: 0,
+            paragraphIndex: 3,
+            controlIndex: 1,
+            cellIndex: 2,
+            cellParagraphIndex: 0,
+          },
+        }],
+      }],
+    },
+  };
+  applyHwpxStructuralCommand(doc, {
+    op: 'setParagraphStyle',
+    target: { tableId: 'tbl_0', cell: { number: 2 }, cellParagraphIndex: 4 },
+    style: { indent: -1907 },
+  }, context);
+  assert.deepEqual(calls, [[0, 3, 1, 2, 4, { indent: -1907 }]]);
+});
+
 test('direct cell targets keep one alias precedence and honor cell paragraph aliases', () => {
   const calls = [];
   const doc = {
