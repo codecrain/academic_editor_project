@@ -252,11 +252,18 @@ test('production deployment installs a pinned native release once and records it
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
   const installer = readProjectFile('editor_docx/scripts/install-native-artifact.mjs');
 
-  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-002/);
+  assert.match(production, /EDITOR_NATIVE_RELEASE_TAG=.*native-20260728-003/);
   assert.match(deployment, /native_release_is_current\(\)/);
   assert.match(deployment, /EDITOR_NATIVE_RELEASE_MARKER/);
   assert.match(deployment, /native runtime release is current/);
   assert.match(installer, /writeFileSync\(releaseMarker, `\$\{releaseTag\}\\n`/);
+});
+
+test('native release workflow uses the compiler-capable current Ubuntu runner', () => {
+  const workflow = readProjectFile('.github/workflows/native-editor-runtime.yml');
+  assert.match(workflow, /runs-on: ubuntu-24\.04/);
+  assert.match(workflow, /node-version: '24'/);
+  assert.doesNotMatch(workflow, /ubuntu-22\.04|node-version: '20'/);
 });
 
 test('production HWPX static build consumes the validated tracked core artifact', () => {
