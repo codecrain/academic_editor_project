@@ -64,6 +64,7 @@ function safeRuntimeEnv() {
     EDITOR_PUBLIC_URL: readEnv('EDITOR_PUBLIC_URL'),
     EDITOR_INTERNAL_SERVER_URL: readEnv('EDITOR_INTERNAL_SERVER_URL'),
     EDITOR_DISCOVERY_SERVER_URL: readEnv('EDITOR_DISCOVERY_SERVER_URL'),
+    EDITOR_BRANDING_DISCOVERY_SERVER_URL: readEnv('EDITOR_BRANDING_DISCOVERY_SERVER_URL'),
     EDITOR_ALLOWED_DOMAIN: readEnv('EDITOR_ALLOWED_DOMAIN'),
     EDITOR_NATIVE_RUNTIME_DIR: readEnv('EDITOR_NATIVE_RUNTIME_DIR', '/var/lib/academic-editor'),
     EDITOR_NATIVE_CACHE_DIR: readEnv('EDITOR_NATIVE_CACHE_DIR', '/var/cache/academic-editor'),
@@ -108,6 +109,16 @@ function resolveDiscoveryBaseUrl(port) {
 
 function resolveDiscoveryUrl(port) {
   return `${resolveDiscoveryBaseUrl(port)}/hosting/discovery`;
+}
+
+function resolveBrandingDiscoveryUrl(port) {
+  const configured = readEnv('EDITOR_BRANDING_DISCOVERY_SERVER_URL')
+    || readEnv('EDITOR_DISCOVERY_SERVER_URL')
+    || readEnv('EDITOR_INTERNAL_SERVER_URL');
+  if (configured) {
+    return `${normalizeBaseUrl(configured)}/hosting/discovery`;
+  }
+  return resolveDiscoveryUrl(port);
 }
 
 function httpClientForUrl(url) {
@@ -262,6 +273,7 @@ async function main() {
   const outputPath = path.resolve(parseArg('output') || defaultOutputPath());
   const hostPort = Number.parseInt(readEnv('EDITOR_HOST_PORT', '9980'), 10);
   const discoveryUrl = Number.isFinite(hostPort) ? resolveDiscoveryUrl(hostPort) : '';
+  const brandingDiscoveryUrl = Number.isFinite(hostPort) ? resolveBrandingDiscoveryUrl(hostPort) : '';
   const audit = {
     generatedAt: new Date().toISOString(),
     platform: process.platform,
@@ -295,7 +307,7 @@ async function main() {
         ? await fetchDiscovery(discoveryUrl)
         : { command: 'parse EDITOR_HOST_PORT', ok: false, status: 0, bytes: 0, error: 'invalid port' },
       browserBranding: Number.isFinite(hostPort)
-        ? await scanBrowserBranding(discoveryUrl)
+        ? await scanBrowserBranding(brandingDiscoveryUrl)
         : { command: 'parse EDITOR_HOST_PORT', ok: false, status: 0, bytes: 0, error: 'invalid port' },
     },
   };
@@ -308,6 +320,14 @@ async function main() {
   console.log(`[audit:native] wrote ${outputPath}`);
   console.log(`[audit:native] ${audit.ok ? 'ok' : 'failed'}`);
   if (!audit.ok) {
+    for (const [name, check] of Object.entries(audit.checks).filter(([, check]) => check.ok !== true)) {
+      const detail = check.error
+        || (Array.isArray(check.matches) && check.matches.length ? `matches=${check.matches.join(',')}` : '')
+        || check.stderr
+        || check.stdout
+        || `status=${check.status ?? 'unknown'}`;
+      console.error(`[audit:native] failed check ${name}: ${detail}`);
+    }
     process.exit(1);
   }
 }

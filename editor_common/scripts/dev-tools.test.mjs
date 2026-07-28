@@ -261,6 +261,17 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /pm2 save/);
 });
 
+test('native audit checks direct runtime health and gateway-delivered browser branding separately', () => {
+  const deploy = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
+  const audit = readProjectFile('editor_docx/scripts/audit-native-editor-runtime.mjs');
+  assert.match(deploy, /EDITOR_BRANDING_DISCOVERY_SERVER_URL="\$\{EDITOR_BRANDING_DISCOVERY_SERVER_URL:-\$\{EDITOR_INTERNAL_SERVER_URL\}\}"/);
+  assert.match(deploy, /EDITOR_DISCOVERY_SERVER_URL="\$EDITOR_RUNTIME_DISCOVERY_SERVER_URL"/);
+  assert.match(deploy, /EDITOR_BRANDING_DISCOVERY_SERVER_URL="\$EDITOR_BRANDING_DISCOVERY_SERVER_URL"/);
+  assert.match(audit, /function resolveBrandingDiscoveryUrl/);
+  assert.match(audit, /scanBrowserBranding\(brandingDiscoveryUrl\)/);
+  assert.match(audit, /failed check \$\{name\}/);
+});
+
 test('production deployment installs a pinned native release once and records it', () => {
   const production = readProjectFile('sh.start');
   const deployment = readProjectFile('editor_common/scripts/deploy-native-editor.sh');
