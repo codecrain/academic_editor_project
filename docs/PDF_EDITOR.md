@@ -12,7 +12,10 @@ form content, or the PDF object graph. Such commands are rejected rather than
 silently rasterizing or reconstructing source pages. A visible signature
 appearance is an image overlay, not a certificate-backed digital signature.
 
-Coordinates are PDF points measured from the page's lower-left origin. Each
+Coordinates are PDF points measured from the rendered page's top-left origin.
+The engine converts them to the PDF page's lower-left coordinate system when
+writing. Coordinate edits on already rotated pages are rejected until the
+rotation-aware object transform path is implemented. Each
 write requires the session's current `baseRevision`. After every write, reopen
 the saved bytes, inspect the declared page/object invariants, render the
 affected pages, and run `quality_check` before `save_source` or `export_pdf`.
@@ -44,6 +47,7 @@ signature or arbitrary source-object replacement, neither of which is offered.
 
 ## Dependencies and notices
 
-Install the isolated PDF runtime dependencies with `npm install --prefix
-editor_pdf`. License and distribution obligations are recorded in
+Install the exact isolated PDF runtime dependencies with `npm ci --prefix
+editor_pdf`. Production also requires Poppler's `pdftoppm` for independent
+page rendering. License and distribution obligations are recorded in
 [editor_pdf/OPEN_SOURCE_NOTICE.md](../editor_pdf/OPEN_SOURCE_NOTICE.md).

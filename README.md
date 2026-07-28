@@ -72,6 +72,7 @@ npm run dev:check
 To start the local editor runtimes together for service integration:
 
 ```bash
+npm ci --prefix editor_pdf
 npm run dev
 npm run stop
 ```
@@ -84,7 +85,7 @@ stable subpaths:
 
 - DOCX discovery: `http://127.0.0.1:9980/docx/hosting/discovery`
 - HWP/HWPX Studio: `http://127.0.0.1:11004/hwpx/`
-- PDF editor: `http://127.0.0.1:11000/pdf/`
+- PDF editor: `http://127.0.0.1:11004/pdf/`
 
 ## MCP Endpoint
 

@@ -7,6 +7,12 @@ Public License 2.0.
 The DOCX editor source is vendored under `editor_docx/`. The HWP/HWPX editor
 source is vendored separately under `editor_hwpx/`.
 
+The PDF editor is isolated under `editor_pdf/` and uses pinned permissive
+dependencies: Mozilla PDF.js (Apache-2.0), pdf-lib (MIT), and
+@napi-rs/canvas (MIT). Its exact dependency graph is recorded in
+`editor_pdf/package-lock.json`, and its component notice is
+`editor_pdf/OPEN_SOURCE_NOTICE.md`.
+
 The private SaaS application that connects to this runtime over WOPI is a
 separate larger work. Its authentication, storage, database, billing, product UI,
 deployment secrets, and proprietary service code are not part of this public
