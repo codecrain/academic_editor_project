@@ -399,7 +399,7 @@ install_deps_if_requested() {
     return 0
   }
   log "installing missing native dependencies"
-  npm run deps:native
+  npm run deps:native:runtime
 }
 
 dependency_lock_fingerprint() {

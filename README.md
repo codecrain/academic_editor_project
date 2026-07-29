@@ -292,8 +292,9 @@ explicit build-host operation (`npm --prefix editor_hwpx run build:core`), not a
 normal deployment step.
 
 Both entrypoints accept the same runtime variables documented below. `sh.start`
-automatically installs missing Ubuntu runtime dependencies (including
-Poppler) and restores each isolated PDF/HWPX npm workspace whenever its tracked
+automatically installs only the missing Ubuntu runtime dependencies (including
+Poppler), never the native source-build toolchain, and restores each isolated
+PDF/HWPX npm workspace whenever its tracked
 `package-lock.json` changes or `node_modules` is missing. Set
 `EDITOR_NATIVE_AUTO_DEPS=false` only on a locked-down server with the native
 dependencies already provisioned. Other useful overrides are

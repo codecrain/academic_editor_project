@@ -229,6 +229,11 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /npm run install:native:artifact/);
   assert.match(helper, /native_dependencies_ready\(\)/);
   assert.match(helper, /command -v pdftoppm/);
+  assert.match(helper, /npm run deps:native:runtime/);
+  assert.doesNotMatch(helper, /npm run deps:native\s*$/m);
+  const runtimeInstaller = readProjectFile('editor_docx/scripts/install-native-runtime-deps.sh');
+  assert.match(runtimeInstaller, /poppler-utils/);
+  assert.doesNotMatch(runtimeInstaller, /libcap-dev|build-essential|libpixman-1-dev/);
   assert.match(helper, /ensure_node_workspace_dependencies\(\)/);
   assert.match(helper, /dependency-locks/);
   assert.match(helper, /npm --prefix "\$workspace" ci/);
