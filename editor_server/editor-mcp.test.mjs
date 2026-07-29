@@ -5,8 +5,28 @@ import {
   EDITOR_MCP_TOOLS,
   handleEditorMcpJsonRpc,
   HWPX_MCP_TOOLS,
+  IMAGE_MCP_TOOLS,
 } from './editor-mcp.mjs';
 import { EDITOR_MCP_SCHEMA_FACTORY } from '../editor_common/editor-mcp-tool-factory.mjs';
+
+test('MCP advertises capability-scoped Image Studio tools and validates their input', async () => {
+  assert.deepEqual(IMAGE_MCP_TOOLS.map((tool) => tool.name), [
+    'editor_image_open',
+    'editor_image_session_read',
+    'editor_image_session_result_read',
+    'editor_image_session_save',
+    'editor_image_session_delete',
+  ]);
+  const invalid = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'editor_image_open', arguments: { filename: 'x.png' } },
+  }, { executeTool: async () => ({ ok: true }) });
+  assert.equal(invalid.result.isError, true);
+  const valid = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'editor_image_open', arguments: { filename: 'x.png', bytesBase64: 'iVBORw==' } },
+  }, { executeTool: async (name, args) => ({ ok: true, name, args }) });
+  assert.equal(valid.result.isError, false);
+  assert.equal(valid.result.structuredContent.name, 'editor_image_open');
+});
 
 test('MCP validates advertised input schemas before executing a tool', async () => {
   const calls = [];

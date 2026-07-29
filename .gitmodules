@@ -1,0 +1,3 @@
+[submodule "editor_image/vendor/minipaint"]
+	path = editor_image/vendor/minipaint
+	url = https://github.com/viliusle/miniPaint.git

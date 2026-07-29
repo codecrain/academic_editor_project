@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { copyFile, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
+import { ImageSessionStore } from '../editor_image/image-session-store.mjs';
 
 const formatAdapters = new Map([
   [docxAdapter.format, docxAdapter],
@@ -39,8 +40,15 @@ const MCP_CELL_PREVIEW_DEFAULT_LIMIT = 3;
 const MCP_CELL_PREVIEW_MAX_LIMIT = 12;
 const STATIC_MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
+  ['.gif', 'image/gif'],
   ['.html', 'text/html; charset=utf-8'],
+  ['.ico', 'image/x-icon'],
+  ['.jpeg', 'image/jpeg'],
   ['.js', 'text/javascript; charset=utf-8'],
+  ['.jpg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.webp', 'image/webp'],
   ['.mjs', 'text/javascript; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.map', 'application/json; charset=utf-8'],
@@ -160,6 +168,11 @@ function shouldPrefixDocxServiceRoot(pathname, docxServiceRoot) {
 
 function isHwpxPath(pathname, hwpxBasePath) {
   const base = hwpxBasePath.replace(/\/$/, '');
+  return pathname === base || pathname.startsWith(`${base}/`);
+}
+
+function isImagePath(pathname, imageBasePath) {
+  const base = imageBasePath.replace(/\/$/, '');
   return pathname === base || pathname.startsWith(`${base}/`);
 }
 
@@ -475,6 +488,91 @@ function editorDocumentApiMatch(pathname) {
   return match ? { action: match[2] || 'item', documentId: match[1] } : null;
 }
 
+function imageSessionApiMatch(pathname) {
+  if (pathname === '/api/image-sessions') return { action: 'collection', sessionId: '' };
+  const match = pathname.match(/^\/api\/image-sessions\/(img_[0-9a-f-]+)\/([A-Za-z0-9_-]{20,})\/(source|export|download)$/);
+  return match ? { action: match[3], sessionId: match[1], token: match[2] } : null;
+}
+
+function imageSessionUrls(config, record) {
+  const sourcePath = `/api/image-sessions/${record.id}/${record.token}/source`;
+  const exportPath = `/api/image-sessions/${record.id}/${record.token}/export`;
+  const downloadPath = `/api/image-sessions/${record.id}/${record.token}/download`;
+  return {
+    sourceUrl: `${config.publicOrigin}${sourcePath}`,
+    exportUrl: `${config.publicOrigin}${exportPath}`,
+    downloadUrl: `${config.publicOrigin}${downloadPath}`,
+    editorUrl: `${config.publicOrigin}${config.imageBasePath}?image=${sourcePath}&save=${exportPath}`,
+  };
+}
+
+function sendImageSessionBytes(res, bytes, mimeType, filename = '') {
+  res.writeHead(200, {
+    'Content-Type': mimeType,
+    'Content-Length': String(bytes.length),
+    'Cache-Control': 'no-store',
+    'Content-Disposition': filename ? `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` : 'inline',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(bytes);
+}
+
+async function handleImageSessionApi(req, res, config, route) {
+  const store = config.imageSessionStore;
+  try {
+    if (route.action === 'collection' && req.method === 'POST') {
+      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
+      const bytes = Buffer.from(String(body.bytesBase64 || ''), 'base64');
+      const record = store.create({ bytes, filename: body.filename });
+      sendJson(res, 201, {
+        ok: true,
+        sessionId: record.id,
+        filename: record.filename,
+        mimeType: record.sourceMimeType,
+        byteLength: record.sourceBytes.length,
+        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
+        ...imageSessionUrls(config, record),
+      });
+      return true;
+    }
+    const record = store.get(route.sessionId, route.token);
+    if (!record) {
+      sendJson(res, 404, { ok: false, message: 'Image session was not found or the capability token is invalid.' });
+      return true;
+    }
+    if (route.action === 'source' && req.method === 'GET') {
+      sendImageSessionBytes(res, record.sourceBytes, record.sourceMimeType);
+      return true;
+    }
+    if (route.action === 'export' && req.method === 'POST') {
+      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
+      const saved = store.save(record.id, record.token, Buffer.from(String(body.bytesBase64 || ''), 'base64'));
+      sendJson(res, 200, {
+        ok: true,
+        sessionId: saved.id,
+        mimeType: saved.resultMimeType,
+        byteLength: saved.resultBytes.length,
+        downloadUrl: imageSessionUrls(config, saved).downloadUrl,
+      });
+      return true;
+    }
+    if (route.action === 'download' && req.method === 'GET') {
+      if (!record.resultBytes) {
+        sendJson(res, 409, { ok: false, message: 'The image session has no saved result yet.' });
+        return true;
+      }
+      sendImageSessionBytes(res, record.resultBytes, record.resultMimeType, record.filename.replace(/\.[^.]+$/, '.png'));
+      return true;
+    }
+    sendJson(res, 405, { ok: false, message: 'Method not allowed.' });
+    return true;
+  } catch (error) {
+    const status = /exceeds|exceeded/i.test(String(error?.message || '')) ? 413 : 400;
+    sendJson(res, status, { ok: false, message: error instanceof Error ? error.message : String(error) });
+    return true;
+  }
+}
+
 function editorDocumentErrorStatus(error) {
   if (error?.code === 'DOCUMENT_NOT_FOUND') {
     return 404;
@@ -555,13 +653,14 @@ function stateLockDelete(config, documentId) {
   config.documentLocks?.delete(documentId);
 }
 
-function sendStaticFile(req, res, filePath) {
+function sendStaticFile(req, res, filePath, headers = {}) {
   const stat = statSync(filePath);
   const contentType = STATIC_MIME_TYPES.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream';
   res.writeHead(200, {
     'Content-Type': contentType,
     'Content-Length': String(stat.size),
     'Cache-Control': 'no-store',
+    ...headers,
   });
   if (req.method === 'HEAD') {
     res.end();
@@ -574,8 +673,8 @@ function isEditorApiPath(pathname) {
   return /^\/v1\/(?:docx|hwpx)\//.test(pathname);
 }
 
-async function readJsonBody(req) {
-  const body = await readRequestBody(req);
+async function readJsonBody(req, limitBytes) {
+  const body = await readRequestBody(req, limitBytes);
   if (!body.length) {
     return {};
   }
@@ -1626,6 +1725,67 @@ function handleHwpxStaticRequest(req, res, config, pathname) {
   return true;
 }
 
+const IMAGE_EDITOR_CSP = [
+  "default-src 'self' blob: data:",
+  "connect-src 'self'",
+  "font-src 'self' data:",
+  "img-src 'self' blob: data:",
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "worker-src 'self' blob:",
+].join('; ');
+
+function debrandImageEditorHtml(html) {
+  return html
+    .replace(/<title>miniPaint - image editor<\/title>/, '<title>Tlooto Image Studio</title>')
+    .replace(/miniPaint is free online image editor[^<]*/g, 'Tlooto Image Studio is a local, non-generative image editor.')
+    .replace(/https:\/\/viliusle\.github\.io\/miniPaint\//g, '')
+    .replace(/<a class="logo" href="#">miniPaint<\/a>/, '<a class="logo" href="#">Image Studio</a>')
+    .replace('<script src="dist/bundle.js"></script>', '<script src="dist/bundle.js"></script><script defer src="tlooto-image-studio.js"></script>');
+}
+
+function handleImageStaticRequest(req, res, config, pathname) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendText(res, 405, 'Method not allowed');
+    return true;
+  }
+
+  const integrationPath = `${config.imageBasePath}tlooto-image-studio.js`;
+  if (pathname === integrationPath) {
+    sendStaticFile(req, res, path.join(config.imageIntegrationRoot, 'tlooto-image-studio.js'), {
+      'Content-Security-Policy': IMAGE_EDITOR_CSP,
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return true;
+  }
+  let filePath = resolveStaticPath(config.imageStaticRoot, config.imageBasePath, pathname);
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    const hasExtension = Boolean(path.extname(pathname));
+    const fallbackPath = path.join(config.imageStaticRoot, 'index.html');
+    if (!hasExtension && existsSync(fallbackPath) && statSync(fallbackPath).isFile()) {
+      filePath = fallbackPath;
+    } else {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+  }
+
+  const headers = {
+    'Content-Security-Policy': IMAGE_EDITOR_CSP,
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+  };
+  if (path.extname(filePath).toLowerCase() !== '.html') {
+    sendStaticFile(req, res, filePath, headers);
+    return true;
+  }
+
+  const html = debrandImageEditorHtml(readFileSync(filePath, 'utf8'));
+  sendText(res, 200, html, 'text/html; charset=utf-8', headers);
+  return true;
+}
+
 function isEditorHtmlPath(pathname) {
   return pathname.endsWith('/cool.html');
 }
@@ -2267,6 +2427,56 @@ function qualityAllowsFinalization(quality, fmt) {
 }
 
 async function executeEditorMcpTool(req, config, state, name, args = {}) {
+  if (name.startsWith('editor_image_')) {
+    const store = config.imageSessionStore;
+    if (name === 'editor_image_open') {
+      const record = store.create({ bytes: Buffer.from(args.bytesBase64, 'base64'), filename: args.filename });
+      return {
+        ok: true,
+        sessionId: record.id,
+        token: record.token,
+        filename: record.filename,
+        mimeType: record.sourceMimeType,
+        byteLength: record.sourceBytes.length,
+        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
+        ...imageSessionUrls(config, record),
+      };
+    }
+    const record = store.get(args.sessionId, args.token);
+    if (!record) throw new Error('Image session was not found or the capability token is invalid.');
+    if (name === 'editor_image_session_read') {
+      return {
+        ok: true,
+        sessionId: record.id,
+        token: record.token,
+        filename: record.filename,
+        source: { mimeType: record.sourceMimeType, byteLength: record.sourceBytes.length },
+        result: record.resultBytes ? { mimeType: record.resultMimeType, byteLength: record.resultBytes.length } : null,
+        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
+        ...imageSessionUrls(config, record),
+      };
+    }
+    if (name === 'editor_image_session_result_read') {
+      if (!record.resultBytes) throw new Error('The image session has no saved result yet.');
+      return {
+        ok: true,
+        sessionId: record.id,
+        filename: record.filename.replace(/\.[^.]+$/, '.png'),
+        mimeType: record.resultMimeType,
+        byteLength: record.resultBytes.length,
+        sha256: sha256(record.resultBytes),
+        bytesBase64: record.resultBytes.toString('base64'),
+      };
+    }
+    if (name === 'editor_image_session_save') {
+      const saved = store.save(record.id, record.token, Buffer.from(args.bytesBase64, 'base64'));
+      return { ok: true, sessionId: saved.id, mimeType: saved.resultMimeType, byteLength: saved.resultBytes.length, downloadUrl: imageSessionUrls(config, saved).downloadUrl };
+    }
+    if (name === 'editor_image_session_delete') {
+      return { ok: true, sessionId: record.id, deleted: store.delete(record.id, record.token) };
+    }
+    throw new Error(`Unsupported Image Studio MCP tool: ${name}`);
+  }
   const fmt = name.match(/^editor_(docx|hwpx)_/)?.[1];
   if (!fmt) throw new Error(`Unknown editor MCP tool prefix: ${name}`);
   const toolPrefix = `editor_${fmt}`;
@@ -2485,9 +2695,18 @@ function createGatewayServer(config) {
     mcpPath: '/mcp',
     internalBearerToken: '',
     mcpAllowBytesRef: false,
+    imageBasePath: '/image/',
+    imageStaticRoot: path.join(repoRoot, 'editor_image', 'vendor', 'minipaint'),
+    imageIntegrationRoot: path.join(repoRoot, 'editor_image'),
+    imageSessionMaxBytes: 25 * 1024 * 1024,
+    imageSessionTtlMs: 2 * 60 * 60 * 1000,
     ...config,
   };
   config.documentLocks ??= new Map();
+  config.imageSessionStore ??= new ImageSessionStore({
+    maxImageBytes: config.imageSessionMaxBytes,
+    ttlMs: config.imageSessionTtlMs,
+  });
   const state = {
     lock: '',
     version: 1,
@@ -2513,6 +2732,12 @@ function createGatewayServer(config) {
       const storedDocumentRoute = editorDocumentApiMatch(pathname);
       if (storedDocumentRoute && config.documentStore) {
         await handleStoredDocumentApi(req, res, config, storedDocumentRoute);
+        return;
+      }
+
+      const imageSessionRoute = imageSessionApiMatch(pathname);
+      if (imageSessionRoute) {
+        await handleImageSessionApi(req, res, config, imageSessionRoute);
         return;
       }
 
@@ -2594,6 +2819,10 @@ function createGatewayServer(config) {
         return;
       }
 
+      if (isImagePath(pathname, config.imageBasePath) && handleImageStaticRequest(req, res, config, pathname)) {
+        return;
+      }
+
       const targetOrigin = resolveTargetOrigin(req, config);
       if (targetOrigin) {
         proxyHttpRequest(req, res, targetOrigin, resolveProxyHeaderOptions(req, targetOrigin, config));
@@ -2632,6 +2861,7 @@ function buildConfigFromEnv() {
   const port = parsePositiveInteger(readEnv('EDITOR_GATEWAY_PORT', '11004'), 11004);
   const docxServiceRoot = normalizeServiceRoot(readEnv('EDITOR_SERVICE_ROOT', '/docx'));
   const hwpxBasePath = normalizeBasePath(readEnv('RHWP_STUDIO_BASE_PATH', '/hwpx/'));
+  const imageBasePath = normalizeBasePath(readEnv('EDITOR_IMAGE_BASE_PATH', '/image/'));
   const publicOrigin = normalizeOrigin(readEnv(
     'ACADEMIC_EDITOR_API_ORIGIN',
     readEnv('EDITOR_GATEWAY_PUBLIC_ORIGIN', `http://${host}:${port}`),
@@ -2664,6 +2894,7 @@ function buildConfigFromEnv() {
     publicOrigin,
     docxServiceRoot,
     hwpxBasePath,
+    imageBasePath,
     docxRuntimeOrigin: normalizeOrigin(
       readEnv('EDITOR_GATEWAY_DOCX_ORIGIN', `http://127.0.0.1:${readEnv('EDITOR_HOST_PORT', '9980')}`),
     ),
@@ -2671,6 +2902,12 @@ function buildConfigFromEnv() {
     hwpxStaticRoot: path.resolve(
       readEnv('EDITOR_GATEWAY_HWPX_STATIC_ROOT', path.join(repoRoot, 'editor_hwpx', 'rhwp-studio', 'dist')),
     ),
+    imageStaticRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_IMAGE_STATIC_ROOT', path.join(repoRoot, 'editor_image', 'vendor', 'minipaint')),
+    ),
+    imageIntegrationRoot: path.resolve(readEnv('EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT', path.join(repoRoot, 'editor_image'))),
+    imageSessionMaxBytes: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_MAX_BYTES', String(25 * 1024 * 1024)), 25 * 1024 * 1024),
+    imageSessionTtlMs: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_TTL_MS', String(2 * 60 * 60 * 1000)), 2 * 60 * 60 * 1000),
     wopiBaseUrl,
     sampleDocxPath: path.resolve(readEnv('EDITOR_GATEWAY_SAMPLE_DOCX', DEFAULT_GATEWAY_DOCX)),
     enableSampleDocx: readEnv('EDITOR_GATEWAY_ENABLE_SAMPLE_DOCX', 'false').toLowerCase() === 'true',
@@ -2738,6 +2975,7 @@ async function main() {
     console.log(`[editor:gateway] MCP: ${config.publicOrigin}${config.mcpPath}`);
     console.log(`[editor:gateway] DOCX endpoint: ${config.publicOrigin}${config.docxServiceRoot}/edit/{documentId}`);
     console.log(`[editor:gateway] HWPX: ${config.publicOrigin}${config.hwpxBasePath}`);
+    console.log(`[editor:gateway] Image Studio: ${config.publicOrigin}${config.imageBasePath}`);
   });
 }
 
@@ -2756,6 +2994,7 @@ export {
   isDocxRootPath,
   isDocxRuntimePath,
   isHwpxPath,
+  isImagePath,
   normalizeBasePath,
   normalizeServiceRoot,
   main,

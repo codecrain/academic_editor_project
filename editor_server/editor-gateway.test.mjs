@@ -17,6 +17,7 @@ import {
   isDocxRootPath,
   isDocxRuntimePath,
   isHwpxPath,
+  isImagePath,
   normalizeBasePath,
   normalizeServiceRoot,
   renderDocxPage,
@@ -155,6 +156,9 @@ test('gateway routes DOCX root, runtime, and HWPX paths separately', () => {
   assert.equal(isHwpxPath('/hwpx/', '/hwpx/'), true);
   assert.equal(isHwpxPath('/hwpx/assets/index.js', '/hwpx/'), true);
   assert.equal(isHwpxPath('/docx/browser/hash/cool.html', '/hwpx/'), false);
+  assert.equal(isImagePath('/image/', '/image/'), true);
+  assert.equal(isImagePath('/image/dist/bundle.js', '/image/'), true);
+  assert.equal(isImagePath('/hwpx/', '/image/'), false);
 });
 
 test('discardApiSessionState releases the isolated session and its lock idempotently', () => {
@@ -251,6 +255,11 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_save_checkpoint',
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
+      'editor_image_open',
+      'editor_image_session_read',
+      'editor_image_session_result_read',
+      'editor_image_session_save',
+      'editor_image_session_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');
     assert.deepEqual(discardTool.inputSchema.required, ['documentId', 'baseRevision']);
@@ -1688,6 +1697,144 @@ test('gateway serves HWPX static assets on the public /hwpx path', async () => {
   } finally {
     await close(server);
     await rm(staticRoot, { recursive: true, force: true });
+  }
+});
+
+test('gateway serves the local image studio with external network access blocked', async () => {
+  const staticRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-image-'));
+  await mkdir(path.join(staticRoot, 'dist'), { recursive: true });
+  await writeFile(path.join(staticRoot, 'index.html'), [
+    '<!doctype html>',
+    '<title>miniPaint - image editor</title>',
+    '<a class="logo" href="#">miniPaint</a>',
+    '<script src="dist/bundle.js"></script>',
+  ].join(''));
+  await writeFile(path.join(staticRoot, 'dist', 'bundle.js'), 'window.imageStudioReady = true;');
+
+  const server = createGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1',
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    imageBasePath: '/image/',
+    docxRuntimeOrigin: 'http://127.0.0.1:9980',
+    hwpxRuntimeOrigin: '',
+    imageStaticRoot: staticRoot,
+    wopiBaseUrl: 'http://127.0.0.1',
+    sampleDocxPath: path.join(staticRoot, 'sample.docx'),
+    enableSampleDocx: true,
+  });
+
+  const address = await listen(server);
+  assert.equal(typeof address, 'object');
+  const origin = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const html = await fetch(`${origin}/image/`);
+    assert.equal(html.status, 200);
+    assert.equal(html.headers.get('content-security-policy'), "default-src 'self' blob: data:; connect-src 'self'; font-src 'self' data:; img-src 'self' blob: data:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:");
+    assert.equal(html.headers.get('referrer-policy'), 'no-referrer');
+    assert.match(await html.text(), /Tlooto Image Studio/);
+
+    const script = await fetch(`${origin}/image/dist/bundle.js`);
+    assert.equal(script.status, 200);
+    assert.match(await script.text(), /imageStudioReady/);
+  } finally {
+    await close(server);
+    await rm(staticRoot, { recursive: true, force: true });
+  }
+});
+
+test('gateway opens and saves a capability-scoped local image session', async () => {
+  const staticRoot = path.resolve('editor_image', 'vendor', 'minipaint');
+  const integrationRoot = path.resolve('editor_image');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL1WQAAAABJRU5ErkJggg==', 'base64');
+  const gatewayPort = await reservePort();
+  const origin = `http://127.0.0.1:${gatewayPort}`;
+  const server = createGatewayServer({
+    host: '127.0.0.1',
+    port: gatewayPort,
+    publicOrigin: origin,
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    imageBasePath: '/image/',
+    docxRuntimeOrigin: '',
+    hwpxRuntimeOrigin: '',
+    imageStaticRoot: staticRoot,
+    imageIntegrationRoot: integrationRoot,
+    imageSessionMaxBytes: 1024,
+    wopiBaseUrl: 'http://127.0.0.1',
+    enableSampleDocx: false,
+  });
+  const address = await listen(server, gatewayPort);
+  assert.equal(typeof address, 'object');
+
+  try {
+    const created = await fetch(`${origin}/api/image-sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: 'figure', bytesBase64: png.toString('base64') }),
+    });
+    assert.equal(created.status, 201);
+    const session = await created.json();
+    assert.match(session.editorUrl, /\/image\/\?image=\/api\/image-sessions\//);
+
+    const source = await fetch(session.sourceUrl);
+    assert.equal(source.status, 200);
+    assert.equal(Buffer.compare(Buffer.from(await source.arrayBuffer()), png), 0);
+    const denied = await fetch(session.sourceUrl.replace(/\/[A-Za-z0-9_-]{20,}\/source$/, '/invalid-token/source'));
+    assert.equal(denied.status, 404);
+
+    const page = await fetch(session.editorUrl);
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /tlooto-image-studio\.js/);
+    const hostScript = await fetch(`${origin}/image/tlooto-image-studio.js`);
+    assert.equal(hostScript.status, 200);
+    assert.match(await hostScript.text(), /Save image/);
+
+    const saved = await fetch(session.exportUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bytesBase64: png.toString('base64') }),
+    });
+    assert.equal(saved.status, 200);
+    const result = await saved.json();
+    const downloaded = await fetch(result.downloadUrl);
+    assert.equal(downloaded.status, 200);
+    assert.equal(Buffer.compare(Buffer.from(await downloaded.arrayBuffer()), png), 0);
+
+    const mcpOpen = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'editor_image_open', arguments: { filename: 'mcp-figure.png', bytesBase64: png.toString('base64') } } }),
+    });
+    assert.equal(mcpOpen.status, 200);
+    const opened = (await mcpOpen.json()).result.structuredContent;
+    assert.equal(opened.ok, true);
+    assert.match(opened.editorUrl, /\/image\/\?image=\/api\/image-sessions\//);
+    const mcpRead = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'editor_image_session_read', arguments: { sessionId: opened.sessionId, token: opened.token } } }),
+    });
+    assert.equal((await mcpRead.json()).result.structuredContent.source.mimeType, 'image/png');
+    const mcpSave = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'editor_image_session_save', arguments: { sessionId: opened.sessionId, token: opened.token, bytesBase64: png.toString('base64') } } }),
+    });
+    assert.equal((await mcpSave.json()).result.structuredContent.byteLength, png.length);
+    const mcpResult = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'editor_image_session_result_read', arguments: { sessionId: opened.sessionId, token: opened.token } } }),
+    });
+    const resultRead = (await mcpResult.json()).result.structuredContent;
+    assert.equal(resultRead.bytesBase64, png.toString('base64'));
+    assert.match(resultRead.sha256, /^[a-f0-9]{64}$/);
+  } finally {
+    await close(server);
   }
 });
 
