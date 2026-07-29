@@ -18,7 +18,7 @@
       <span class="engine-badge">PDFium</span>
     </div>
     <nav class="primary-nav" aria-label="PDF 주요 작업">
-      <button id="editPdfButton" class="nav-tool is-active" type="button"><i class="ti ti-edit"></i><span>편집</span></button>
+      <button id="editPdfButton" class="nav-tool" type="button" aria-pressed="false"><i class="ti ti-edit"></i><span>편집</span></button>
       <button class="nav-tool" type="button" data-open-tool="page.extract"><i class="ti ti-files"></i><span>페이지 구성</span></button>
       <button class="nav-tool" type="button" data-activate-mode="comment"><i class="ti ti-message-circle"></i><span>주석</span></button>
       <button class="nav-tool" type="button" data-open-tool="form.addTextField"><i class="ti ti-forms"></i><span>양식</span></button>
@@ -34,8 +34,8 @@
 
   <div class="workspace">
     <nav class="tool-rail" aria-label="페이지 위 편집 도구">
-      <button class="rail-tool is-active" type="button" data-edit-mode="select" title="객체 선택"><i class="ti ti-pointer"></i><span>선택</span></button>
-      <button class="rail-tool" type="button" data-edit-mode="text" title="텍스트 편집"><i class="ti ti-text-size"></i><span>텍스트</span></button>
+      <button class="rail-tool" type="button" data-edit-mode="select" title="객체 선택"><i class="ti ti-pointer"></i><span>선택</span></button>
+      <button class="rail-tool is-active" type="button" data-edit-mode="text" title="텍스트 바로 수정"><i class="ti ti-text-size"></i><span>텍스트</span></button>
       <button class="rail-tool" type="button" data-edit-mode="image" title="이미지 편집"><i class="ti ti-photo"></i><span>이미지</span></button>
       <span class="rail-divider"></span>
       <button class="rail-tool" type="button" data-activate-mode="comment" title="주석"><i class="ti ti-message-circle-plus"></i><span>주석</span></button>
@@ -44,6 +44,10 @@
 
     <main id="pdfViewer" aria-label="PDF 편집기">
       <div id="canvasOverlay" class="canvas-overlay" aria-label="PDF 직접 편집 계층"></div>
+      <div id="editHint" class="edit-hint" role="status" hidden>
+        <i class="ti ti-text-size"></i>
+        <span id="editHintText">텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.</span>
+      </div>
       <div id="selectionToolbar" class="selection-toolbar" hidden>
         <div id="textQuickControls" class="quick-controls">
           <select id="quickFontFamily" aria-label="폰트"></select>
@@ -94,7 +98,7 @@
         </section>
 
         <section id="objectMode" hidden>
-          <div class="selection-help"><i class="ti ti-pointer"></i><span>페이지에서 텍스트나 이미지를 클릭하세요. 텍스트는 더블클릭하면 그 자리에서 수정됩니다.</span></div>
+          <div class="selection-help"><i class="ti ti-pointer"></i><span>페이지의 텍스트를 한 번 클릭하면 그 자리에서 바로 수정됩니다. 이미지는 선택 후 드래그할 수 있습니다.</span></div>
           <div class="panel-summary">
             <span id="objectCount">객체 0개</span>
             <span id="fontCount">오픈 폰트 0개</span>

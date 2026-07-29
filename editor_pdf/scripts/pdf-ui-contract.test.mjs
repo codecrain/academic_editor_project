@@ -9,7 +9,7 @@ test('/pdf UI boots the pinned PDFium editor with advanced editing categories', 
   ]);
   for (const expected of [
     'id="pdfViewer"', 'Academic PDF', 'PDFium', 'id="runtimeStatus"', 'id="objectEditorButton"',
-    '모든 도구', '품질·접근성 검사', '원본과 비교', '페이지 위 편집 도구', '텍스트는 더블클릭',
+    '모든 도구', '품질·접근성 검사', '원본과 비교', '페이지 위 편집 도구', '텍스트를 한 번 클릭',
     'assets/tabler/tabler-icons.min.css', 'id="canvasOverlay"', 'id="selectionToolbar"',
     'id="fontFamily"', 'id="advancedTool"',
   ]) {
@@ -22,6 +22,13 @@ test('/pdf UI boots the pinned PDFium editor with advanced editing categories', 
   assert.match(source, /window\.academicPdfEditor/);
   assert.match(source, /text\.replaceObject/);
   assert.match(source, /beginInlineTextEdit/);
+  assert.match(source, /sampleObjectBackground/);
+  assert.match(source, /inline-edit-shell/);
+  assert.match(source, /inline-edit-actions/);
+  assert.match(source, /setSelectionRange/);
+  assert.doesNotMatch(source, /editor\.select\(\)/);
+  assert.match(source, /activateEditMode\('text'\)/);
+  assert.match(source, /queueMicrotask/);
   assert.match(source, /objectScreenRect/);
   assert.match(source, /beginImageDrag/);
   assert.match(source, /image\.replaceObject/);

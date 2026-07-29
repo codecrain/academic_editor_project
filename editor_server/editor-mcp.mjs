@@ -6,12 +6,31 @@ import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 
-const DOCX_MCP_TOOLS = createEditorMcpTools({
+const DOCX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   format: 'docx',
   commandCategories: docxAdapter.commandCategories,
   commandOps: docxAdapter.commandOps,
   readViews: ['summary', 'blocks', 'tables', 'references'],
-});
+}), {
+  name: 'editor_docx_prepare_review',
+  description: 'Create a verified review package after quality checks: a clean candidate, a DOCX redline against the question-start snapshot, and a bounded human-readable change manifest. Approval commits the candidate snapshot; rejection restores the full baseline snapshot.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'baseRevision', 'filename'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      baseRevision: { type: 'integer', minimum: 1 },
+      filename: { type: 'string', minLength: 1 },
+    },
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+}]);
 
 const HWPX_MCP_TOOLS = createEditorMcpTools({
   format: 'hwpx',

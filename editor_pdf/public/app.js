@@ -12,7 +12,7 @@ const elementIds = [
   'reportBody', 'closeReportDialog',
   'canvasOverlay', 'selectionToolbar', 'textQuickControls', 'quickFontFamily', 'quickFontSize',
   'quickFontColor', 'replaceImageButton', 'openPropertiesButton', 'deleteSelectedButton',
-  'quickImageFile', 'panelTitle',
+  'quickImageFile', 'panelTitle', 'editHint', 'editHintText',
 ];
 const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 
@@ -28,10 +28,12 @@ const state = {
   objectType: 'text',
   editedBuffer: null,
   reopening: false,
-  editMode: 'select',
+  editMode: 'text',
   inlineEditing: false,
   overlayFrame: 0,
   overlayGeometry: '',
+  sessionPromise: null,
+  documentGeneration: 0,
 };
 
 function failBoot(error) {
@@ -114,20 +116,72 @@ async function currentBuffer() {
 }
 
 async function beginObjectSession() {
-  setPanelStatus('PDF 구조와 객체를 분석하는 중…');
-  const active = state.documentManager?.getActiveDocument();
-  if (!active) throw new Error('먼저 PDF 파일을 열어주세요.');
-  const buffer = await currentBuffer();
-  const opened = await api('/pdf/api/documents/open', {
-    filename: active.name || 'document.pdf',
-    source: { bytesBase64: bytesToBase64(buffer) },
+  if (state.sessionId) return;
+  if (state.sessionPromise) return state.sessionPromise;
+  const generation = state.documentGeneration;
+  state.sessionPromise = (async () => {
+    setPanelStatus('PDF 구조와 객체를 분석하는 중…');
+    const active = state.documentManager?.getActiveDocument();
+    if (!active) throw new Error('먼저 PDF 파일을 열어주세요.');
+    const buffer = await currentBuffer();
+    const opened = await api('/pdf/api/documents/open', {
+      filename: active.name || 'document.pdf',
+      source: { bytesBase64: bytesToBase64(buffer) },
+    });
+    if (generation !== state.documentGeneration) {
+      api(`/pdf/api/documents/${opened.documentId}/documents/discard`, { baseRevision: opened.revision }).catch(() => {});
+      return;
+    }
+    state.sessionId = opened.documentId;
+    state.revision = opened.revision;
+    state.editedBuffer = buffer;
+    await Promise.all([refreshInventory(), loadCommandCatalog()]);
+    elements.editorEmpty.hidden = true;
+    elements.editorBody.hidden = false;
+  })();
+  try {
+    await state.sessionPromise;
+  } finally {
+    state.sessionPromise = null;
+  }
+}
+
+function reflectEditMode(mode) {
+  state.editMode = mode;
+  document.querySelectorAll('[data-edit-mode]').forEach((candidate) => {
+    const active = candidate.dataset.editMode === mode;
+    candidate.classList.toggle('is-active', active);
+    candidate.setAttribute('aria-pressed', String(active));
   });
-  state.sessionId = opened.documentId;
-  state.revision = opened.revision;
-  state.editedBuffer = buffer;
-  await Promise.all([refreshInventory(), loadCommandCatalog()]);
-  elements.editorEmpty.hidden = true;
-  elements.editorBody.hidden = false;
+  const editing = ['text', 'image', 'select'].includes(mode) && Boolean(state.sessionId);
+  elements.editPdfButton.classList.toggle('is-active', editing);
+  elements.editPdfButton.setAttribute('aria-pressed', String(editing));
+}
+
+function showEditHint(message, stateName = 'ready') {
+  elements.editHintText.textContent = message;
+  elements.editHint.dataset.state = stateName;
+  elements.editHint.hidden = false;
+}
+
+async function activateEditMode(mode = 'text', { announce = true } = {}) {
+  reflectEditMode(mode);
+  if (!state.sessionId) {
+    elements.editPdfButton.classList.add('is-loading');
+    showEditHint('본문을 바로 수정할 수 있도록 준비하는 중…', 'loading');
+    try {
+      await beginObjectSession();
+    } finally {
+      elements.editPdfButton.classList.remove('is-loading');
+    }
+    reflectEditMode(mode);
+  }
+  renderCanvasObjects();
+  if (announce && mode === 'text') {
+    showEditHint('텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.');
+  } else if (mode !== 'text') {
+    elements.editHint.hidden = true;
+  }
 }
 
 async function refreshInventory() {
@@ -273,6 +327,7 @@ function renderedPages() {
       || index + 1;
     return {
       page,
+      image,
       left: rect.left - viewerRect.left,
       top: rect.top - viewerRect.top,
       width: rect.width,
@@ -378,17 +433,22 @@ function renderCanvasObjects() {
     hitbox.type = 'button';
     hitbox.className = `object-hitbox${state.selected?.id === object.id ? ' is-selected' : ''}`;
     hitbox.dataset.type = object.type;
-    hitbox.title = object.type === 'text' ? '클릭하여 선택, 더블클릭하여 직접 편집' : '클릭하여 선택, 드래그하여 이동';
+    hitbox.title = object.type === 'text' ? '한 번 클릭하여 이 자리에서 바로 수정' : '클릭하여 선택, 드래그하여 이동';
     Object.assign(hitbox.style, {
       left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`,
     });
     hitbox.addEventListener('click', (event) => {
       event.stopPropagation();
-      selectObject(object);
+      if (object.type === 'text' && state.editMode === 'text') {
+        selectObject(object);
+        beginInlineTextEdit(object, event);
+      } else {
+        selectObject(object);
+      }
     });
     hitbox.addEventListener('dblclick', (event) => {
       event.stopPropagation();
-      if (object.type === 'text') beginInlineTextEdit(object);
+      if (object.type === 'text' && state.editMode !== 'text') beginInlineTextEdit(object, event);
     });
     hitbox.addEventListener('pointerdown', (event) => beginImageDrag(event, object, hitbox));
     elements.canvasOverlay.append(hitbox);
@@ -401,29 +461,91 @@ function scheduleCanvasOverlay() {
   state.overlayFrame = requestAnimationFrame(renderCanvasObjects);
 }
 
-function beginInlineTextEdit(object) {
+function sampleObjectBackground(object) {
+  const rendered = renderedPages().find((page) => page.page === object.page);
+  const source = state.inventory?.pages?.find((page) => page.page === object.page);
+  const bounds = object.editorBounds;
+  if (!rendered?.image || !source || !bounds) return '#ffffff';
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = rendered.image.naturalWidth;
+    canvas.height = rendered.image.naturalHeight;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    context.drawImage(rendered.image, 0, 0);
+    const scaleX = canvas.width / source.width;
+    const scaleY = canvas.height / source.height;
+    const x1 = bounds.x * scaleX;
+    const y1 = bounds.y * scaleY;
+    const x2 = (bounds.x + bounds.width) * scaleX;
+    const y2 = (bounds.y + bounds.height) * scaleY;
+    const insetX = Math.max(2, Math.min(8, (x2 - x1) * 0.08));
+    const insetY = Math.max(2, Math.min(8, (y2 - y1) * 0.16));
+    const points = [
+      [x1 + insetX, y1 - 3], [(x1 + x2) / 2, y1 - 3], [x2 - insetX, y1 - 3],
+      [x1 + insetX, y2 + 3], [(x1 + x2) / 2, y2 + 3], [x2 - insetX, y2 + 3],
+      [x1 - 3, y1 + insetY], [x1 - 3, (y1 + y2) / 2], [x1 - 3, y2 - insetY],
+      [x2 + 3, y1 + insetY], [x2 + 3, (y1 + y2) / 2], [x2 + 3, y2 - insetY],
+    ];
+    const samples = points.map(([x, y]) => {
+      const pixel = context.getImageData(
+        Math.max(0, Math.min(canvas.width - 1, Math.round(x))),
+        Math.max(0, Math.min(canvas.height - 1, Math.round(y))),
+        1,
+        1,
+      ).data;
+      return [pixel[0], pixel[1], pixel[2]];
+    });
+    const median = (channel) => samples
+      .map((sample) => sample[channel])
+      .sort((left, right) => left - right)[Math.floor(samples.length / 2)];
+    return `rgb(${median(0)} ${median(1)} ${median(2)})`;
+  } catch {
+    return '#ffffff';
+  }
+}
+
+function beginInlineTextEdit(object, pointerEvent) {
   const rect = objectScreenRect(object);
   if (!rect) return;
   state.inlineEditing = true;
+  elements.editHint.hidden = true;
   elements.selectionToolbar.hidden = true;
   elements.canvasOverlay.replaceChildren();
+  const shell = document.createElement('div');
+  shell.className = 'inline-edit-shell';
+  shell.style.setProperty('--inline-edit-background', sampleObjectBackground(object));
+  Object.assign(shell.style, {
+    left: `${rect.left - 5}px`,
+    top: `${rect.top - 4}px`,
+    width: `${Math.max(100, rect.width + 10)}px`,
+    minHeight: `${Math.max(30, rect.height + 8)}px`,
+  });
   const editor = document.createElement('textarea');
   editor.className = 'inline-text-editor';
   editor.value = object.text || '';
   editor.setAttribute('aria-label', '페이지에서 텍스트 직접 편집');
   Object.assign(editor.style, {
-    left: `${rect.left}px`, top: `${rect.top}px`, width: `${Math.max(90, rect.width)}px`,
-    height: `${Math.max(28, rect.height + 8)}px`,
+    height: `${Math.max(28, rect.height + 6)}px`,
     fontFamily: `"${object.fontFamily || 'Noto Sans KR'}", sans-serif`,
-    fontSize: `${Math.max(10, (object.fontSize || 12) * rect.scaleY)}px`,
+    fontSize: `${Math.max(9, Math.min(72, rect.height * 0.9))}px`,
     color: object.fillColor?.hex || '#172033',
   });
+  const actions = document.createElement('div');
+  actions.className = `inline-edit-actions${rect.top < 48 ? ' is-below' : ''}`;
+  actions.setAttribute('role', 'toolbar');
+  actions.setAttribute('aria-label', '텍스트 편집 동작');
+  actions.innerHTML = `
+    <span class="inline-edit-label"><i class="ti ti-text-size" aria-hidden="true"></i> 텍스트 편집</span>
+    <button type="button" class="inline-edit-action inline-edit-cancel" aria-label="편집 취소" title="취소 (Esc)"><i class="ti ti-x" aria-hidden="true"></i></button>
+    <button type="button" class="inline-edit-action is-primary inline-edit-save" aria-label="편집 저장" title="저장 (Ctrl+Enter)"><i class="ti ti-check" aria-hidden="true"></i></button>
+  `;
+  shell.append(editor, actions);
   let completed = false;
   const finish = async (save) => {
     if (completed) return;
     completed = true;
     const text = editor.value;
-    editor.remove();
+    shell.remove();
     state.inlineEditing = false;
     if (!save || text === object.text) {
       renderCanvasObjects();
@@ -459,9 +581,16 @@ function beginInlineTextEdit(object) {
     }
   });
   editor.addEventListener('blur', () => finish(true));
-  elements.canvasOverlay.append(editor);
-  editor.focus();
-  editor.select();
+  actions.addEventListener('pointerdown', (event) => event.preventDefault());
+  actions.querySelector('.inline-edit-cancel').addEventListener('click', () => finish(false));
+  actions.querySelector('.inline-edit-save').addEventListener('click', () => finish(true));
+  elements.canvasOverlay.append(shell);
+  editor.focus({ preventScroll: true });
+  const relativeX = pointerEvent
+    ? Math.max(0, Math.min(rect.width, pointerEvent.clientX - elements.pdfViewer.getBoundingClientRect().left - rect.left))
+    : rect.width;
+  const caret = Math.round((relativeX / Math.max(1, rect.width)) * editor.value.length);
+  editor.setSelectionRange(caret, caret);
 }
 
 async function inspectSelected() {
@@ -724,10 +853,8 @@ elements.closeObjectEditor.addEventListener('click', () => {
 elements.loadObjectsButton.addEventListener('click', () => beginObjectSession().catch((error) => setPanelStatus(error.message, 'error')));
 elements.editPdfButton.addEventListener('click', async () => {
   try {
-    if (!state.sessionId) await beginObjectSession();
-    state.editMode = 'select';
-    document.querySelector('[data-edit-mode="select"]')?.click();
-    setPanelStatus('페이지에서 텍스트를 더블클릭하거나 이미지를 드래그해 편집하세요.', 'success');
+    await activateEditMode('text');
+    setPanelStatus('페이지의 텍스트를 한 번 클릭하면 바로 수정됩니다.', 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
     openToolPanel('advanced');
@@ -777,10 +904,7 @@ elements.objectSearch.addEventListener('input', renderObjectList);
 
 document.querySelectorAll('[data-edit-mode]').forEach((button) => button.addEventListener('click', async () => {
   try {
-    if (!state.sessionId) await beginObjectSession();
-    state.editMode = button.dataset.editMode;
-    document.querySelectorAll('[data-edit-mode]').forEach((candidate) => candidate.classList.toggle('is-active', candidate === button));
-    renderCanvasObjects();
+    await activateEditMode(button.dataset.editMode);
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
@@ -1024,27 +1148,63 @@ try {
     state.documentManager = registry.getPlugin('document-manager')?.provides();
     state.exporter = registry.getPlugin('export')?.provides();
     state.documentManager?.onDocumentOpened((documentState) => {
-      elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · PDFium 편집 준비 완료`;
-      if (!state.reopening) {
-        const previousSessionId = state.sessionId;
-        const previousRevision = state.revision;
-        if (previousSessionId && previousRevision) {
-          api(`/pdf/api/documents/${previousSessionId}/documents/discard`, { baseRevision: previousRevision }).catch(() => {});
-        }
-        Object.assign(state, {
-          sessionId: null,
-          revision: null,
-          inventory: null,
-          catalog: null,
-          selected: null,
-          editedBuffer: null,
-        });
-        elements.editorEmpty.hidden = false;
-        elements.editorBody.hidden = true;
+      if (state.reopening) {
+        elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 텍스트를 클릭해 바로 수정`;
+        return;
       }
+      elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 본문 편집 준비 중…`;
+      state.documentGeneration += 1;
+      const previousSessionId = state.sessionId;
+      const previousRevision = state.revision;
+      if (previousSessionId && previousRevision) {
+        api(`/pdf/api/documents/${previousSessionId}/documents/discard`, { baseRevision: previousRevision }).catch(() => {});
+      }
+      Object.assign(state, {
+        sessionId: null,
+        revision: null,
+        inventory: null,
+        catalog: null,
+        selected: null,
+        editedBuffer: null,
+        sessionPromise: null,
+      });
+      elements.editorEmpty.hidden = false;
+      elements.editorBody.hidden = true;
+      reflectEditMode('text');
+      queueMicrotask(() => {
+        activateEditMode('text').then(() => {
+          elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 텍스트를 클릭해 바로 수정`;
+          setPanelStatus('본문 편집 준비 완료 · 페이지의 텍스트를 한 번 클릭하세요.', 'success');
+        }).catch((error) => {
+          elements.editPdfButton.classList.remove('is-loading');
+          elements.editHint.hidden = true;
+          elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 편집 준비 실패`;
+          setPanelStatus(error.message, 'error');
+        });
+      });
     });
     state.documentManager?.onDocumentClosed(() => {
-      if (!state.reopening) elements.runtimeStatus.textContent = 'PDFium 편집 준비 완료';
+      if (!state.reopening) {
+        state.documentGeneration += 1;
+        const closedSessionId = state.sessionId;
+        const closedRevision = state.revision;
+        if (closedSessionId && closedRevision) {
+          api(`/pdf/api/documents/${closedSessionId}/documents/discard`, { baseRevision: closedRevision }).catch(() => {});
+        }
+        state.sessionPromise = null;
+        state.sessionId = null;
+        state.revision = null;
+        state.inventory = null;
+        state.catalog = null;
+        state.selected = null;
+        state.editedBuffer = null;
+        elements.canvasOverlay.replaceChildren();
+        elements.selectionToolbar.hidden = true;
+        elements.editHint.hidden = true;
+        elements.editPdfButton.classList.remove('is-active', 'is-loading');
+        elements.editPdfButton.setAttribute('aria-pressed', 'false');
+        elements.runtimeStatus.textContent = 'PDFium 편집 준비 완료';
+      }
     });
     state.documentManager?.onDocumentError((event) => {
       elements.runtimeStatus.textContent = `PDF 열기 실패: ${event?.message || '알 수 없는 오류'}`;

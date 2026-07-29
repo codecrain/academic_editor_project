@@ -10,7 +10,12 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
-import { DocxActivityHub, activitySummary } from './docx-activity.mjs';
+import {
+  DocxActivityHub,
+  activityDescriptor,
+  commandDescription,
+  commandReviewMode,
+} from './docx-activity.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
 import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
@@ -298,7 +303,7 @@ function renderDocxActivityUi(options = {}) {
   const clientConfig = JSON.stringify({
     activityUrl,
     idleMs: 10_000,
-    maxVisibleEvents: 6,
+    eventLifetimeMs: 7_000,
     readOnly: options.readOnly === true,
   }).replace(/</g, '\\u003c');
   return `
@@ -375,7 +380,7 @@ function renderDocxActivityUi(options = {}) {
     .docx-activity-event {
       display: grid;
       grid-template-columns: 20px minmax(0, 1fr);
-      align-items: center;
+      align-items: start;
       gap: 8px;
       min-height: 24px;
       padding: 5px 14px;
@@ -403,7 +408,16 @@ function renderDocxActivityUi(options = {}) {
     }
     .docx-activity-event[data-status="completed"] .docx-activity-icon { background: rgba(34, 197, 94, .16); color: #86efac; }
     .docx-activity-event[data-status="failed"] .docx-activity-icon { background: rgba(239, 68, 68, .16); color: #fca5a5; }
+    .docx-activity-copy { display: grid; min-width: 0; gap: 1px; }
     .docx-activity-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .docx-activity-detail {
+      overflow: hidden;
+      color: #94a3b8;
+      font-size: 11px;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     #docx-readonly-pill {
       display: none;
       margin-left: auto;
@@ -438,6 +452,7 @@ function renderDocxActivityUi(options = {}) {
       const closeButton = document.getElementById('docx-activity-close');
       const readOnlyPill = document.getElementById('docx-readonly-pill');
       const rows = new Map();
+      const expiryTimers = new Map();
       let currentOperationId = '';
       let dismissedOperationId = '';
       let idleTimer = null;
@@ -452,16 +467,25 @@ function renderDocxActivityUi(options = {}) {
         const delay = Math.max(0, config.idleMs - Math.max(0, Date.now() - Number(lastActivityAt || 0)));
         idleTimer = setTimeout(hide, delay);
       };
-      const removeOldest = () => {
-        while (rows.size > config.maxVisibleEvents) {
-          const [id, row] = rows.entries().next().value;
-          rows.delete(id);
-          row.classList.add('leaving');
-          setTimeout(() => row.remove(), 240);
-        }
+      const removeRow = (id) => {
+        const row = rows.get(id);
+        if (!row) return;
+        clearTimeout(expiryTimers.get(id));
+        expiryTimers.delete(id);
+        rows.delete(id);
+        row.classList.add('leaving');
+        setTimeout(() => {
+          row.remove();
+          if (!rows.size) hide();
+        }, 240);
       };
       const upsert = (event) => {
         if (!event || !event.id || !event.label) return;
+        const expiresAt = Number(event.createdAt || 0) + config.eventLifetimeMs;
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+          removeRow(event.id);
+          return;
+        }
         let row = rows.get(event.id);
         if (!row) {
           row = document.createElement('li');
@@ -471,19 +495,30 @@ function renderDocxActivityUi(options = {}) {
           icon.setAttribute('aria-hidden', 'true');
           const label = document.createElement('span');
           label.className = 'docx-activity-label';
-          row.append(icon, label);
+          const detail = document.createElement('span');
+          detail.className = 'docx-activity-detail';
+          const copy = document.createElement('span');
+          copy.className = 'docx-activity-copy';
+          copy.append(label, detail);
+          row.append(icon, copy);
           list.append(row);
           rows.set(event.id, row);
           requestAnimationFrame(() => row.classList.remove('entering'));
         }
         row.dataset.status = event.status;
         row.querySelector('.docx-activity-label').textContent = event.label;
+        const detail = row.querySelector('.docx-activity-detail');
+        detail.textContent = event.detail || '';
+        detail.hidden = !event.detail;
         const icon = row.querySelector('.docx-activity-icon');
         icon.textContent = event.status === 'completed' ? '✓' : event.status === 'failed' ? '!' : '';
         row.setAttribute('aria-label', event.label + ': ' + event.status);
-        removeOldest();
+        clearTimeout(expiryTimers.get(event.id));
+        expiryTimers.set(event.id, setTimeout(() => removeRow(event.id), Math.max(0, expiresAt - Date.now())));
       };
       const resetRows = () => {
+        for (const timer of expiryTimers.values()) clearTimeout(timer);
+        expiryTimers.clear();
         rows.clear();
         list.replaceChildren();
       };
@@ -521,6 +556,7 @@ function renderDocxActivityUi(options = {}) {
       };
       window.addEventListener('pagehide', () => {
         clearTimeout(idleTimer);
+        for (const timer of expiryTimers.values()) clearTimeout(timer);
         source.close();
       }, { once: true });
     })();
@@ -1122,7 +1158,7 @@ function assertMutationPreconditions(record, action, body, commands = []) {
     }
   }
 
-  if ((action === 'save-source' || action === 'export-pdf')
+  if ((action === 'save-source' || action === 'prepare-review' || action === 'export-pdf')
     && preconditions.qualityRevision !== baseRevision) {
     throw new EditorContractError(
       'quality_check_required',
@@ -1633,6 +1669,54 @@ async function renderDocxBytes(config, bytes, pages) {
   });
 }
 
+function countDocxRevisionElements(bytes) {
+  const session = docxAdapter.createRawSession(bytes);
+  const entries = session.entries;
+  let insertions = 0;
+  let deletions = 0;
+  let formatting = 0;
+  for (const [name, value] of entries) {
+    if (!name.startsWith('word/') || !name.endsWith('.xml')) continue;
+    const xml = value.toString('utf8');
+    insertions += (xml.match(/<w:ins(?:\s|>)/g) || []).length;
+    deletions += (xml.match(/<w:del(?:\s|>)/g) || []).length;
+    formatting += (xml.match(/<w:\w+PrChange(?:\s|>)/g) || []).length;
+  }
+  return { insertions, deletions, formatting, total: insertions + deletions + formatting };
+}
+
+async function compareDocxBytes(config, candidateBytes, baselineBytes, filename = 'document.docx') {
+  const form = new FormData();
+  const safeFilename = path.basename(String(filename || 'document.docx')).replace(/[^\w.\- ]/g, '_') || 'document.docx';
+  form.append('data', new Blob([candidateBytes], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  }), safeFilename);
+  form.append('compare', new Blob([baselineBytes], {
+    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  }), `baseline-${safeFilename}`);
+  form.append('format', 'docx');
+  const response = await fetch(`${config.docxRuntimeOrigin}/cool/convert-to`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(config.docxRenderOperationTimeoutSeconds * 1000),
+  });
+  if (!response.ok) {
+    throw new Error(`DOCX review comparison failed with HTTP ${response.status}.`);
+  }
+  const trackedBytes = Buffer.from(await response.arrayBuffer());
+  if (trackedBytes.length < 4 || trackedBytes[0] !== 0x50 || trackedBytes[1] !== 0x4b) {
+    throw new Error('DOCX review comparison returned a non-DOCX payload.');
+  }
+  if (trackedBytes.length > config.docxRenderMaxResultBytes) {
+    throw new Error('DOCX review comparison exceeded the configured result limit.');
+  }
+  const revisionElements = countDocxRevisionElements(trackedBytes);
+  if (!revisionElements.total) {
+    throw new Error('DOCX review comparison produced no revision markup.');
+  }
+  return { trackedBytes, revisionElements };
+}
+
 function publicRenderedPages(rendered, revision) {
   return {
     ok: true,
@@ -1679,6 +1763,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     filename: body.filename || `document.${fmt}`,
     sourceBytes: Buffer.from(bytes),
     baselineJson: json,
+    reviewChanges: [],
     intentionalSectionLayoutChanges: new Set(),
     session,
     createdAt: now,
@@ -1832,6 +1917,12 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       if (String(command?.op ?? '').replace(/[^a-z0-9]/gi, '').toLowerCase() === 'setpagesetup') {
         record.intentionalSectionLayoutChanges.add(command.section === 'all' ? 'all' : Number(command.section ?? 0));
       }
+      if (fmt === 'docx') {
+        record.reviewChanges.push({
+          description: commandDescription(command),
+          reviewMode: commandReviewMode(command),
+        });
+      }
     }
     clearRecordPreconditions(record);
     sendJson(res, 200, { ...result, warnings: [] });
@@ -1854,6 +1945,57 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       validation: saved.validation,
       checkpoint,
       verified: !checkpoint,
+    });
+    return true;
+  }
+  if (fmt === 'docx' && actionPath === 'documents/prepare-review') {
+    assertMutationPreconditions(record, 'prepare-review', body);
+    const saved = await session.save();
+    const { trackedBytes, revisionElements } = await compareDocxBytes(
+      config,
+      saved.bytes,
+      record.sourceBytes,
+      body.filename || record.filename,
+    );
+    const candidateOutputPathValue = String(body.candidateOutputPath || '').trim();
+    const reviewOutputPathValue = String(body.reviewOutputPath || '').trim();
+    if (!candidateOutputPathValue || !reviewOutputPathValue) {
+      throw new EditorContractError(
+        'review_output_required',
+        'candidateOutputPath and reviewOutputPath are required.',
+        400,
+      );
+    }
+    const candidateOutputPath = path.resolve(candidateOutputPathValue);
+    const reviewOutputPath = path.resolve(reviewOutputPathValue);
+    mkdirSync(path.dirname(candidateOutputPath), { recursive: true });
+    mkdirSync(path.dirname(reviewOutputPath), { recursive: true });
+    await writeFile(candidateOutputPath, saved.bytes);
+    await writeFile(reviewOutputPath, trackedBytes);
+    const changes = record.reviewChanges.slice(0, 200);
+    sendJson(res, 200, {
+      ok: true,
+      revision: saved.revision,
+      candidate: {
+        bytesRef: candidateOutputPath,
+        sha256: sha256(saved.bytes),
+        byteLength: saved.bytes.length,
+      },
+      review: {
+        bytesRef: reviewOutputPath,
+        sha256: sha256(trackedBytes),
+        byteLength: trackedBytes.length,
+        revisionElements,
+      },
+      changes,
+      truncatedChanges: record.reviewChanges.length > changes.length,
+      reviewPolicy: {
+        textChanges: 'docx-redline',
+        packageChanges: 'snapshot-rollback',
+        approve: 'commit-candidate-snapshot',
+        reject: 'restore-question-start-snapshot',
+      },
+      verified: true,
     });
     return true;
   }
@@ -3144,6 +3286,50 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         throw error;
       }
     }
+    if (name === 'editor_docx_prepare_review') {
+      await pruneExpiredMcpArtifacts(config);
+      const candidateArtifactId = randomUUID();
+      const reviewArtifactId = randomUUID();
+      const candidateOutputPath = mcpArtifactPath(candidateArtifactId, 'docx');
+      const reviewOutputPath = mcpArtifactPath(reviewArtifactId, 'docx');
+      try {
+        const prepared = await postLocalEditorApi(
+          req,
+          config,
+          `${prefix}/documents/prepare-review`,
+          {
+            baseRevision,
+            filename: args.filename,
+            candidateOutputPath,
+            reviewOutputPath,
+          },
+        );
+        const {
+          candidate: candidateWithPath,
+          review: reviewWithPath,
+          ...publicResult
+        } = prepared;
+        const { bytesRef: _candidatePath, ...candidate } = candidateWithPath || {};
+        const { bytesRef: _reviewPath, ...review } = reviewWithPath || {};
+        discardApiSessionState(state, documentId, { clearLock: false });
+        return {
+          ...publicResult,
+          candidate: { ...candidate, artifactId: candidateArtifactId },
+          review: { ...review, artifactId: reviewArtifactId },
+          sessionClosed: true,
+        };
+      } catch (error) {
+        await Promise.all([
+          unlink(candidateOutputPath).catch((unlinkError) => {
+            if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+          }),
+          unlink(reviewOutputPath).catch((unlinkError) => {
+            if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+          }),
+        ]);
+        throw error;
+      }
+    }
     if (name === `${toolPrefix}_save_source`) {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
@@ -3187,17 +3373,17 @@ async function handleEditorMcp(req, res, config, state) {
   const response = await handleEditorMcpJsonRpc(payload, {
     serverInfo: { name: 'academic-editor-mcp', version: '1.0.0' },
     executeTool: async (name, args = {}) => {
-      const label = activitySummary(name, args);
+      const activity = activityDescriptor(name, args);
       const documentId = String(args.documentId || '').trim();
       if (name === 'editor_docx_open') {
         const result = await executeEditorMcpTool(req, config, state, name, args);
-        if (result?.documentId && label) {
-          state.docxActivityHub.complete(result.documentId, label);
+        if (result?.documentId && activity) {
+          state.docxActivityHub.complete(result.documentId, activity);
         }
         return result;
       }
-      const handle = documentId && label
-        ? state.docxActivityHub.begin(documentId, label)
+      const handle = documentId && activity
+        ? state.docxActivityHub.begin(documentId, activity)
         : null;
       try {
         const result = await executeEditorMcpTool(req, config, state, name, args);
@@ -3566,6 +3752,8 @@ if (process.argv[1] && path.resolve(fileURLToPath(import.meta.url)) === path.res
 
 export {
   buildConfigFromEnv,
+  compareDocxBytes,
+  countDocxRevisionElements,
   createGatewayServer,
   discardApiSessionState,
   extendFrameAncestors,

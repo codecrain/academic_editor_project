@@ -12,6 +12,8 @@ import { EditorDocumentStore } from '../editor_docx/scripts/editor-document-stor
 
 import {
   createGatewayServer,
+  compareDocxBytes,
+  countDocxRevisionElements,
   discardApiSessionState,
   extendFrameAncestors,
   isDocxRootPath,
@@ -24,7 +26,11 @@ import {
   resolveStaticPath,
   sanitizeEditorHtml,
 } from './editor-gateway.mjs';
-import { createDocxBytes, getDocumentXml } from '../editor_docx/scripts/docx-api-utils.mjs';
+import {
+  createDocxBytes,
+  DocxApiSession,
+  getDocumentXml,
+} from '../editor_docx/scripts/docx-api-utils.mjs';
 
 const FAKE_PDF_BYTES = Buffer.from('%PDF-1.4\n%%EOF\n');
 const FAKE_WEBP_BYTES = Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary');
@@ -91,6 +97,62 @@ function close(server) {
     server.close((error) => (error ? reject(error) : resolve()));
   });
 }
+
+test('DOCX review comparison sends candidate and baseline and requires real revision markup', async () => {
+  const session = new DocxApiSession(createDocxBytes({ paragraphs: ['Original sentence.'] }));
+  session.apply([{
+    op: 'text.replaceTracked',
+    target: session.resolveText('Original sentence.'),
+    expectedText: 'Original sentence.',
+    text: 'Revised sentence.',
+    author: 'Docs Agent',
+    date: '2026-07-29T00:00:00Z',
+  }]);
+  const trackedBytes = session.save().bytes;
+  assert.deepEqual(countDocxRevisionElements(trackedBytes), {
+    insertions: 1,
+    deletions: 1,
+    formatting: 0,
+    total: 2,
+  });
+
+  let observedRequest = null;
+  const runtime = http.createServer(async (request, response) => {
+    observedRequest = {
+      method: request.method,
+      url: request.url,
+      contentType: request.headers['content-type'],
+    };
+    for await (const _chunk of request) {
+      // Drain the complete multipart request before responding.
+    }
+    response.writeHead(200, {
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    response.end(trackedBytes);
+  });
+  const address = await listen(runtime);
+  assert.equal(typeof address, 'object');
+  try {
+    const result = await compareDocxBytes({
+      docxRuntimeOrigin: `http://127.0.0.1:${address.port}`,
+      docxRenderOperationTimeoutSeconds: 5,
+      docxRenderMaxResultBytes: 2 * 1024 * 1024,
+    }, createDocxBytes({ paragraphs: ['Revised sentence.'] }), createDocxBytes({
+      paragraphs: ['Original sentence.'],
+    }), 'paper.docx');
+    assert.equal(result.trackedBytes.equals(trackedBytes), true);
+    assert.equal(result.revisionElements.total, 2);
+    assert.deepEqual(observedRequest, {
+      method: 'POST',
+      url: '/cool/convert-to',
+      contentType: observedRequest.contentType,
+    });
+    assert.match(observedRequest.contentType, /^multipart\/form-data; boundary=/);
+  } finally {
+    await close(runtime);
+  }
+});
 
 async function readSseData(reader, expectedCount, timeoutMs = 5_000) {
   const decoder = new TextDecoder();
@@ -270,6 +332,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_docx_save_checkpoint',
       'editor_docx_artifact_read',
       'editor_docx_artifact_delete',
+      'editor_docx_prepare_review',
       'editor_hwpx_open',
       'editor_hwpx_discard',
       'editor_hwpx_read_json',
@@ -1237,6 +1300,9 @@ test('gateway signed DOCX wrapper bridges only the trusted parent and nested edi
   assert.match(html, /new EventSource\(config\.activityUrl\)/);
   assert.match(html, /docx\/activity\/doc_00000000-0000-4000-8000-000000000000/);
   assert.match(html, /config\.idleMs - Math\.max/);
+  assert.match(html, /"eventLifetimeMs":7000/);
+  assert.match(html, /setTimeout\(\(\) => removeRow\(event\.id\)/);
+  assert.match(html, /docx-activity-detail/);
   assert.match(html, /dismissedOperationId === currentOperationId/);
   assert.match(html, /prefers-reduced-motion/);
 });
@@ -1718,6 +1784,7 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
         ['Applying 1 document change', 'completed'],
       ],
     );
+    assert.equal(applyActivity[0].event.detail, 'Adding a paragraph');
     assert.equal(JSON.stringify(applyActivity).includes('live after'), false);
     await activityReader.cancel();
     const liveAfter = await fetch(`${liveWopiUrl.origin}${liveWopiUrl.pathname}/contents${liveWopiUrl.search}`);
