@@ -244,7 +244,6 @@ async function scanBrowserBranding(discoveryUrl) {
     /Collabora Office/i,
     /Development Edition/i,
     /CollaboraOnline/i,
-    /collabora/i,
     /collaboraonline/i,
     /collaboraoffice/i,
     /collabora-office-white\.svg/i,

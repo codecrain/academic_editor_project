@@ -270,6 +270,8 @@ test('native audit checks direct runtime health and gateway-delivered browser br
   assert.match(audit, /function resolveBrandingDiscoveryUrl/);
   assert.match(audit, /scanBrowserBranding\(brandingDiscoveryUrl\)/);
   assert.match(audit, /failed check \$\{name\}/);
+  assert.match(audit, /Collabora Online/);
+  assert.doesNotMatch(audit, /\/collabora\/i/);
 });
 
 test('production deployment installs a pinned native release once and records it', () => {
