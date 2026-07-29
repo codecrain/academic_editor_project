@@ -35,6 +35,9 @@ test('gateway serves the PDF editor and only its pinned vendor entrypoints on /p
   const address = await listen(server);
   const origin = `http://127.0.0.1:${address.port}`;
   try {
+    const canonical = await fetch(`${origin}/pdf`, { redirect: 'manual' });
+    assert.equal(canonical.status, 308);
+    assert.equal(canonical.headers.get('location'), '/pdf/');
     const html = await fetch(`${origin}/pdf/`);
     assert.equal(html.status, 200);
     assert.match(await html.text(), /Academic PDF Editor/);
