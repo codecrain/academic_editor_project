@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createCanvas } from '@napi-rs/canvas';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { PDFDict, PDFDocument, PDFName, StandardFonts } from 'pdf-lib';
 import { PDF as LibPDF } from '@libpdf/core';
 
 import { PdfApiSession } from './pdf-api-utils.mjs';
@@ -26,13 +26,32 @@ function samplePngBase64() {
   return canvas.toBuffer('image/png').toString('base64');
 }
 
+async function imageOnlyPdf() {
+  const canvas = createCanvas(1200, 400);
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, 1200, 400);
+  context.fillStyle = '#000000';
+  context.font = 'bold 72px Arial';
+  context.fillText('SEARCHABLE OCR TEST 2026', 60, 230);
+  const document = await PDFDocument.create();
+  const page = document.addPage([600, 200]);
+  const image = await document.embedPng(canvas.toBuffer('image/png'));
+  page.drawImage(image, { x: 0, y: 0, width: 600, height: 200 });
+  return Buffer.from(await document.save());
+}
+
 test('PDF command catalog exposes implemented additive and advanced operations', () => {
   const catalog = getPdfCommandCatalog();
   assert.deepEqual(catalog.commands.map((entry) => entry.op), [
     'text.add',
+    'ocr.recognize',
     'text.replaceObject',
+    'text.replaceAll',
     'highlight.add',
     'ink.add',
+    'comment.add',
+    'textMarkup.add',
     'image.add',
     'image.replaceObject',
     'object.transform',
@@ -45,15 +64,85 @@ test('PDF command catalog exposes implemented additive and advanced operations',
     'page.duplicate',
     'page.move',
     'page.crop',
+    'page.resize',
+    'page.setLabels',
+    'page.extract',
+    'page.replace',
+    'page.setBoxes',
     'document.merge',
+    'document.setInitialView',
+    'redaction.apply',
+    'watermark.add',
+    'background.set',
+    'headerFooter.add',
+    'bates.add',
+    'link.add',
+    'bookmark.add',
+    'form.addTextField',
+    'form.addCheckBox',
+    'form.addDropdown',
+    'form.remove',
     'metadata.set',
     'document.flattenAll',
+    'document.sanitize',
+    'document.optimize',
     'attachment.add',
     'attachment.remove',
     'security.encrypt',
     'security.remove',
   ]);
   assert.throws(() => validatePdfCommands([{ op: 'text.replaceObject', page: 1 }]), /objectIndex is required/);
+});
+
+test('PDF OCR adds a local invisible searchable layer without changing rendered pixels', async () => {
+  const source = await imageOnlyPdf();
+  const before = await renderPdfPages(source, { pages: [1], dpi: 120 });
+  const session = await PdfApiSession.create(source);
+  assert.equal(session.objectInventory().textObjectCount, 0);
+
+  await session.apply([{
+    op: 'ocr.recognize',
+    pages: [1],
+    languages: ['eng'],
+    dpi: 180,
+    minimumConfidence: 30,
+  }]);
+
+  const searchableText = session.objectInventory().textObjects.map((object) => object.text).join(' ');
+  assert.match(searchableText, /SEARCHABLE/);
+  assert.match(searchableText, /OCR/);
+  const saved = await session.save();
+  const after = await renderPdfPages(saved.bytes, { pages: [1], dpi: 120 });
+  assert.equal(after.pages[0].sha256, before.pages[0].sha256);
+  assert.equal((await session.qualityCheck()).ok, true);
+});
+
+test('PDF session supports global text replacement, comments, markup, page labels, resize, and initial view', async () => {
+  const session = await PdfApiSession.create(await samplePdf());
+  await session.apply([
+    { op: 'text.replaceAll', find: 'Original', replace: 'Revised', caseSensitive: true },
+    { op: 'comment.add', page: 1, x: 72, y: 150, text: 'Review this paragraph.', author: 'Reviewer' },
+    { op: 'textMarkup.add', page: 1, x: 48, y: 78, width: 220, height: 20, style: 'underline' },
+    { op: 'page.setLabels', segments: [{ page: 1, style: 'decimal', prefix: 'A-', start: 7 }] },
+    { op: 'document.setInitialView', pageMode: 'outlines', displayDocTitle: true, fitWindow: true },
+    { op: 'page.resize', page: 1, width: 500, height: 700, scaleContent: true, preserveAspectRatio: true, centerContent: true },
+  ]);
+
+  assert.match(session.objectInventory().textObjects.map((object) => object.text).join(' '), /Revised content/);
+  const saved = await session.save();
+  const reopened = await PDFDocument.load(saved.bytes);
+  assert.equal(Math.round(reopened.getPage(0).getWidth()), 500);
+  assert.equal(Math.round(reopened.getPage(0).getHeight()), 700);
+  const annotations = reopened.getPage(0).node.Annots();
+  assert.equal(annotations?.size(), 2);
+  assert.deepEqual(
+    annotations.asArray().map((reference) => reopened.context.lookup(reference, PDFDict).get(PDFName.of('Subtype')).asString()).sort(),
+    ['/Text', '/Underline'],
+  );
+  assert.ok(reopened.catalog.get(PDFName.of('PageLabels')));
+  assert.ok(reopened.catalog.get(PDFName.of('ViewerPreferences')));
+  assert.equal(reopened.catalog.get(PDFName.of('PageMode'))?.asString(), '/UseOutlines');
+  assert.equal((await session.qualityCheck()).ok, true);
 });
 
 test('PDF session replaces existing text with an embedded Korean open font', async () => {
@@ -167,6 +256,61 @@ test('PDF session applies transactional page, crop, metadata, attachment, flatte
   const protectedPdf = await LibPDF.load(protectedResult.bytes, { credentials: 'reader-pass' });
   assert.equal(protectedPdf.getSecurity().isEncrypted, true);
   assert.equal(protectedPdf.getSecurity().permissions.copy, false);
+  assert.equal((await session.qualityCheck()).ok, true);
+});
+
+test('PDF session applies production decorations, navigation, forms, page replacement, and extraction', async () => {
+  const source = await samplePdf();
+  const session = await PdfApiSession.create(source);
+  await session.apply([
+    { op: 'page.duplicate', page: 1, insertAt: 2 },
+    { op: 'background.set', pages: [1], color: '#fff9e6' },
+    { op: 'watermark.add', text: '내부 검토', pages: [1, 2], fontFamily: 'Noto Sans KR', fontSize: 34, rotation: -30 },
+    { op: 'headerFooter.add', headerCenter: '연구 문서', footerRight: '{page} / {pages}', fontFamily: 'Noto Sans KR' },
+    { op: 'bates.add', prefix: 'CASE-', start: 7, digits: 4, pages: [1, 2] },
+    { op: 'link.add', page: 1, x: 40, y: 180, width: 160, height: 20, url: 'https://example.org/review' },
+    { op: 'bookmark.add', title: '검토 시작', page: 1 },
+    { op: 'form.addTextField', name: 'reviewer.name', page: 1, x: 48, y: 220, width: 180, height: 24, value: '홍길동' },
+    { op: 'form.addCheckBox', name: 'approved', page: 1, x: 48, y: 260, width: 18, height: 18, checked: true },
+    { op: 'form.addDropdown', name: 'decision', page: 1, x: 48, y: 300, width: 140, height: 24, options: ['승인', '반려'], selected: '승인' },
+    { op: 'page.setBoxes', page: 2, boxes: { crop: { x: 5, y: 5, width: 410, height: 584 } } },
+  ]);
+
+  const saved = await session.save();
+  const reopened = await PDFDocument.load(saved.bytes);
+  assert.equal(reopened.getPageCount(), 2);
+  assert.deepEqual(reopened.getForm().getFields().map((field) => field.getName()).sort(), ['approved', 'decision', 'reviewer.name']);
+  assert.ok(reopened.catalog.get(PDFName.of('Outlines')));
+  assert.equal((await session.qualityCheck()).ok, true);
+
+  await session.apply([{ op: 'page.replace', page: 2, sourcePage: 1, sourceBytesBase64: source.toString('base64') }]);
+  await session.apply([{ op: 'page.extract', pages: [2, 1] }]);
+  assert.equal(session.readJson().pageCount, 2);
+  assert.equal((await session.qualityCheck()).ok, true);
+});
+
+test('PDF redaction removes intersecting source objects and sanitize removes interactive content', async () => {
+  const session = await PdfApiSession.create(await samplePdf());
+  assert.ok(session.objectInventory().textObjects.length >= 2);
+  await session.apply([{
+    op: 'redaction.apply',
+    page: 1,
+    regions: [{ x: 35, y: 40, width: 360, height: 100 }],
+    color: '#000000',
+    overlayText: '삭제됨',
+  }]);
+  const remainingText = session.objectInventory().textObjects.map((object) => object.text).join(' ');
+  assert.doesNotMatch(remainingText, /Academic PDF editor acceptance sample|Original content remains intact/);
+
+  await session.apply([
+    { op: 'link.add', page: 1, x: 40, y: 180, width: 100, height: 20, url: 'https://example.org' },
+    { op: 'form.addCheckBox', name: 'temporary', page: 1, x: 40, y: 220, width: 18, height: 18 },
+    { op: 'attachment.add', name: 'temporary.txt', bytesBase64: Buffer.from('remove me').toString('base64') },
+    { op: 'document.sanitize' },
+    { op: 'document.optimize' },
+  ]);
+  const sanitized = await PDFDocument.load((await session.save()).bytes);
+  assert.equal(sanitized.getForm().getFields().length, 0);
   assert.equal((await session.qualityCheck()).ok, true);
 });
 

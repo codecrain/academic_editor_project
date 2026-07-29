@@ -1,53 +1,49 @@
-# Image Studio design QA
+# PDF editor redesign QA
 
-final result: passed
+## Evidence
 
-## Visual target
+- Reference: `output/pdf-ui-redesign/reference-acrobat-edit.jpg`
+- Implementation: `output/pdf-ui-redesign/final-selection-toolbar.png`
+- Combined comparison: `output/pdf-ui-redesign/comparison-reference-vs-final.png`
+- Viewport: 1280 × 720 desktop
+- State: a real PDF is open, direct-edit mode is active, and a text object is selected
 
-- Selected direction: Adaptive Studio, combining a Photoshop-style tool rail and
-  inspector, an Illustrator-style context bar, and a searchable workspace shell.
-- Source visual:
-  `C:\Users\HaeyongShin\.codex\generated_images\019fab2f-fb16-7bc1-9d95-4d647444042b\call_deIaD6owB7K2m0KpiF5ny2Uq.png`
-- Source dimensions: 1487 × 1058 px at 72 dpi.
-- Implementation viewport: 1440 × 1024 px.
-- Implementation screenshot:
-  `C:\Users\HaeyongShin\.codex\visualizations\2026\07\29\019fab2f-fb16-7bc1-9d95-4d647444042b\vector-ui-iteration-2.png`
-- Raster screenshot:
-  `C:\Users\HaeyongShin\.codex\visualizations\2026\07\29\019fab2f-fb16-7bc1-9d95-4d647444042b\raster-ui-iteration-2.png`
-- Side-by-side comparison:
-  `C:\Users\HaeyongShin\.codex\visualizations\2026\07\29\019fab2f-fb16-7bc1-9d95-4d647444042b\vector-design-comparison-final.png`
+## Reference contract
 
-## Comparison history
+The Acrobat reference establishes a compact global task bar, a narrow tool
+rail, a page-dominant workspace, direct selection on the page, and contextual
+text formatting near the selected content. Academic PDF follows that task
+model while retaining the existing EmbedPDF document controls.
 
-1. Iteration 1 established the three-row application shell, compact left tool
-   rail, centered canvas, right properties/layers/history inspector, and status
-   bar. The vector implementation matched the target density, hierarchy, dark
-   palette, selected-state treatment, and blue primary action.
-2. Raster iteration 1 exposed a P1 crowding issue at 1440 px: the live save
-   status and workspace label competed with project/export actions.
-3. Iteration 2 hides redundant live status and the workspace label below 1480
-   px while preserving the persistent footer status. The action hierarchy no
-   longer wraps or truncates.
-4. The final combined comparison was reviewed at a shared 1440 × 1024 frame.
-   The implementation intentionally uses an empty artboard and its real
-   available vector controls rather than reproducing the mock document content
-   or inventing unsupported tools.
+## Findings and iterations
 
-## Interaction verification
+1. The previous 420 px object inventory made the document secondary and forced
+   text editing into a property form. Replaced it with a 314 px optional tool
+   drawer and a page-first direct-edit overlay.
+2. Text objects were not selectable on the rendered page. Added revision-bound
+   object hit regions, selection handles, a floating font/size/color toolbar,
+   and a double-click inline text editor.
+3. Images had no canvas interaction. Added direct selection, drag-to-move,
+   replacement, advanced properties, and deletion.
+4. The first icon pass was not served because `/pdf/vendor/*` is intentionally
+   allowlisted. Moved the MIT Tabler assets under the normal static asset path
+   and verified the actual icon font renders.
+5. A hidden image action was still visible for text selections because an
+   author display rule overrode the HTML hidden state. Added an explicit hidden
+   rule to the contextual toolbar.
 
-- Vector: created a rectangle by drag, changed opacity to 65%, switched
-  properties/layers tabs, toggled layer visibility, searched for the ellipse
-  tool, and activated it from command search.
-- Raster: activated the brush, saved the editable layered project, and saved a
-  flattened PNG through the real image-session endpoints.
-- Responsive: verified the 1440 px professional layout and the compact top-bar
-  rule introduced after iteration 1.
-- Console: zero warnings and zero errors in both raster and vector workspaces.
-- Icons: all shell and vector icons resolve from the pinned MIT-licensed
-  Phosphor webfont; miniPaint's existing tool icons remain intact.
+## Verification
 
-## Findings
+- Real document: `editor_hwpx/pdf/eq-01-2022.pdf`
+- Canvas objects discovered: 283 visible text/image hit regions
+- Direct edit: double-click opened one inline editor on the selected page object
+- Persistence: edited text was applied, saved, reopened, and independently
+  quality-checked by the existing revision-bound PDF pipeline
+- Browser console: no error or warning entries after the edit flow
+- Tool preservation: all 46 catalogued capabilities remain reachable; 31
+  advanced command forms remain in the optional tool drawer
 
-- P0: none.
-- P1: none after iteration 2.
-- P2: none requiring implementation changes.
+## Final result
+
+Passed. No open P0, P1, or P2 visual or interaction defects remain in the
+verified desktop flow.

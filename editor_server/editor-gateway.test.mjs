@@ -92,6 +92,41 @@ function close(server) {
   });
 }
 
+async function readSseData(reader, expectedCount, timeoutMs = 5_000) {
+  const decoder = new TextDecoder();
+  const messages = [];
+  let buffer = '';
+  const deadline = Date.now() + timeoutMs;
+  while (messages.length < expectedCount) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${expectedCount} SSE messages`);
+    const result = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error('Timed out reading SSE response')),
+        Math.max(1, deadline - Date.now()),
+      );
+      reader.read().then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
+    if (result.done) break;
+    buffer += decoder.decode(result.value, { stream: true });
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() || '';
+    for (const frame of frames) {
+      const line = frame.split('\n').find((candidate) => candidate.startsWith('data: '));
+      if (line) messages.push(JSON.parse(line.slice(6)));
+    }
+  }
+  return messages;
+}
+
 function requestWebSocketUpgrade(port, pathname, extraHeaders = []) {
   return new Promise((resolve, reject) => {
     const socket = net.connect(port, '127.0.0.1');
@@ -1186,12 +1221,24 @@ test('gateway signed DOCX wrapper bridges only the trusted parent and nested edi
   const html = renderDocxPage('https://editor.example/docx/browser/cool.html', {
     access_token: 'token',
     access_token_ttl: '123',
+  }, {
+    documentId: 'doc_00000000-0000-4000-8000-000000000000',
+    accessToken: 'token',
+    docxServiceRoot: '/docx',
+    readOnly: true,
   });
   assert.match(html, /document\.referrer \? new URL\(document\.referrer\)\.origin/);
   assert.match(html, /event\.origin !== parentOrigin/);
   assert.match(html, /event\.origin === window\.location\.origin/);
   assert.match(html, /window\.parent\.postMessage\(event\.data, parentOrigin\)/);
   assert.doesNotMatch(html, /postMessage\(event\.data, ['"]\*['"]\)/);
+  assert.match(html, /Document activity/);
+  assert.match(html, /Read-only preview/);
+  assert.match(html, /new EventSource\(config\.activityUrl\)/);
+  assert.match(html, /docx\/activity\/doc_00000000-0000-4000-8000-000000000000/);
+  assert.match(html, /config\.idleMs - Math\.max/);
+  assert.match(html, /dismissedOperationId === currentOperationId/);
+  assert.match(html, /prefers-reduced-motion/);
 });
 
 test('gateway strips upstream branding from proxied editor HTML', () => {
@@ -1633,6 +1680,10 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
       body: new URLSearchParams(liveOpened.liveEditorSession.formParameters),
     });
     assert.equal(liveOpenResponse.status, 200);
+    const liveOpenHtml = await liveOpenResponse.text();
+    assert.match(liveOpenHtml, /Document activity/);
+    assert.match(liveOpenHtml, /Read-only preview/);
+    assert.match(liveOpenHtml, new RegExp(`/docx/activity/${liveOpened.documentId}`));
     const liveWopiUrl = new URL(liveOpened.liveEditorSession.formParameters.wopi_src);
     liveWopiUrl.searchParams.set('access_token', liveOpened.liveEditorSession.formParameters.access_token);
     const liveInfo = await fetch(liveWopiUrl);
@@ -1642,12 +1693,33 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     assert.equal(liveInfoPayload.UserCanWrite, false);
     const liveBefore = await fetch(`${liveWopiUrl.origin}${liveWopiUrl.pathname}/contents${liveWopiUrl.search}`);
     assert.match(getDocumentXml(Buffer.from(await liveBefore.arrayBuffer())), /live before/);
+    const unauthorizedActivity = await fetch(`${gatewayOrigin}/docx/activity/${liveOpened.documentId}`);
+    assert.equal(unauthorizedActivity.status, 401);
+    const activityUrl = new URL(`${gatewayOrigin}/docx/activity/${liveOpened.documentId}`);
+    activityUrl.searchParams.set('access_token', liveOpened.liveEditorSession.formParameters.access_token);
+    const activityResponse = await fetch(activityUrl);
+    assert.equal(activityResponse.status, 200);
+    assert.match(activityResponse.headers.get('content-type'), /text\/event-stream/);
+    const activityReader = activityResponse.body.getReader();
+    const [activitySnapshot] = await readSseData(activityReader, 1);
+    assert.equal(activitySnapshot.type, 'snapshot');
+    assert.equal(activitySnapshot.events.at(-1).label, 'Opening the DOCX document');
     const liveApplied = await callMcp(501, 'editor_docx_apply', {
       documentId: liveOpened.documentId,
       baseRevision: 1,
       commands: [{ op: 'appendParagraph', text: 'live after' }],
     });
     assert.equal(liveApplied.revision, 2);
+    const applyActivity = await readSseData(activityReader, 2);
+    assert.deepEqual(
+      applyActivity.map((message) => [message.event.label, message.event.status]),
+      [
+        ['Applying 1 document change', 'running'],
+        ['Applying 1 document change', 'completed'],
+      ],
+    );
+    assert.equal(JSON.stringify(applyActivity).includes('live after'), false);
+    await activityReader.cancel();
     const liveAfter = await fetch(`${liveWopiUrl.origin}${liveWopiUrl.pathname}/contents${liveWopiUrl.search}`);
     assert.equal(liveAfter.headers.get('x-wopi-itemversion'), '2');
     assert.match(getDocumentXml(Buffer.from(await liveAfter.arrayBuffer())), /live after/);

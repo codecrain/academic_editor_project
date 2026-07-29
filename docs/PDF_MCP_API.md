@@ -48,8 +48,13 @@ write.
 Call `editor_pdf_discard` instead of saving whenever the work is cancelled or
 the quality check fails. Artifacts are opaque server-side references: callers
 must retrieve and hash-check them before deleting them. The API includes
-transactional page composition, metadata, attachments, flattening, AES-256
-permissions, and final PKCS#12-backed PAdES signing. Secret passwords and
+transactional page composition, extraction and replacement, page boxes,
+object-removing redaction, local Korean/English OCR, global text replacement,
+comments, text markup, watermarks, backgrounds, headers, footers, Bates
+numbers, page resizing and labels, initial-view preferences, links, bookmarks,
+AcroForm authoring, metadata, attachments,
+sanitization, lossless optimization, flattening, AES-256 permissions, and final
+PKCS#12-backed PAdES signing. Secret passwords and
 certificate bytes are redacted from change logs. A signed session rejects later
 mutations; see [PDF_EDITOR.md](PDF_EDITOR.md) for the exact editing and
 source-object boundary.

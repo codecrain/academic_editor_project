@@ -5,13 +5,17 @@ permissively licensed upstream components:
 
 - Mozilla PDF.js 6.2.108 - Apache-2.0
 - pdf-lib 1.17.1 - MIT
+- @pdf-lib/fontkit 1.1.1 - MIT
 - @napi-rs/canvas 0.1.80 - MIT
+- @tabler/icons-webfont 3.46.0 - MIT
 - @embedpdf/snippet 2.14.4 - MIT
 - @embedpdf/pdfium 2.14.4 - MIT wrapper around PDFium WebAssembly
 - @embedpdf/fonts-kr 1.0.0 - OFL-1.1 Noto Sans KR font files
 - PDFium WebAssembly distributed by EmbedPDF - permissive PDFium and bundled
   third-party notices retained in the pinned package
 - @libpdf/core 0.3.4 - MIT; its `src/fontbox/` component is Apache-2.0
+- tesseract.js 6.0.1 - Apache-2.0
+- @tesseract.js-data/kor 1.0.0 and @tesseract.js-data/eng 1.0.0 - MIT
 
 The PDF font registry exposes only redistributable font families and records
 their license next to each UI option: Noto, Nanum, Pretendard, Carlito,
@@ -27,3 +31,6 @@ The browser editor uses PDFium for rendering, annotations, forms, signatures,
 search, attachments, and destructive redaction. Server-side commands continue
 to fail closed for operations that have not yet passed the independent
 save/reopen/render compatibility checks.
+
+OCR runs inside the service process with packaged Korean and English language
+data. It does not upload PDF pages to a remote recognition service.

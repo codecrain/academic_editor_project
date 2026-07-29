@@ -1,9 +1,20 @@
 import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
+import fontkit from '@pdf-lib/fontkit';
 import {
+  fill,
+  PDFDict,
   degrees,
+  PDFHexString,
+  PDFName,
+  PDFNumber,
   PDFDocument,
+  popGraphicsState,
+  pushGraphicsState,
+  rectangle,
   rgb,
+  setFillingRgbColor,
 } from 'pdf-lib';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { P12Signer, PDF as LibPDF } from '@libpdf/core';
@@ -13,7 +24,9 @@ import {
   applyPdfObjectCommands,
   inspectPdfObjects,
   listPdfFonts,
+  resolvePdfFont,
 } from './pdfium-object-editor.mjs';
+import { buildOcrTextCommands } from './pdf-ocr.mjs';
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -31,6 +44,209 @@ function pdfColor(value, fallback) {
     Number.parseInt(hex.slice(2, 4), 16) / 255,
     Number.parseInt(hex.slice(4, 6), 16) / 255,
   );
+}
+
+function colorChannels(value, fallback) {
+  const hex = normalizeHexColor(value, fallback).slice(1);
+  return [
+    Number.parseInt(hex.slice(0, 2), 16) / 255,
+    Number.parseInt(hex.slice(2, 4), 16) / 255,
+    Number.parseInt(hex.slice(4, 6), 16) / 255,
+  ];
+}
+
+function selectedPageNumbers(command, pageCount) {
+  const pages = command.pages || Array.from({ length: pageCount }, (_, index) => index + 1);
+  for (const page of pages) {
+    if (page < 1 || page > pageCount) throw new Error(`${command.op} targets missing PDF page ${page}.`);
+  }
+  return pages;
+}
+
+function expandPageTokens(value, page, pageCount) {
+  return String(value || '').replaceAll('{page}', String(page)).replaceAll('{pages}', String(pageCount));
+}
+
+async function embedApprovedFont(pdfDoc, family) {
+  pdfDoc.registerFontkit(fontkit);
+  const font = await resolvePdfFont(family || 'Noto Sans KR');
+  const embedded = await pdfDoc.embedFont(await readFile(font.filePath), { subset: true });
+  return { embedded, font };
+}
+
+async function applyEmbeddedText(pdfDoc, commands) {
+  const intermediate = Buffer.from(await pdfDoc.save({
+    useObjectStreams: true,
+    addDefaultPage: false,
+    updateFieldAppearances: false,
+  }));
+  const edited = await applyPdfObjectCommands(intermediate, commands);
+  return PDFDocument.load(edited.bytes, { ignoreEncryption: false, updateMetadata: false });
+}
+
+function estimatedTextWidth(text, fontSize) {
+  return Array.from(String(text)).reduce((width, character) => (
+    width + (character.codePointAt(0) > 0xff ? fontSize : fontSize * 0.56)
+  ), 0);
+}
+
+function prependBackground(pdfDoc, page, color) {
+  const [r, g, b] = colorChannels(color, '#ffffff');
+  const stream = pdfDoc.context.contentStream([
+    pushGraphicsState(),
+    setFillingRgbColor(r, g, b),
+    rectangle(0, 0, page.getWidth(), page.getHeight()),
+    fill(),
+    popGraphicsState(),
+  ]);
+  const streamRef = pdfDoc.context.register(stream);
+  const contents = page.node.normalizedEntries().Contents;
+  contents.insert(0, streamRef);
+}
+
+function addExternalLink(pdfDoc, page, command) {
+  const y = page.getHeight() - command.y - command.height;
+  const annotation = pdfDoc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Link',
+    Rect: [command.x, y, command.x + command.width, y + command.height],
+    Border: [0, 0, 0],
+    A: {
+      Type: 'Action',
+      S: 'URI',
+      URI: PDFHexString.fromText(command.url),
+    },
+  });
+  page.node.addAnnot(pdfDoc.context.register(annotation));
+}
+
+function addTextNote(pdfDoc, page, command) {
+  const y = page.getHeight() - command.y - command.height;
+  const annotation = pdfDoc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: [command.x, y, command.x + command.width, y + command.height],
+    Contents: PDFHexString.fromText(command.text),
+    T: PDFHexString.fromText(command.author),
+    Name: PDFName.of(command.icon),
+    C: colorChannels(command.color, '#ffd166'),
+    Open: command.open,
+    F: 4,
+  });
+  page.node.addAnnot(pdfDoc.context.register(annotation));
+}
+
+function addTextMarkup(pdfDoc, page, command) {
+  const bottom = page.getHeight() - command.y - command.height;
+  const top = bottom + command.height;
+  const subtype = {
+    highlight: 'Highlight',
+    underline: 'Underline',
+    squiggly: 'Squiggly',
+    strikeout: 'StrikeOut',
+  }[command.style];
+  const annotation = pdfDoc.context.obj({
+    Type: 'Annot',
+    Subtype: subtype,
+    Rect: [command.x, bottom, command.x + command.width, top],
+    QuadPoints: [
+      command.x, top,
+      command.x + command.width, top,
+      command.x, bottom,
+      command.x + command.width, bottom,
+    ],
+    C: colorChannels(command.color, command.style === 'highlight' ? '#ffe066' : '#f04438'),
+    Contents: PDFHexString.fromText(command.text || ''),
+    F: 4,
+  });
+  page.node.addAnnot(pdfDoc.context.register(annotation));
+}
+
+function setPageLabels(pdfDoc, command) {
+  const styles = {
+    decimal: 'D',
+    'roman-upper': 'R',
+    'roman-lower': 'r',
+    'letters-upper': 'A',
+    'letters-lower': 'a',
+  };
+  const nums = [];
+  for (const segment of command.segments) {
+    if (segment.page > pdfDoc.getPageCount()) throw new Error(`page.setLabels targets missing PDF page ${segment.page}.`);
+    const label = {
+      P: PDFHexString.fromText(segment.prefix),
+      St: segment.start,
+    };
+    if (segment.style !== 'prefix-only') label.S = PDFName.of(styles[segment.style]);
+    nums.push(segment.page - 1, pdfDoc.context.obj(label));
+  }
+  pdfDoc.catalog.set(PDFName.of('PageLabels'), pdfDoc.context.obj({ Nums: nums }));
+}
+
+function setInitialView(pdfDoc, command) {
+  const pageModes = {
+    none: 'UseNone',
+    outlines: 'UseOutlines',
+    thumbnails: 'UseThumbs',
+    fullscreen: 'FullScreen',
+    attachments: 'UseAttachments',
+  };
+  pdfDoc.catalog.set(PDFName.of('PageMode'), PDFName.of(pageModes[command.pageMode]));
+  pdfDoc.catalog.set(PDFName.of('ViewerPreferences'), pdfDoc.context.obj({
+    HideToolbar: command.hideToolbar,
+    HideMenubar: command.hideMenubar,
+    HideWindowUI: command.hideWindowUI,
+    FitWindow: command.fitWindow,
+    CenterWindow: command.centerWindow,
+    DisplayDocTitle: command.displayDocTitle,
+    Direction: PDFName.of(command.readingDirection === 'right-to-left' ? 'R2L' : 'L2R'),
+    PrintScaling: PDFName.of(command.printScaling === 'none' ? 'None' : 'AppDefault'),
+  }));
+}
+
+function addTopLevelBookmark(pdfDoc, title, page) {
+  const outlinesName = PDFName.of('Outlines');
+  let outlinesRef = pdfDoc.catalog.get(outlinesName);
+  let outlines = outlinesRef ? pdfDoc.context.lookup(outlinesRef, PDFDict) : null;
+  if (!outlines) {
+    outlines = pdfDoc.context.obj({});
+    outlinesRef = pdfDoc.context.register(outlines);
+    pdfDoc.catalog.set(outlinesName, outlinesRef);
+  }
+  const previousLastRef = outlines.get(PDFName.of('Last'));
+  const item = pdfDoc.context.obj({
+    Title: PDFHexString.fromText(title),
+    Parent: outlinesRef,
+    Dest: [page.ref, PDFName.of('Fit')],
+  });
+  const itemRef = pdfDoc.context.register(item);
+  if (previousLastRef) {
+    const previousLast = pdfDoc.context.lookup(previousLastRef, PDFDict);
+    previousLast.set(PDFName.of('Next'), itemRef);
+    item.set(PDFName.of('Prev'), previousLastRef);
+  } else {
+    outlines.set(PDFName.of('First'), itemRef);
+  }
+  outlines.set(PDFName.of('Last'), itemRef);
+  const currentCount = outlines.get(PDFName.of('Count'));
+  outlines.set(PDFName.of('Count'), PDFNumber.of((currentCount?.asNumber?.() || 0) + 1));
+  pdfDoc.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
+}
+
+function sanitizePdfDocument(pdfDoc) {
+  for (const key of ['Names', 'OpenAction', 'AA', 'AcroForm', 'Collection', 'Perms']) {
+    pdfDoc.catalog.delete(PDFName.of(key));
+  }
+  for (const page of pdfDoc.getPages()) {
+    page.node.delete(PDFName.of('AA'));
+    page.node.delete(PDFName.of('Annots'));
+  }
+  pdfDoc.setTitle('');
+  pdfDoc.setAuthor('');
+  pdfDoc.setSubject('');
+  pdfDoc.setKeywords([]);
+  pdfDoc.setCreator('');
+  pdfDoc.setProducer('Academic PDF Editor');
 }
 
 function ensurePdfBytes(bytes) {
@@ -204,6 +420,7 @@ class PdfApiSession {
   objectInventory() {
     const graph = this.readJson().objectGraph;
     return {
+      pages: this.inspection.pages,
       images: graph.images,
       annotations: graph.annotations,
       pageObjects: graph.pageObjects,
@@ -234,15 +451,124 @@ class PdfApiSession {
       let pages = candidate.getPages();
       const page = command.page ? pages[command.page - 1] : null;
       if (command.page && !page) throw new Error(`${command.op} targets missing PDF page ${command.page}.`);
-      const coordinateOp = ['text.add', 'highlight.add', 'ink.add', 'image.add', 'signature.addAppearance', 'page.crop'].includes(command.op);
+      const coordinateOp = [
+        'text.add', 'highlight.add', 'ink.add', 'image.add', 'signature.addAppearance', 'page.crop',
+        'redaction.apply', 'link.add', 'form.addTextField', 'form.addCheckBox', 'form.addDropdown',
+        'comment.add', 'textMarkup.add',
+      ].includes(command.op);
       if (coordinateOp && Number(page.getRotation()?.angle || 0) % 360 !== 0) {
         throw new Error(`${command.op} is blocked on rotated PDF page ${command.page} until rotation-aware object coordinates are available.`);
       }
       const pageHeight = page?.getHeight();
-      if (['text.add', 'text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete'].includes(command.op)) {
+      if (command.op === 'text.replaceAll') {
+        const intermediate = Buffer.from(await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false }));
+        const inspected = await inspectPdfObjects(intermediate);
+        const selectedPages = new Set(command.pages || Array.from({ length: candidate.getPageCount() }, (_value, index) => index + 1));
+        const needle = command.caseSensitive ? command.find : command.find.toLocaleLowerCase();
+        const replacements = inspected.textObjects.flatMap((object) => {
+          if (!selectedPages.has(object.page)) return [];
+          const haystack = command.caseSensitive ? object.text : object.text.toLocaleLowerCase();
+          if (!haystack.includes(needle)) return [];
+          let text;
+          if (command.caseSensitive) {
+            text = object.text.replaceAll(command.find, command.replace);
+          } else {
+            let cursor = 0;
+            const parts = [];
+            while (true) {
+              const index = haystack.indexOf(needle, cursor);
+              if (index === -1) break;
+              parts.push(object.text.slice(cursor, index), command.replace);
+              cursor = index + command.find.length;
+            }
+            parts.push(object.text.slice(cursor));
+            text = parts.join('');
+          }
+          return [{
+            op: 'text.replaceObject',
+            page: object.page,
+            objectIndex: object.objectIndex,
+            objectId: object.id,
+            expectedText: object.text,
+            text,
+            ...(command.fontFamily ? { fontFamily: command.fontFamily } : {}),
+          }];
+        });
+        if (!replacements.length) throw new Error(`text.replaceAll could not find "${command.find}" in the selected pages.`);
+        const edited = await applyPdfObjectCommands(intermediate, replacements);
+        candidate = await PDFDocument.load(edited.bytes, { ignoreEncryption: false, updateMetadata: false });
+        command.result = { objectsReplaced: replacements.length };
+      } else if (['text.add', 'text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete', 'redaction.apply'].includes(command.op)) {
         const intermediate = Buffer.from(await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false }));
         const edited = await applyPdfObjectCommands(intermediate, [command]);
         candidate = await PDFDocument.load(edited.bytes, { ignoreEncryption: false, updateMetadata: false });
+        if (command.op === 'redaction.apply') {
+          const redactedPage = candidate.getPage(command.page - 1);
+          redactedPage.node.delete(PDFName.of('Annots'));
+          const redactionColor = pdfColor(command.color, '#000000');
+          for (const region of command.regions) {
+            redactedPage.drawRectangle({
+              x: region.x,
+              y: redactedPage.getHeight() - region.y - region.height,
+              width: region.width,
+              height: region.height,
+              color: redactionColor,
+              borderWidth: 0,
+              opacity: 1,
+            });
+          }
+          if (command.overlayText) {
+            const textCommands = command.regions.map((region) => {
+              const size = Math.max(4, Math.min(10, region.height * 0.45));
+              return {
+                op: 'text.add',
+                page: command.page,
+                x: region.x + Math.max(2, (region.width - estimatedTextWidth(command.overlayText, size)) / 2),
+                y: region.y + Math.max(2, (region.height - size) / 2),
+                text: command.overlayText,
+                fontFamily: 'Noto Sans KR',
+                fontSize: size,
+                color: '#ffffff',
+              };
+            });
+            candidate = await applyEmbeddedText(candidate, textCommands);
+          }
+        }
+      } else if (command.op === 'ocr.recognize') {
+        const intermediate = Buffer.from(await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false }));
+        const selectedPages = selectedPageNumbers(command, candidate.getPageCount());
+        const existingObjects = await inspectPdfObjects(intermediate);
+        const existingCharacters = new Map();
+        for (const textObject of existingObjects.textObjects || []) {
+          existingCharacters.set(
+            textObject.page,
+            (existingCharacters.get(textObject.page) || 0) + String(textObject.text || '').trim().length,
+          );
+        }
+        const pages = command.force
+          ? selectedPages
+          : selectedPages.filter((pageNumber) => (existingCharacters.get(pageNumber) || 0) < command.minimumExistingTextCharacters);
+        if (pages.length) {
+          const recognized = await buildOcrTextCommands(intermediate, { ...command, pages });
+          if (recognized.commands.length) candidate = await applyEmbeddedText(candidate, recognized.commands);
+          command.result = {
+            pagesRequested: selectedPages.length,
+            pagesRecognized: recognized.recognizedPages.length,
+            pagesSkippedWithText: selectedPages.length - pages.length,
+            wordsAdded: recognized.commands.length,
+            languages: recognized.languages,
+            dpi: recognized.dpi,
+          };
+        } else {
+          command.result = {
+            pagesRequested: selectedPages.length,
+            pagesRecognized: 0,
+            pagesSkippedWithText: selectedPages.length,
+            wordsAdded: 0,
+            languages: command.languages,
+            dpi: command.dpi,
+          };
+        }
       } else if (command.op === 'highlight.add') {
         page.drawRectangle({
           x: command.x,
@@ -265,6 +591,10 @@ class PdfApiSession {
             opacity: 1,
           });
         }
+      } else if (command.op === 'comment.add') {
+        addTextNote(candidate, page, command);
+      } else if (command.op === 'textMarkup.add') {
+        addTextMarkup(candidate, page, command);
       } else if (command.op === 'image.add' || command.op === 'signature.addAppearance') {
         const bytes = Buffer.from(command.bytesBase64, 'base64');
         const image = String(command.mimeType).toLowerCase() === 'image/png'
@@ -300,17 +630,169 @@ class PdfApiSession {
           throw new Error('page.crop rectangle must stay inside the page bounds.');
         }
         page.setCropBox(command.x, pageHeight - command.y - command.height, command.width, command.height);
+      } else if (command.op === 'page.resize') {
+        const originalWidth = page.getWidth();
+        const originalHeight = page.getHeight();
+        if (command.scaleContent) {
+          let scaleX = command.width / originalWidth;
+          let scaleY = command.height / originalHeight;
+          if (command.preserveAspectRatio) scaleX = scaleY = Math.min(scaleX, scaleY);
+          page.scaleContent(scaleX, scaleY);
+          page.scaleAnnotations(scaleX, scaleY);
+          if (command.centerContent) {
+            page.translateContent(
+              Math.max(0, (command.width - originalWidth * scaleX) / 2),
+              Math.max(0, (command.height - originalHeight * scaleY) / 2),
+            );
+          }
+        }
+        page.setSize(command.width, command.height);
+      } else if (command.op === 'page.setLabels') {
+        setPageLabels(candidate, command);
+      } else if (command.op === 'page.extract') {
+        const requestedPages = command.pages.map((pageNumber) => {
+          if (pageNumber > candidate.getPageCount()) throw new Error(`page.extract targets missing PDF page ${pageNumber}.`);
+          return pageNumber - 1;
+        });
+        const extracted = await PDFDocument.create();
+        const copied = await extracted.copyPages(candidate, requestedPages);
+        for (const copiedPage of copied) extracted.addPage(copiedPage);
+        candidate = extracted;
+      } else if (command.op === 'page.replace') {
+        const source = await PDFDocument.load(ensurePdfBytes(Buffer.from(command.sourceBytesBase64, 'base64')), { ignoreEncryption: false, updateMetadata: false });
+        if (command.sourcePage > source.getPageCount()) throw new Error(`page.replace source page ${command.sourcePage} does not exist.`);
+        const [replacement] = await candidate.copyPages(source, [command.sourcePage - 1]);
+        candidate.removePage(command.page - 1);
+        candidate.insertPage(command.page - 1, replacement);
+      } else if (command.op === 'page.setBoxes') {
+        const setters = { media: 'setMediaBox', crop: 'setCropBox', bleed: 'setBleedBox', trim: 'setTrimBox', art: 'setArtBox' };
+        for (const [boxName, box] of Object.entries(command.boxes)) {
+          page[setters[boxName]](box.x, box.y, box.width, box.height);
+        }
       } else if (command.op === 'document.merge') {
         const source = await PDFDocument.load(ensurePdfBytes(Buffer.from(command.sourceBytesBase64, 'base64')), { ignoreEncryption: false, updateMetadata: false });
         const copied = await candidate.copyPages(source, source.getPageIndices());
         let index = Math.min(command.insertAt - 1, candidate.getPageCount());
         for (const copiedPage of copied) candidate.insertPage(index++, copiedPage);
+      } else if (command.op === 'document.setInitialView') {
+        setInitialView(candidate, command);
+      } else if (command.op === 'watermark.add') {
+        const textCommands = selectedPageNumbers(command, candidate.getPageCount()).map((pageNumber) => {
+          const targetPage = candidate.getPage(pageNumber - 1);
+          return {
+            op: 'text.add',
+            page: pageNumber,
+            x: Math.max(0, (targetPage.getWidth() - estimatedTextWidth(command.text, command.fontSize)) / 2),
+            y: Math.max(0, (targetPage.getHeight() - command.fontSize) / 2),
+            text: command.text,
+            fontFamily: command.fontFamily,
+            fontSize: command.fontSize,
+            color: command.color,
+            opacity: command.opacity,
+            rotation: command.rotation,
+          };
+        });
+        candidate = await applyEmbeddedText(candidate, textCommands);
+      } else if (command.op === 'background.set') {
+        for (const pageNumber of selectedPageNumbers(command, candidate.getPageCount())) {
+          prependBackground(candidate, candidate.getPage(pageNumber - 1), command.color);
+        }
+      } else if (command.op === 'headerFooter.add') {
+        const pageCount = candidate.getPageCount();
+        const textCommands = [];
+        for (const pageNumber of selectedPageNumbers(command, pageCount)) {
+          const targetPage = candidate.getPage(pageNumber - 1);
+          for (const [key, position] of [
+            ['headerLeft', 'top-left'], ['headerCenter', 'top-center'], ['headerRight', 'top-right'],
+            ['footerLeft', 'bottom-left'], ['footerCenter', 'bottom-center'], ['footerRight', 'bottom-right'],
+          ]) {
+            const text = expandPageTokens(command[key], pageNumber, pageCount);
+            if (!text) continue;
+            const textWidth = estimatedTextWidth(text, command.fontSize);
+            const x = position.endsWith('left')
+              ? command.margin
+              : position.endsWith('center')
+                ? (targetPage.getWidth() - textWidth) / 2
+                : targetPage.getWidth() - command.margin - textWidth;
+            const y = position.startsWith('top') ? command.margin : targetPage.getHeight() - command.margin - command.fontSize;
+            textCommands.push({
+              op: 'text.add', page: pageNumber, x: Math.max(0, x), y: Math.max(0, y), text,
+              fontFamily: command.fontFamily, fontSize: command.fontSize, color: command.color,
+            });
+          }
+        }
+        candidate = await applyEmbeddedText(candidate, textCommands);
+      } else if (command.op === 'bates.add') {
+        const pagesToNumber = selectedPageNumbers(command, candidate.getPageCount());
+        const textCommands = pagesToNumber.map((pageNumber, index) => {
+          const targetPage = candidate.getPage(pageNumber - 1);
+          const number = String(command.start + index).padStart(command.digits, '0');
+          const text = `${command.prefix}${number}${command.suffix}`;
+          const textWidth = estimatedTextWidth(text, command.fontSize);
+          const x = command.position.endsWith('left')
+            ? command.margin
+            : command.position.endsWith('center')
+              ? (targetPage.getWidth() - textWidth) / 2
+              : targetPage.getWidth() - command.margin - textWidth;
+          const y = command.position.startsWith('top') ? command.margin : targetPage.getHeight() - command.margin - command.fontSize;
+          return {
+            op: 'text.add', page: pageNumber, x: Math.max(0, x), y: Math.max(0, y), text,
+            fontFamily: command.fontFamily, fontSize: command.fontSize, color: command.color,
+          };
+        });
+        candidate = await applyEmbeddedText(candidate, textCommands);
+      } else if (command.op === 'link.add') {
+        addExternalLink(candidate, page, command);
+      } else if (command.op === 'bookmark.add') {
+        addTopLevelBookmark(candidate, command.title, page);
+      } else if (['form.addTextField', 'form.addCheckBox', 'form.addDropdown'].includes(command.op)) {
+        const form = candidate.getForm();
+        const y = pageHeight - command.y - command.height;
+        const appearance = {
+          x: command.x,
+          y,
+          width: command.width,
+          height: command.height,
+          borderWidth: 1,
+          borderColor: rgb(0.55, 0.58, 0.65),
+          backgroundColor: rgb(1, 1, 1),
+          textColor: rgb(0.09, 0.13, 0.2),
+        };
+        if (command.op === 'form.addTextField') {
+          const { embedded } = await embedApprovedFont(candidate, command.fontFamily);
+          const field = form.createTextField(command.name);
+          if (command.multiline) field.enableMultiline();
+          if (command.required) field.enableRequired();
+          if (command.value) field.setText(command.value);
+          field.addToPage(page, { ...appearance, font: embedded });
+          field.setFontSize(command.fontSize);
+        } else if (command.op === 'form.addCheckBox') {
+          const field = form.createCheckBox(command.name);
+          field.addToPage(page, appearance);
+          if (command.checked) field.check();
+        } else {
+          const { embedded } = await embedApprovedFont(candidate, command.fontFamily);
+          const field = form.createDropdown(command.name);
+          field.addOptions(command.options);
+          if (command.selected) field.select(command.selected);
+          field.addToPage(page, { ...appearance, font: embedded });
+          field.setFontSize(command.fontSize);
+        }
+      } else if (command.op === 'form.remove') {
+        const form = candidate.getForm();
+        const field = form.getFieldMaybe(command.name);
+        if (!field) throw new Error(`form.remove could not find ${command.name}.`);
+        form.removeField(field);
       } else if (command.op === 'metadata.set') {
         const setters = {
           title: 'setTitle', author: 'setAuthor', subject: 'setSubject', keywords: 'setKeywords',
           creator: 'setCreator', producer: 'setProducer', language: 'setLanguage',
         };
         for (const [key, value] of Object.entries(command.metadata)) candidate[setters[key]](value);
+      } else if (command.op === 'document.sanitize') {
+        sanitizePdfDocument(candidate);
+      } else if (command.op === 'document.optimize') {
+        // Serialization below performs the lossless object-stream rewrite.
       } else if (command.op === 'document.flattenAll' || command.op.startsWith('attachment.')) {
         const intermediate = await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false });
         const advanced = await LibPDF.load(intermediate);
@@ -395,6 +877,16 @@ class PdfApiSession {
 
   async qualityCheck() {
     const issues = [];
+    const title = String(this.pdfDoc.getTitle() || '').trim();
+    const languageValue = this.pdfDoc.catalog.get(PDFName.of('Lang'));
+    const language = String(languageValue?.decodeText?.() || '').trim();
+    const tagged = Boolean(this.pdfDoc.catalog.get(PDFName.of('StructTreeRoot')));
+    const imageOnlyPages = this.inspection.pages
+      .filter((page) => page.textLength === 0 && this.inspection.images.some((image) => image.page === page.page))
+      .map((page) => page.page);
+    const unembeddedFontObjects = this.objectInspection.textObjects
+      .filter((object) => object.renderMode !== 3 && object.embeddedFont === false)
+      .map((object) => ({ page: object.page, objectIndex: object.objectIndex, fontFamily: object.fontFamily }));
     let saved;
     try {
       saved = await this.save();
@@ -414,12 +906,49 @@ class PdfApiSession {
     if (this.sourceBytes.includes(Buffer.from('/Type /Sig')) && this.changes.length) {
       issues.push({ code: 'existing_signature_may_be_invalidated', severity: 'warning', message: 'The edited source contains an existing digital signature.' });
     }
+    if (!title) issues.push({ code: 'accessibility_missing_title', severity: 'warning', message: 'The PDF does not have a document title.' });
+    if (!language) issues.push({ code: 'accessibility_missing_language', severity: 'warning', message: 'The PDF does not declare a document language.' });
+    if (!tagged) issues.push({ code: 'accessibility_untagged', severity: 'warning', message: 'The PDF does not contain a tagged structure tree.' });
+    if (imageOnlyPages.length) {
+      issues.push({
+        code: 'accessibility_image_only_pages',
+        severity: 'warning',
+        message: `Image-only pages need OCR for search and assistive technology: ${imageOnlyPages.join(', ')}.`,
+        pages: imageOnlyPages,
+      });
+    }
+    if (unembeddedFontObjects.length) {
+      issues.push({
+        code: 'preflight_unembedded_fonts',
+        severity: 'warning',
+        message: `${unembeddedFontObjects.length} visible text object(s) use fonts that are not embedded.`,
+        objects: unembeddedFontObjects.slice(0, 100),
+      });
+    }
+    const savedBytes = saved?.bytes || Buffer.alloc(0);
+    const activeContentMarkers = ['/JavaScript', '/OpenAction', '/AA']
+      .filter((marker) => savedBytes.includes(Buffer.from(marker)));
+    if (activeContentMarkers.length) {
+      issues.push({
+        code: 'preflight_active_content',
+        severity: 'warning',
+        message: `The PDF contains active-content markers: ${activeContentMarkers.join(', ')}.`,
+      });
+    }
     return {
       ok: issues.every((issue) => issue.severity !== 'error'),
       revision: this.revision,
       pageCount: this.pdfDoc.getPageCount(),
       changeCount: this.changes.length,
       issues,
+      preflight: {
+        title,
+        language,
+        tagged,
+        imageOnlyPages,
+        unembeddedFontObjects,
+        activeContentMarkers,
+      },
       sha256: saved ? sha256(saved.bytes) : null,
     };
   }

@@ -10,6 +10,7 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
+import { DocxActivityHub, activitySummary } from './docx-activity.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
 import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
@@ -126,6 +127,15 @@ function getDocxWopiDocumentId(pathname, docxServiceRoot) {
 
 function getDocxEditDocumentId(pathname, docxServiceRoot) {
   const prefix = `${docxServiceRoot}/edit/`;
+  if (!pathname.startsWith(prefix)) {
+    return '';
+  }
+  const documentId = pathname.slice(prefix.length);
+  return /^(?:[0-9a-f-]{36}|doc_[0-9a-f-]{36})$/i.test(documentId) ? documentId : '';
+}
+
+function getDocxActivityDocumentId(pathname, docxServiceRoot) {
+  const prefix = `${docxServiceRoot}/activity/`;
   if (!pathname.startsWith(prefix)) {
     return '';
   }
@@ -280,7 +290,244 @@ async function buildDocxEditorActionUrl(config, publicOrigin) {
   return new URL(actionPath, `${publicOrigin}/`).toString();
 }
 
-function renderDocxPage(editorUrl, formParameters = null) {
+function renderDocxActivityUi(options = {}) {
+  const documentId = String(options.documentId || '');
+  const accessToken = String(options.accessToken || '');
+  if (!documentId || !accessToken) return '';
+  const activityUrl = `${options.docxServiceRoot || '/docx'}/activity/${encodeURIComponent(documentId)}?access_token=${encodeURIComponent(accessToken)}`;
+  const clientConfig = JSON.stringify({
+    activityUrl,
+    idleMs: 10_000,
+    maxVisibleEvents: 6,
+    readOnly: options.readOnly === true,
+  }).replace(/</g, '\\u003c');
+  return `
+  <div id="docx-activity-shell" class="${options.readOnly === true ? 'is-read-only' : ''}" aria-live="polite">
+    <button id="docx-readonly-pill" type="button" aria-label="Read-only preview details">
+      <span aria-hidden="true">🔒</span><span>Read-only preview</span>
+    </button>
+    <section id="docx-activity-panel" aria-label="Document activity">
+      <header>
+        <div>
+          <strong>Document activity</strong>
+          <span id="docx-activity-mode">${options.readOnly === true ? 'Read-only preview' : 'Editing enabled'}</span>
+        </div>
+        <button id="docx-activity-close" type="button" aria-label="Dismiss document activity">×</button>
+      </header>
+      <ol id="docx-activity-events"></ol>
+    </section>
+  </div>
+  <style>
+    #docx-activity-shell {
+      --activity-border: rgba(148, 163, 184, .28);
+      --activity-surface: rgba(15, 23, 42, .94);
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 2147483000;
+      width: min(360px, calc(100vw - 36px));
+      color: #f8fafc;
+      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: none;
+    }
+    #docx-activity-panel {
+      overflow: hidden;
+      border: 1px solid var(--activity-border);
+      border-radius: 14px;
+      background: var(--activity-surface);
+      box-shadow: 0 18px 48px rgba(15, 23, 42, .28);
+      opacity: 0;
+      transform: translateY(14px) scale(.985);
+      visibility: hidden;
+      transition: opacity 180ms ease, transform 220ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 220ms;
+      backdrop-filter: blur(16px);
+      pointer-events: auto;
+    }
+    #docx-activity-shell.activity-active #docx-activity-panel {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      visibility: visible;
+      transition-delay: 0s;
+    }
+    #docx-activity-panel header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 14px 11px;
+      border-bottom: 1px solid var(--activity-border);
+    }
+    #docx-activity-panel header div { display: grid; gap: 1px; min-width: 0; }
+    #docx-activity-panel header strong { font-size: 13px; font-weight: 650; letter-spacing: .01em; }
+    #docx-activity-mode { color: #94a3b8; font-size: 11px; }
+    #docx-activity-close {
+      width: 28px;
+      height: 28px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: #cbd5e1;
+      font: 22px/1 sans-serif;
+      cursor: pointer;
+    }
+    #docx-activity-close:hover, #docx-activity-close:focus-visible { background: rgba(148, 163, 184, .16); color: #fff; }
+    #docx-activity-events { display: grid; gap: 0; max-height: 270px; margin: 0; padding: 7px 0; overflow: hidden; list-style: none; }
+    .docx-activity-event {
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      min-height: 24px;
+      padding: 5px 14px;
+      color: #e2e8f0;
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 180ms ease, transform 220ms cubic-bezier(.2, .8, .2, 1), max-height 220ms ease, padding 220ms ease;
+    }
+    .docx-activity-event.entering { opacity: 0; transform: translateY(12px); }
+    .docx-activity-event.leaving { max-height: 0; min-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; transform: translateY(-12px); }
+    .docx-activity-icon {
+      display: grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      color: #cbd5e1;
+      font-size: 11px;
+    }
+    .docx-activity-event[data-status="running"] .docx-activity-icon {
+      box-sizing: border-box;
+      border: 2px solid rgba(148, 163, 184, .45);
+      border-top-color: #60a5fa;
+      animation: docx-activity-spin 850ms linear infinite;
+    }
+    .docx-activity-event[data-status="completed"] .docx-activity-icon { background: rgba(34, 197, 94, .16); color: #86efac; }
+    .docx-activity-event[data-status="failed"] .docx-activity-icon { background: rgba(239, 68, 68, .16); color: #fca5a5; }
+    .docx-activity-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #docx-readonly-pill {
+      display: none;
+      margin-left: auto;
+      align-items: center;
+      gap: 7px;
+      min-height: 34px;
+      padding: 7px 11px;
+      border: 1px solid var(--activity-border);
+      border-radius: 999px;
+      background: var(--activity-surface);
+      box-shadow: 0 8px 24px rgba(15, 23, 42, .22);
+      color: #e2e8f0;
+      font: inherit;
+      cursor: pointer;
+      pointer-events: auto;
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 160ms ease, transform 180ms ease;
+    }
+    #docx-activity-shell.is-read-only:not(.activity-active) #docx-readonly-pill { display: flex; }
+    @keyframes docx-activity-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      #docx-activity-panel, #docx-readonly-pill, .docx-activity-event { transition: none; }
+      .docx-activity-event[data-status="running"] .docx-activity-icon { animation-duration: 1.8s; }
+    }
+  </style>
+  <script>
+    (() => {
+      const config = ${clientConfig};
+      const shell = document.getElementById('docx-activity-shell');
+      const list = document.getElementById('docx-activity-events');
+      const closeButton = document.getElementById('docx-activity-close');
+      const readOnlyPill = document.getElementById('docx-readonly-pill');
+      const rows = new Map();
+      let currentOperationId = '';
+      let dismissedOperationId = '';
+      let idleTimer = null;
+
+      const hide = () => shell.classList.remove('activity-active');
+      const show = (force = false) => {
+        if (!force && currentOperationId && dismissedOperationId === currentOperationId) return;
+        shell.classList.add('activity-active');
+      };
+      const scheduleIdle = (lastActivityAt = Date.now()) => {
+        clearTimeout(idleTimer);
+        const delay = Math.max(0, config.idleMs - Math.max(0, Date.now() - Number(lastActivityAt || 0)));
+        idleTimer = setTimeout(hide, delay);
+      };
+      const removeOldest = () => {
+        while (rows.size > config.maxVisibleEvents) {
+          const [id, row] = rows.entries().next().value;
+          rows.delete(id);
+          row.classList.add('leaving');
+          setTimeout(() => row.remove(), 240);
+        }
+      };
+      const upsert = (event) => {
+        if (!event || !event.id || !event.label) return;
+        let row = rows.get(event.id);
+        if (!row) {
+          row = document.createElement('li');
+          row.className = 'docx-activity-event entering';
+          const icon = document.createElement('span');
+          icon.className = 'docx-activity-icon';
+          icon.setAttribute('aria-hidden', 'true');
+          const label = document.createElement('span');
+          label.className = 'docx-activity-label';
+          row.append(icon, label);
+          list.append(row);
+          rows.set(event.id, row);
+          requestAnimationFrame(() => row.classList.remove('entering'));
+        }
+        row.dataset.status = event.status;
+        row.querySelector('.docx-activity-label').textContent = event.label;
+        const icon = row.querySelector('.docx-activity-icon');
+        icon.textContent = event.status === 'completed' ? '✓' : event.status === 'failed' ? '!' : '';
+        row.setAttribute('aria-label', event.label + ': ' + event.status);
+        removeOldest();
+      };
+      const resetRows = () => {
+        rows.clear();
+        list.replaceChildren();
+      };
+      const receive = (payload) => {
+        if (!payload || !payload.type) return;
+        if (payload.operationId && payload.operationId !== currentOperationId) {
+          currentOperationId = payload.operationId;
+          dismissedOperationId = '';
+          resetRows();
+        }
+        if (payload.type === 'snapshot') {
+          for (const event of payload.events || []) upsert(event);
+          if (payload.events?.length && Date.now() - Number(payload.lastActivityAt || 0) < config.idleMs) show();
+          scheduleIdle(payload.lastActivityAt);
+          return;
+        }
+        if (payload.type === 'activity' && payload.event) {
+          upsert(payload.event);
+          show();
+          scheduleIdle(payload.event.updatedAt);
+        }
+      };
+
+      closeButton.addEventListener('click', () => {
+        dismissedOperationId = currentOperationId;
+        hide();
+      });
+      readOnlyPill.addEventListener('click', () => {
+        dismissedOperationId = '';
+        show(true);
+      });
+      const source = new EventSource(config.activityUrl);
+      source.onmessage = (message) => {
+        try { receive(JSON.parse(message.data)); } catch (_error) { /* Ignore malformed third-party events. */ }
+      };
+      window.addEventListener('pagehide', () => {
+        clearTimeout(idleTimer);
+        source.close();
+      }, { once: true });
+    })();
+  </script>`;
+}
+
+function renderDocxPage(editorUrl, formParameters = null, activityOptions = null) {
   const frameBridge = `
   <script>
     (() => {
@@ -322,7 +569,7 @@ function renderDocxPage(editorUrl, formParameters = null) {
   <form id="docx-editor-form" method="post" action="${htmlEscape(editorUrl)}" target="docx-editor">
 ${inputs}
   </form>
-  <script>document.getElementById('docx-editor-form').submit();</script>${frameBridge}
+  <script>document.getElementById('docx-editor-form').submit();</script>${frameBridge}${renderDocxActivityUi(activityOptions || {})}
 </body>
 </html>`;
   }
@@ -2300,6 +2547,59 @@ async function handleLiveDocxWopi(req, res, config, state, documentId) {
   return true;
 }
 
+function writeDocxActivityEvent(res, payload) {
+  if (!res.destroyed && !res.writableEnded) {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  }
+}
+
+async function handleDocxActivityStream(req, res, config, state, documentId) {
+  if (req.method !== 'GET') {
+    sendText(res, 405, 'Document activity requires GET', 'text/plain; charset=utf-8', { Allow: 'GET' });
+    return true;
+  }
+  const parsed = new URL(req.url || '/', 'http://localhost');
+  const token = parsed.searchParams.get('access_token') || '';
+  try {
+    config.documentStore.verifyToken(token, documentId);
+  } catch (error) {
+    sendJson(res, 401, { message: error instanceof Error ? error.message : String(error) });
+    return true;
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-store, must-revalidate',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.write('retry: 2000\n\n');
+  let unsubscribe;
+  try {
+    unsubscribe = state.docxActivityHub.subscribe(
+      documentId,
+      (payload) => writeDocxActivityEvent(res, payload),
+    );
+  } catch (error) {
+    writeDocxActivityEvent(res, {
+      type: 'error',
+      message: error instanceof Error ? error.message : String(error),
+    });
+    res.end();
+    return true;
+  }
+  const heartbeat = setInterval(() => {
+    if (!res.destroyed && !res.writableEnded) res.write(': keep-alive\n\n');
+  }, 15_000);
+  heartbeat.unref?.();
+  req.once('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe?.();
+  });
+  return true;
+}
+
 function validateToken(req) {
   const parsed = new URL(req.url || '/', 'http://localhost');
   return parsed.searchParams.get('access_token') === DOCX_WOPI_TOKEN;
@@ -2886,7 +3186,28 @@ async function handleEditorMcp(req, res, config, state) {
   const payload = await readJsonBody(req);
   const response = await handleEditorMcpJsonRpc(payload, {
     serverInfo: { name: 'academic-editor-mcp', version: '1.0.0' },
-    executeTool: (name, args) => executeEditorMcpTool(req, config, state, name, args),
+    executeTool: async (name, args = {}) => {
+      const label = activitySummary(name, args);
+      const documentId = String(args.documentId || '').trim();
+      if (name === 'editor_docx_open') {
+        const result = await executeEditorMcpTool(req, config, state, name, args);
+        if (result?.documentId && label) {
+          state.docxActivityHub.complete(result.documentId, label);
+        }
+        return result;
+      }
+      const handle = documentId && label
+        ? state.docxActivityHub.begin(documentId, label)
+        : null;
+      try {
+        const result = await executeEditorMcpTool(req, config, state, name, args);
+        state.docxActivityHub.finish(handle, 'completed');
+        return result;
+      } catch (error) {
+        state.docxActivityHub.finish(handle, 'failed');
+        throw error;
+      }
+    },
   });
   if (response === null) {
     res.writeHead(202, { 'Cache-Control': 'no-store' });
@@ -2922,6 +3243,7 @@ function createGatewayServer(config) {
   const state = {
     lock: '',
     version: 1,
+    docxActivityHub: new DocxActivityHub(),
   };
 
   const server = http.createServer(async (req, res) => {
@@ -2950,6 +3272,12 @@ function createGatewayServer(config) {
         return;
       }
 
+      const activityDocumentId = getDocxActivityDocumentId(pathname, config.docxServiceRoot);
+      if (activityDocumentId) {
+        await handleDocxActivityStream(req, res, config, state, activityDocumentId);
+        return;
+      }
+
       const documentId = getDocxEditDocumentId(pathname, config.docxServiceRoot);
       if (documentId) {
         if (req.method !== 'POST') {
@@ -2957,15 +3285,18 @@ function createGatewayServer(config) {
           return;
         }
         let formParameters;
+        let tokenPayload;
+        let readOnly = true;
         try {
           const params = await readFormBody(req);
           formParameters = validateExternalWopiRequest(documentId, params, config);
           if (!config.documentStore) {
             throw new Error('Editor document store is unavailable');
           }
-          config.documentStore.verifyToken(formParameters.access_token, documentId);
+          tokenPayload = config.documentStore.verifyToken(formParameters.access_token, documentId);
           if (config.documentStore.isDocumentId(documentId)) {
             await config.documentStore.get(documentId);
+            readOnly = tokenPayload.canWrite !== true;
           } else if (!findApiRecord(state, 'docx', documentId)) {
             throw new Error('Live DOCX session not found');
           }
@@ -2978,6 +3309,11 @@ function createGatewayServer(config) {
         sendText(res, 200, renderDocxPage(editorUrl.toString(), {
           access_token: formParameters.access_token,
           access_token_ttl: formParameters.access_token_ttl,
+        }, {
+          documentId,
+          accessToken: formParameters.access_token,
+          docxServiceRoot: config.docxServiceRoot,
+          readOnly,
         }), 'text/html; charset=utf-8', docxWrapperHeaders(config));
         return;
       }

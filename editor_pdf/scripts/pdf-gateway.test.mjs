@@ -75,6 +75,13 @@ test('gateway serves the PDF editor and only its pinned vendor entrypoints on /p
     assert.equal(pdfium.status, 200);
     assert.equal(pdfium.headers.get('content-type'), 'application/wasm');
     assert.ok((await pdfium.arrayBuffer()).byteLength > 1_000_000);
+    const iconCss = await fetch(`${origin}/pdf/assets/tabler/tabler-icons.min.css`);
+    assert.equal(iconCss.status, 200);
+    assert.match(iconCss.headers.get('content-type'), /text\/css/);
+    assert.match(await iconCss.text(), /Tabler Icons 3\.46\.0/);
+    const iconFont = await fetch(`${origin}/pdf/assets/tabler/fonts/tabler-icons.woff2`);
+    assert.equal(iconFont.status, 200);
+    assert.ok((await iconFont.arrayBuffer()).byteLength > 100_000);
     const blockedEmbedPdf = await fetch(`${origin}/pdf/vendor/embedpdf/index.html`);
     assert.equal(blockedEmbedPdf.status, 404);
     await blockedEmbedPdf.text();

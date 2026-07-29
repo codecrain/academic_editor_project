@@ -353,27 +353,25 @@ function replaceImage(pdfium, pagePointer, current, command) {
   });
 }
 
-function addText(pdfium, documentPointer, pagePointer, pageHeight, command, fontBytes) {
-  const fontPointer = allocated(pdfium, fontBytes.length, (pointer) => {
-    pdfium.pdfium.HEAPU8.set(fontBytes, pointer);
-    return pdfium.FPDFText_LoadFont(documentPointer, pointer, fontBytes.length, 2, true);
-  });
+function addText(pdfium, documentPointer, pagePointer, pageHeight, command, fontPointer) {
   if (!fontPointer) throw new Error('PDFium could not embed the selected font.');
   const objectPointer = pdfium.FPDFPageObj_CreateTextObj(documentPointer, fontPointer, Number(command.fontSize));
   if (!objectPointer) throw new Error('PDFium could not create a text object.');
   const textPointer = utf16(pdfium, command.text);
   try {
     if (!pdfium.FPDFText_SetText(objectPointer, textPointer)) throw new Error('PDFium could not write the new text object.');
+    const radians = Number(command.rotation || 0) * Math.PI / 180;
     if (!setMatrix(pdfium, objectPointer, {
-      a: 1,
-      b: 0,
-      c: 0,
-      d: 1,
+      a: Math.cos(radians),
+      b: Math.sin(radians),
+      c: -Math.sin(radians),
+      d: Math.cos(radians),
       e: Number(command.x),
       f: pageHeight - Number(command.y) - Number(command.fontSize),
     })) throw new Error('PDFium could not position the new text object.');
     const [r, g, b] = parseColor(command, { r: 23, g: 32, b: 51 });
     pdfium.FPDFPageObj_SetFillColor(objectPointer, r, g, b, Math.round(Number(command.opacity ?? 1) * 255));
+    if (command.renderMode === 'invisible') pdfium.FPDFTextObj_SetTextRenderMode(objectPointer, 3);
     pdfium.FPDFPage_InsertObject(pagePointer, objectPointer);
   } catch (error) {
     pdfium.FPDFPageObj_Destroy(objectPointer);
@@ -396,6 +394,7 @@ async function applyPdfObjectCommands(bytes, commands) {
   }
   return withDocument(bytes, async (pdfium, documentPointer) => {
     const applied = [];
+    const loadedFonts = new Map();
     for (const { command, font, fontBytes } of prepared) {
       const pagePointer = pdfium.FPDF_LoadPage(documentPointer, Number(command.page) - 1);
       if (!pagePointer) throw new Error(`PDF page ${command.page} does not exist.`);
@@ -403,9 +402,42 @@ async function applyPdfObjectCommands(bytes, commands) {
       try {
         const pageHeight = pdfium.FPDF_GetPageHeightF(pagePointer);
         if (command.op === 'text.add') {
-          addText(pdfium, documentPointer, pagePointer, pageHeight, command, fontBytes);
+          let fontPointer = loadedFonts.get(font.filePath);
+          if (!fontPointer) {
+            fontPointer = allocated(pdfium, fontBytes.length, (pointer) => {
+              pdfium.pdfium.HEAPU8.set(fontBytes, pointer);
+              return pdfium.FPDFText_LoadFont(documentPointer, pointer, fontBytes.length, 2, true);
+            });
+            if (!fontPointer) throw new Error('PDFium could not embed the selected font.');
+            loadedFonts.set(font.filePath, fontPointer);
+          }
+          addText(pdfium, documentPointer, pagePointer, pageHeight, command, fontPointer);
           if (!pdfium.FPDFPage_GenerateContent(pagePointer)) throw new Error(`PDFium could not regenerate page ${command.page}.`);
           applied.push({ op: command.op, page: command.page, objectIndex: null, font: font?.label || null, style: font?.style || null });
+          continue;
+        }
+        if (command.op === 'redaction.apply') {
+          const objectCount = pdfium.FPDFPage_CountObjects(pagePointer);
+          let removed = 0;
+          for (let objectIndex = objectCount - 1; objectIndex >= 0; objectIndex -= 1) {
+            const current = describeObject(pdfium, pagePointer, textPagePointer, command.page, pageHeight, objectIndex);
+            const bounds = current?.editorBounds;
+            const intersects = bounds && command.regions.some((region) => (
+              bounds.x < region.x + region.width
+              && bounds.x + bounds.width > region.x
+              && bounds.y < region.y + region.height
+              && bounds.y + bounds.height > region.y
+            ));
+            if (!intersects) continue;
+            const pointer = pdfium.FPDFPage_GetObject(pagePointer, objectIndex);
+            if (!pdfium.FPDFPage_RemoveObject(pagePointer, pointer)) {
+              throw new Error(`PDFium could not remove redacted object ${command.page}:${objectIndex}.`);
+            }
+            pdfium.FPDFPageObj_Destroy(pointer);
+            removed += 1;
+          }
+          if (!pdfium.FPDFPage_GenerateContent(pagePointer)) throw new Error(`PDFium could not regenerate redacted page ${command.page}.`);
+          applied.push({ op: command.op, page: command.page, objectIndex: null, removed });
           continue;
         }
         const current = describeObject(pdfium, pagePointer, textPagePointer, command.page, pageHeight, Number(command.objectIndex));
