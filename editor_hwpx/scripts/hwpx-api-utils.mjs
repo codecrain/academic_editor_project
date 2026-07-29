@@ -1393,9 +1393,46 @@ function insertParagraphTextAfterXml(paragraphXml, text, options = {}) {
     options.styleIds,
   );
   const lines = String(text ?? '').split(/\r?\n/);
-  let cursor = options.startVertPos ?? template.startVertPos;
-  const inserted = (lines.length ? lines : ['']).map((line) => {
-    const built = buildParagraphXml(line, template, cursor);
+  const sourceLineSegs = [...paragraphXml.matchAll(/<hp:lineseg\b[^>]*\/>/g)]
+    .map((match) => match[0]);
+  const sourceLastLineSeg = sourceLineSegs.at(-1);
+  const sourceLastVertPos = Number(firstMatch(
+    sourceLastLineSeg ?? '',
+    /\bvertpos="(\d+)"/,
+    String(template.startVertPos),
+  ));
+  const sourceLastVertSize = Number(firstMatch(
+    sourceLastLineSeg ?? '',
+    /\bvertsize="(\d+)"/,
+    String(template.vertSize),
+  ));
+  const sourceLastSpacing = Number(firstMatch(
+    sourceLastLineSeg ?? '',
+    /\bspacing="(\d+)"/,
+    String(template.spacing),
+  ));
+  let cursor = options.startVertPos
+    ?? (sourceLastVertPos + sourceLastVertSize + sourceLastSpacing);
+  const inserted = (lines.length ? lines : ['']).map((line, index) => {
+    let built = buildParagraphXml(line, template, cursor);
+    if (
+      (
+        index === 0
+        && options.ensureVisible === true
+        && sourceLineSegs.length === 0
+      )
+      || (
+        Number.isFinite(options.pageBodyHeight)
+        && options.pageBodyHeight > 0
+        && built.maxBottom > options.pageBodyHeight
+      )
+    ) {
+      const pageBreakTemplate = {
+        ...template,
+        pOpen: setXmlAttribute(template.pOpen, 'pageBreak', 1),
+      };
+      built = buildParagraphXml(line, pageBreakTemplate, 0);
+    }
     cursor = built.nextVertPos;
     return built.xml;
   }).join('');
@@ -1660,6 +1697,8 @@ function patchSectionXml(
       next = `${next.slice(0, paragraph.start)}${insertParagraphTextAfterXml(paragraph.xml, patch.text, {
         templateParagraphXml: patch.templateParagraphXml,
         styleIds: patch.styleIds,
+        pageBodyHeight: sectionPageBodyHeight(next),
+        ensureVisible: patch.ensureVisible,
       })}${next.slice(paragraph.end)}`;
     }
   }
@@ -1687,6 +1726,24 @@ function patchSectionXml(
   }
 
   return next;
+}
+
+function sectionPageBodyHeight(sectionXml) {
+  const pageHeight = Number(firstMatch(
+    sectionXml,
+    /<hp:pagePr\b[^>]*\bheight="(\d+)"/,
+    '0',
+  ));
+  const marginTag = sectionXml.match(/<hp:margin\b[^>]*\/>/)?.[0] ?? '';
+  const reserved = ['top', 'bottom', 'header', 'footer']
+    .map((name) => Number(firstMatch(
+      marginTag,
+      new RegExp(`\\b${name}="(\\d+)"`),
+      '0',
+    )))
+    .reduce((sum, value) => sum + value, 0);
+  const bodyHeight = pageHeight - reserved;
+  return Number.isFinite(bodyHeight) && bodyHeight > 0 ? bodyHeight : undefined;
 }
 
 function extractCellXmlFromPackage(inputBytes, table, cellIndex) {
@@ -2536,6 +2593,7 @@ export class HwpxApiSession {
         target: { native: paragraph },
         text,
         styleSource: command.styleSource,
+        ensureVisible: true,
       }];
     }
 
@@ -2936,6 +2994,7 @@ export class HwpxApiSession {
           text: op.text,
           templateParagraphXml,
           styleIds,
+          ensureVisible: op.ensureVisible === true,
           opId: op.opId,
         });
         results.push({ opId: op.opId, ok: true, target: `s${section}_p${paragraph}`, action: 'text.insertAfterParagraph' });

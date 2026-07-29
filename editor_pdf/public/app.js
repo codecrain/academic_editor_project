@@ -12,7 +12,7 @@ const elementIds = [
   'reportBody', 'closeReportDialog',
   'canvasOverlay', 'selectionToolbar', 'textQuickControls', 'quickFontFamily', 'quickFontSize',
   'quickFontColor', 'replaceImageButton', 'openPropertiesButton', 'deleteSelectedButton',
-  'quickImageFile', 'panelTitle', 'editHint', 'editHintText',
+  'quickImageFile', 'panelTitle', 'editHint', 'editHintText', 'savePdfButton',
 ];
 const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 
@@ -34,6 +34,9 @@ const state = {
   overlayGeometry: '',
   sessionPromise: null,
   documentGeneration: 0,
+  textPreviews: new Map(),
+  pendingSave: false,
+  textGroups: new Map(),
 };
 
 function failBoot(error) {
@@ -47,6 +50,13 @@ function failBoot(error) {
 function setPanelStatus(message, kind = '') {
   elements.panelStatus.textContent = message;
   elements.panelStatus.dataset.kind = kind;
+}
+
+function markPendingSave(pending = true) {
+  state.pendingSave = pending;
+  elements.savePdfButton.disabled = !state.sessionId;
+  elements.savePdfButton.dataset.dirty = String(pending);
+  elements.savePdfButton.title = pending ? '변경사항을 PDF로 저장' : '현재 PDF 저장';
 }
 
 function showReport(title, summary, content) {
@@ -104,7 +114,14 @@ async function api(path, body) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const result = await response.json();
+  const payload = await response.text();
+  let result;
+  try {
+    result = JSON.parse(payload);
+  } catch {
+    if (!response.ok) throw new Error(payload || `PDF API 요청 실패 (${response.status})`);
+    throw new Error(`PDF API가 올바르지 않은 응답을 반환했습니다. (${response.status})`);
+  }
   if (!response.ok || result.ok === false) throw new Error(result.message || `PDF API 요청 실패 (${response.status})`);
   return result;
 }
@@ -136,6 +153,7 @@ async function beginObjectSession() {
     state.revision = opened.revision;
     state.editedBuffer = buffer;
     await Promise.all([refreshInventory(), loadCommandCatalog()]);
+    markPendingSave(false);
     elements.editorEmpty.hidden = true;
     elements.editorBody.hidden = false;
   })();
@@ -427,15 +445,41 @@ function renderCanvasObjects() {
     if (!['text', 'image'].includes(object.type)) continue;
     if (state.editMode === 'text' && object.type !== 'text') continue;
     if (state.editMode === 'image' && object.type !== 'image') continue;
+    const continuation = [...state.textGroups.values()].some((group) => (
+      group.page === object.page
+      && group.objectIndices.slice(1).includes(object.objectIndex)
+    ));
+    if (continuation) continue;
     const rect = objectScreenRect(object);
     if (!rect) continue;
+    const preview = state.textPreviews.get(`${object.page}:${object.objectIndex}`);
+    if (object.type === 'text' && preview) {
+      const previewElement = document.createElement('div');
+      previewElement.className = 'text-object-preview';
+      previewElement.textContent = preview.text;
+      Object.assign(previewElement.style, {
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${preview.screenWidth}px`,
+        minHeight: `${rect.height}px`,
+        background: preview.background,
+        color: preview.color,
+        fontFamily: `"${preview.fontFamily}", sans-serif`,
+        fontSize: `${preview.screenFontSize}px`,
+        lineHeight: String(preview.lineHeightRatio),
+      });
+      elements.canvasOverlay.append(previewElement);
+    }
     const hitbox = document.createElement('button');
     hitbox.type = 'button';
     hitbox.className = `object-hitbox${state.selected?.id === object.id ? ' is-selected' : ''}`;
     hitbox.dataset.type = object.type;
     hitbox.title = object.type === 'text' ? '한 번 클릭하여 이 자리에서 바로 수정' : '클릭하여 선택, 드래그하여 이동';
     Object.assign(hitbox.style, {
-      left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`,
+      left: `${rect.left}px`,
+      top: `${rect.top}px`,
+      width: `${preview?.screenWidth || rect.width}px`,
+      height: `${preview ? Math.max(rect.height, preview.screenHeight) : rect.height}px`,
     });
     hitbox.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -504,30 +548,110 @@ function sampleObjectBackground(object) {
   }
 }
 
+function selectedFontLabel(select, fallback = 'Noto Sans KR') {
+  return select.selectedOptions[0]?.dataset.family || fallback;
+}
+
+function stageTextPreview(object, {
+  text = object.text || '',
+  color = object.fillColor?.hex || '#172033',
+  fontFamily = object.fontFamily || 'Noto Sans KR',
+  fontSize,
+  screenWidth,
+  background,
+} = {}) {
+  const rect = objectScreenRect(object);
+  if (!rect) return;
+  const screenFontSize = fontSize
+    ? Math.max(7, Number(fontSize) * rect.scaleY)
+    : Math.max(9, Math.min(72, rect.height * 0.9));
+  const lineHeightRatio = 1.2;
+  const width = screenWidth || Math.max(rect.width, state.textPreviews.get(`${object.page}:${object.objectIndex}`)?.screenWidth || 0);
+  state.textPreviews.set(`${object.page}:${object.objectIndex}`, {
+    text,
+    background: background || sampleObjectBackground(object),
+    color,
+    fontFamily,
+    screenFontSize,
+    screenWidth: width,
+    screenHeight: Math.max(rect.height, String(text).split('\n').length * screenFontSize * lineHeightRatio),
+    lineHeightRatio,
+  });
+}
+
+function wrapTextForWidth(value, editor, maximumWidth) {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  const style = getComputedStyle(editor);
+  context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+  const fits = (text) => context.measureText(text).width <= maximumWidth;
+  const wrapParagraph = (paragraph) => {
+    if (!paragraph || fits(paragraph)) return [paragraph];
+    const tokens = paragraph.match(/\s+|[^\s]+/gu) || [];
+    const lines = [];
+    let line = '';
+    for (const token of tokens) {
+      const candidate = `${line}${token}`;
+      if (line && !fits(candidate)) {
+        lines.push(line.trimEnd());
+        line = token.trimStart();
+      } else {
+        line = candidate;
+      }
+      if (!fits(line)) {
+        let segment = '';
+        for (const character of Array.from(line)) {
+          if (segment && !fits(`${segment}${character}`)) {
+            lines.push(segment);
+            segment = character;
+          } else {
+            segment += character;
+          }
+        }
+        line = segment;
+      }
+    }
+    lines.push(line.trimEnd());
+    return lines;
+  };
+  return String(value).split(/\r?\n/u).flatMap(wrapParagraph).join('\n');
+}
+
 function beginInlineTextEdit(object, pointerEvent) {
   const rect = objectScreenRect(object);
   if (!rect) return;
+  const previewKey = `${object.page}:${object.objectIndex}`;
+  const existingPreview = state.textPreviews.get(previewKey);
+  const existingGroup = state.textGroups.get(previewKey);
+  const editingText = existingPreview?.text || existingGroup?.text || object.text || '';
+  const renderedPage = renderedPages().find((page) => page.page === object.page);
+  const availableWidth = renderedPage
+    ? Math.max(100, renderedPage.left + renderedPage.width - rect.left - 18)
+    : 480;
+  const screenWidth = Math.min(availableWidth, Math.max(180, rect.width + 10));
+  const screenFontSize = Math.max(9, Math.min(72, rect.height * 0.9));
+  const background = sampleObjectBackground(object);
   state.inlineEditing = true;
   elements.editHint.hidden = true;
   elements.selectionToolbar.hidden = true;
   elements.canvasOverlay.replaceChildren();
   const shell = document.createElement('div');
   shell.className = 'inline-edit-shell';
-  shell.style.setProperty('--inline-edit-background', sampleObjectBackground(object));
+  shell.style.setProperty('--inline-edit-background', background);
   Object.assign(shell.style, {
     left: `${rect.left - 5}px`,
     top: `${rect.top - 4}px`,
-    width: `${Math.max(100, rect.width + 10)}px`,
+    width: `${screenWidth}px`,
     minHeight: `${Math.max(30, rect.height + 8)}px`,
   });
   const editor = document.createElement('textarea');
   editor.className = 'inline-text-editor';
-  editor.value = object.text || '';
+  editor.value = editingText;
   editor.setAttribute('aria-label', '페이지에서 텍스트 직접 편집');
   Object.assign(editor.style, {
     height: `${Math.max(28, rect.height + 6)}px`,
     fontFamily: `"${object.fontFamily || 'Noto Sans KR'}", sans-serif`,
-    fontSize: `${Math.max(9, Math.min(72, rect.height * 0.9))}px`,
+    fontSize: `${screenFontSize}px`,
     color: object.fillColor?.hex || '#172033',
   });
   const actions = document.createElement('div');
@@ -535,25 +659,53 @@ function beginInlineTextEdit(object, pointerEvent) {
   actions.setAttribute('role', 'toolbar');
   actions.setAttribute('aria-label', '텍스트 편집 동작');
   actions.innerHTML = `
-    <span class="inline-edit-label"><i class="ti ti-text-size" aria-hidden="true"></i> 텍스트 편집</span>
+    <span class="inline-edit-label"><i class="ti ti-text-size" aria-hidden="true"></i> 텍스트 편집 · 자동 줄바꿈</span>
     <button type="button" class="inline-edit-action inline-edit-cancel" aria-label="편집 취소" title="취소 (Esc)"><i class="ti ti-x" aria-hidden="true"></i></button>
     <button type="button" class="inline-edit-action is-primary inline-edit-save" aria-label="편집 저장" title="저장 (Ctrl+Enter)"><i class="ti ti-check" aria-hidden="true"></i></button>
   `;
   shell.append(editor, actions);
+  const resizeEditor = () => {
+    editor.style.height = 'auto';
+    const height = Math.max(rect.height + 6, Math.min(360, editor.scrollHeight + 2));
+    editor.style.height = `${height}px`;
+    shell.style.minHeight = `${height + 2}px`;
+  };
+  editor.addEventListener('input', resizeEditor);
   let completed = false;
   const finish = async (save) => {
     if (completed) return;
     completed = true;
-    const text = editor.value;
+    const rawText = editor.value;
+    const text = wrapTextForWidth(rawText, editor, Math.max(40, editor.clientWidth - 10));
+    const sourcePage = state.inventory?.pages?.find((page) => page.page === object.page);
+    const sourceWidth = sourcePage && renderedPage ? ((screenWidth - 10) / renderedPage.width) * sourcePage.width : object.editorBounds?.width;
+    const lineHeightRatio = 1.2;
+    const screenHeight = Math.max(rect.height, text.split('\n').length * screenFontSize * lineHeightRatio);
     shell.remove();
     state.inlineEditing = false;
-    if (!save || text === object.text) {
+    if (!save || rawText === editingText) {
       renderCanvasObjects();
       return;
     }
     try {
       setPanelStatus('페이지에서 수정한 본문을 저장하는 중…');
-      await applyCommands([{
+      state.textPreviews.set(previewKey, {
+        text,
+        background,
+        color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
+        fontFamily: object.fontFamily || 'Noto Sans KR',
+        screenFontSize,
+        screenWidth,
+        screenHeight,
+        lineHeightRatio,
+      });
+      const continuationObjects = (existingGroup?.objectIndices || []).slice(1)
+        .map((objectIndex) => state.inventory.pageObjects.find((candidate) => (
+          candidate.page === object.page && candidate.objectIndex === objectIndex
+        )))
+        .filter(Boolean)
+        .sort((left, right) => right.objectIndex - left.objectIndex);
+      const commands = [{
         op: 'text.replaceObject',
         page: object.page,
         objectIndex: object.objectIndex,
@@ -564,9 +716,27 @@ function beginInlineTextEdit(object, pointerEvent) {
         fontSize: Number(elements.quickFontSize.value || object.fontSize || 12),
         color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
         opacity: (object.fillColor?.a ?? 255) / 255,
-      }], { inspectObject: true });
-      setPanelStatus('본문 수정과 저장·재열기 검증이 완료되었습니다.', 'success');
+        maxWidth: sourceWidth,
+        lineHeight: Number(elements.quickFontSize.value || object.fontSize || 12) * lineHeightRatio,
+        removeFollowingObjects: continuationObjects.map((continuation) => ({
+          objectIndex: continuation.objectIndex,
+          objectId: continuation.id,
+        })),
+      }];
+      await applyCommands(commands, { inspectTargets: [object, ...continuationObjects], syncViewer: false });
+      const lineCount = text.split('\n').length;
+      if (lineCount > 1) {
+        state.textGroups.set(previewKey, {
+          page: object.page,
+          text,
+          objectIndices: Array.from({ length: lineCount }, (_value, index) => object.objectIndex + index),
+        });
+      } else {
+        state.textGroups.delete(previewKey);
+      }
+      setPanelStatus('본문을 수정했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
     } catch (error) {
+      state.textPreviews.delete(previewKey);
       setPanelStatus(error.message, 'error');
       renderCanvasObjects();
     }
@@ -586,6 +756,7 @@ function beginInlineTextEdit(object, pointerEvent) {
   actions.querySelector('.inline-edit-save').addEventListener('click', () => finish(true));
   elements.canvasOverlay.append(shell);
   editor.focus({ preventScroll: true });
+  resizeEditor();
   const relativeX = pointerEvent
     ? Math.max(0, Math.min(rect.width, pointerEvent.clientX - elements.pdfViewer.getBoundingClientRect().left - rect.left))
     : rect.width;
@@ -595,22 +766,60 @@ function beginInlineTextEdit(object, pointerEvent) {
 
 async function inspectSelected() {
   if (!state.selected) throw new Error('수정할 객체를 선택하세요.');
-  const inspected = await api(`/pdf/api/documents/${state.sessionId}/target/inspect`, {
-    locations: [{ page: state.selected.page, objectId: state.selected.id, objectIndex: state.selected.objectIndex }],
-  });
-  return inspected.targets[0];
+  return inspectObjects([state.selected]).then((targets) => targets[0]);
 }
 
-async function applyCommands(commands, { inspectObject = false } = {}) {
+async function inspectObjects(objects) {
+  const inspected = await api(`/pdf/api/documents/${state.sessionId}/target/inspect`, {
+    locations: objects.map((object) => ({
+      page: object.page,
+      objectId: object.id,
+      objectIndex: object.objectIndex,
+    })),
+  });
+  return inspected.targets;
+}
+
+async function applyCommands(commands, { inspectObject = false, inspectTargets = [], syncViewer = true } = {}) {
   if (!state.sessionId) await beginObjectSession();
-  if (inspectObject) await inspectSelected();
+  if (inspectTargets.length) {
+    await inspectObjects(inspectTargets);
+  } else if (inspectObject) {
+    await inspectSelected();
+  }
   const result = await api(`/pdf/api/documents/${state.sessionId}/commands/apply`, {
     baseRevision: state.revision,
     commands,
   });
   state.revision = result.revision;
-  await syncEditedPdf();
+  if (syncViewer) {
+    await syncEditedPdf();
+  } else {
+    state.editedBuffer = null;
+    markPendingSave(true);
+  }
   await refreshInventory();
+}
+
+async function saveEditedPdf({ download = true } = {}) {
+  if (!state.sessionId) await beginObjectSession();
+  const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
+  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || 'PDF 저장 검사에 실패했습니다.');
+  const saved = await api(`/pdf/api/documents/${state.sessionId}/documents/save-buffer`, {
+    baseRevision: state.revision,
+    filename: 'academic-edited.pdf',
+  });
+  state.editedBuffer = base64ToBuffer(saved.bytesBase64);
+  markPendingSave(false);
+  if (download) {
+    const url = URL.createObjectURL(new Blob([state.editedBuffer], { type: 'application/pdf' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = saved.filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  return saved;
 }
 
 async function syncEditedPdf() {
@@ -634,6 +843,9 @@ async function syncEditedPdf() {
   } finally {
     state.reopening = false;
   }
+  state.textPreviews.clear();
+  state.textGroups.clear();
+  markPendingSave(false);
 }
 
 async function fileBase64(file) {
@@ -861,6 +1073,18 @@ elements.editPdfButton.addEventListener('click', async () => {
   }
 });
 elements.closeReportDialog.addEventListener('click', () => elements.reportDialog.close());
+elements.savePdfButton.addEventListener('click', async () => {
+  try {
+    elements.savePdfButton.disabled = true;
+    setPanelStatus('현재 페이지를 유지하면서 PDF를 저장하는 중…');
+    await saveEditedPdf({ download: true });
+    setPanelStatus('편집한 PDF를 저장했습니다. 현재 페이지에서 계속 수정할 수 있습니다.', 'success');
+  } catch (error) {
+    setPanelStatus(error.message, 'error');
+  } finally {
+    elements.savePdfButton.disabled = !state.sessionId;
+  }
+});
 elements.qualityAuditButton.addEventListener('click', async () => {
   try {
     if (!state.sessionId) await beginObjectSession();
@@ -942,8 +1166,14 @@ elements.canvasOverlay.addEventListener('click', (event) => {
 async function applyQuickTextStyle() {
   if (state.selected?.type !== 'text') return;
   const object = state.selected;
+  const previewKey = `${object.page}:${object.objectIndex}`;
   try {
     setPanelStatus('본문 서식을 적용하는 중…');
+    stageTextPreview(object, {
+      fontFamily: selectedFontLabel(elements.quickFontFamily, object.fontFamily),
+      fontSize: Number(elements.quickFontSize.value),
+      color: elements.quickFontColor.value,
+    });
     await applyCommands([{
       op: 'text.replaceObject',
       page: object.page,
@@ -955,10 +1185,12 @@ async function applyQuickTextStyle() {
       fontSize: Number(elements.quickFontSize.value),
       color: elements.quickFontColor.value,
       opacity: (object.fillColor?.a ?? 255) / 255,
-    }], { inspectObject: true });
-    setPanelStatus('본문 서식 변경과 재열기 검증이 완료되었습니다.', 'success');
+    }], { inspectObject: true, syncViewer: false });
+    setPanelStatus('본문 서식을 변경했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
   } catch (error) {
+    state.textPreviews.delete(previewKey);
     setPanelStatus(error.message, 'error');
+    renderCanvasObjects();
   }
 }
 
@@ -1026,23 +1258,34 @@ document.querySelectorAll('.object-tab').forEach((tab) => tab.addEventListener('
 
 elements.textEditorForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const object = state.selected;
+  const previewKey = `${object.page}:${object.objectIndex}`;
   try {
     setPanelStatus('본문과 폰트를 PDF에 임베드하는 중…');
+    stageTextPreview(object, {
+      text: elements.textValue.value,
+      fontFamily: selectedFontLabel(elements.fontFamily, object.fontFamily),
+      fontSize: Number(elements.fontSize.value),
+      color: elements.fontColor.value,
+    });
     await applyCommands([{
       op: 'text.replaceObject',
-      page: state.selected.page,
-      objectIndex: state.selected.objectIndex,
-      objectId: state.selected.id,
-      expectedText: state.selected.text,
+      page: object.page,
+      objectIndex: object.objectIndex,
+      objectId: object.id,
+      expectedText: object.text,
       text: elements.textValue.value,
       fontFamily: elements.fontFamily.value,
       fontSize: Number(elements.fontSize.value),
       color: elements.fontColor.value,
       opacity: Number(elements.fontOpacity.value),
-    }], { inspectObject: true });
-    setPanelStatus('본문 수정과 재열기 검증이 완료되었습니다.', 'success');
+      lineHeight: Number(elements.fontSize.value) * 1.2,
+    }], { inspectObject: true, syncViewer: false });
+    setPanelStatus('본문을 수정했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
   } catch (error) {
+    state.textPreviews.delete(previewKey);
     setPanelStatus(error.message, 'error');
+    renderCanvasObjects();
   }
 });
 
@@ -1168,6 +1411,9 @@ try {
         editedBuffer: null,
         sessionPromise: null,
       });
+      state.textPreviews.clear();
+      state.textGroups.clear();
+      markPendingSave(false);
       elements.editorEmpty.hidden = false;
       elements.editorBody.hidden = true;
       reflectEditMode('text');
@@ -1198,6 +1444,9 @@ try {
         state.catalog = null;
         state.selected = null;
         state.editedBuffer = null;
+        state.textPreviews.clear();
+        state.textGroups.clear();
+        markPendingSave(false);
         elements.canvasOverlay.replaceChildren();
         elements.selectionToolbar.hidden = true;
         elements.editHint.hidden = true;

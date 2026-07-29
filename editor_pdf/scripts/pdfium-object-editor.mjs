@@ -307,7 +307,8 @@ function parseColor(command, current) {
 
 function replaceText(pdfium, documentPointer, pagePointer, current, command, fontBytes) {
   const oldPointer = pdfium.FPDFPage_GetObject(pagePointer, current.objectIndex);
-  if (!fontBytes && command.fontFamily === undefined && command.fontSize === undefined && command.color === undefined && command.opacity === undefined) {
+  const lines = String(command.text).split(/\r?\n/u);
+  if (lines.length === 1 && !fontBytes && command.fontFamily === undefined && command.fontSize === undefined && command.color === undefined && command.opacity === undefined) {
     const pointer = utf16(pdfium, command.text);
     try {
       if (!pdfium.FPDFText_SetText(oldPointer, pointer)) throw new Error('PDFium could not replace text in the existing object.');
@@ -321,25 +322,42 @@ function replaceText(pdfium, documentPointer, pagePointer, current, command, fon
     return pdfium.FPDFText_LoadFont(documentPointer, pointer, fontBytes.length, 2, true);
   }) : pdfium.FPDFTextObj_GetFont(oldPointer);
   if (!fontPointer) throw new Error('PDFium could not embed the selected font.');
-  const replacement = pdfium.FPDFPageObj_CreateTextObj(documentPointer, fontPointer, Number(command.fontSize ?? current.fontSize));
-  if (!replacement) throw new Error('PDFium could not create a replacement text object.');
-  const textPointer = utf16(pdfium, command.text);
+  const fontSize = Number(command.fontSize ?? current.fontSize);
+  const lineHeight = Number(command.lineHeight ?? fontSize * 1.2);
+  const replacements = [];
   try {
-    if (!pdfium.FPDFText_SetText(replacement, textPointer)) throw new Error('PDFium could not write the replacement text.');
-    if (current.matrix && !setMatrix(pdfium, replacement, current.matrix)) throw new Error('PDFium could not preserve the text transform.');
-    const [r, g, b] = parseColor(command, current.fillColor);
-    const a = command.opacity === undefined ? current.fillColor.a : Math.round(Number(command.opacity) * 255);
-    pdfium.FPDFPageObj_SetFillColor(replacement, r, g, b, a);
-    pdfium.FPDFPageObj_SetStrokeColor(replacement, current.strokeColor.r, current.strokeColor.g, current.strokeColor.b, current.strokeColor.a);
-    pdfium.FPDFTextObj_SetTextRenderMode(replacement, current.renderMode);
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+      const replacement = pdfium.FPDFPageObj_CreateTextObj(documentPointer, fontPointer, fontSize);
+      if (!replacement) throw new Error('PDFium could not create a replacement text object.');
+      const textPointer = utf16(pdfium, lines[lineIndex]);
+      try {
+        if (!pdfium.FPDFText_SetText(replacement, textPointer)) throw new Error('PDFium could not write the replacement text.');
+      } finally {
+        pdfium.pdfium._free(textPointer);
+      }
+      if (current.matrix) {
+        const matrix = {
+          ...current.matrix,
+          e: Number(current.matrix.e) - Number(current.matrix.c) * lineHeight * lineIndex,
+          f: Number(current.matrix.f) - Number(current.matrix.d) * lineHeight * lineIndex,
+        };
+        if (!setMatrix(pdfium, replacement, matrix)) throw new Error('PDFium could not preserve the text transform.');
+      }
+      const [r, g, b] = parseColor(command, current.fillColor);
+      const a = command.opacity === undefined ? current.fillColor.a : Math.round(Number(command.opacity) * 255);
+      pdfium.FPDFPageObj_SetFillColor(replacement, r, g, b, a);
+      pdfium.FPDFPageObj_SetStrokeColor(replacement, current.strokeColor.r, current.strokeColor.g, current.strokeColor.b, current.strokeColor.a);
+      pdfium.FPDFTextObj_SetTextRenderMode(replacement, current.renderMode);
+      replacements.push(replacement);
+    }
     if (!pdfium.FPDFPage_RemoveObject(pagePointer, oldPointer)) throw new Error('PDFium could not remove the original text object.');
-    pdfium.FPDFPage_InsertObjectAtIndex(pagePointer, replacement, current.objectIndex);
+    replacements.forEach((replacement, lineIndex) => {
+      pdfium.FPDFPage_InsertObjectAtIndex(pagePointer, replacement, current.objectIndex + lineIndex);
+    });
     pdfium.FPDFPageObj_Destroy(oldPointer);
   } catch (error) {
-    pdfium.FPDFPageObj_Destroy(replacement);
+    replacements.forEach((replacement) => pdfium.FPDFPageObj_Destroy(replacement));
     throw error;
-  } finally {
-    pdfium.pdfium._free(textPointer);
   }
 }
 
@@ -442,6 +460,34 @@ async function applyPdfObjectCommands(bytes, commands) {
         }
         const current = describeObject(pdfium, pagePointer, textPagePointer, command.page, pageHeight, Number(command.objectIndex));
         assertTarget(current, command);
+        let removedContinuations = 0;
+        if (command.op === 'text.replaceObject' && command.removeFollowingObjects?.length) {
+          const continuations = command.removeFollowingObjects.map((target) => {
+            const continuation = describeObject(
+              pdfium,
+              pagePointer,
+              textPagePointer,
+              command.page,
+              pageHeight,
+              Number(target.objectIndex),
+            );
+            if (!continuation || continuation.id !== target.objectId) {
+              throw new Error(`PDF continuation precondition failed at ${command.page}:${target.objectIndex}. Re-inspect before editing.`);
+            }
+            if (continuation.type !== 'text') {
+              throw new Error(`PDF continuation ${continuation.id} is not a text object.`);
+            }
+            return continuation;
+          });
+          for (const continuation of continuations) {
+            const pointer = pdfium.FPDFPage_GetObject(pagePointer, continuation.objectIndex);
+            if (!pdfium.FPDFPage_RemoveObject(pagePointer, pointer)) {
+              throw new Error(`PDFium could not remove continuation ${continuation.id}.`);
+            }
+            pdfium.FPDFPageObj_Destroy(pointer);
+            removedContinuations += 1;
+          }
+        }
         if (command.op === 'text.replaceObject') {
           if (current.type !== 'text') throw new Error(`${current.id} is not a text object.`);
           replaceText(pdfium, documentPointer, pagePointer, current, command, fontBytes);
@@ -459,7 +505,14 @@ async function applyPdfObjectCommands(bytes, commands) {
           throw new Error(`Unsupported PDF object command: ${command.op}.`);
         }
         if (!pdfium.FPDFPage_GenerateContent(pagePointer)) throw new Error(`PDFium could not regenerate page ${command.page}.`);
-        applied.push({ op: command.op, page: command.page, objectIndex: command.objectIndex, font: font?.label || null, style: font?.style || null });
+        applied.push({
+          op: command.op,
+          page: command.page,
+          objectIndex: command.objectIndex,
+          font: font?.label || null,
+          style: font?.style || null,
+          removedContinuations,
+        });
       } finally {
         if (textPagePointer) pdfium.FPDFText_ClosePage(textPagePointer);
         pdfium.FPDF_ClosePage(pagePointer);

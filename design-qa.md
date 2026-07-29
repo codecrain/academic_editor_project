@@ -8,6 +8,8 @@
 - Implementation: `output/pdf-ui-redesign/one-click-inline-edit-1488x893.png`
 - Refined implementation:
   `output/pdf-ui-redesign/inline-editor-polished-eq-86.png`
+- Continuous editing implementation:
+  `output/pdf-ui-redesign/continuous-text-editing.png`
 - Combined comparison:
   `output/pdf-ui-redesign/comparison-inline-editor-before-after.png`
 - Viewport: 1488 × 893 desktop for both issue and implementation captures
@@ -54,6 +56,17 @@ model while retaining the existing EmbedPDF document controls.
    natural click-position caret, page-background sampling, and a compact
    floating action bar with explicit cancel/save controls. The native resize
    affordance is removed and keyboard shortcuts remain available.
+10. Confirming any text edit previously ran quality check, saved the entire
+    PDF, closed the active viewer document, and opened the edited buffer as a
+    new document. This reset the page and made repeated edits feel like full
+    reloads. Inline text and style edits now remain in one continuous viewer
+    session, update a page-aligned preview, and mark a single top-level PDF
+    save action as pending.
+11. The text area previously stayed at one line and the PDF backend treated
+    replacement text as one object. The editor now grows with input, wraps
+    Korean and Latin text to the available page width, writes consecutive PDF
+    text-line objects, and reopens those continuation objects as one editable
+    text group on subsequent edits.
 
 ## Verification
 
@@ -66,6 +79,14 @@ model while retaining the existing EmbedPDF document controls.
   accessible
 - Background integration: the editor shell samples the rendered PDF around the
   selected text and uses the median page color instead of a fixed white popup
+- Continuity: two consecutive edits retained the original
+  `eq-01-2022.pdf` viewer tab and runtime status; the page was not closed,
+  reopened, renamed, or repositioned
+- Wrapping: a long Korean sentence grew the textarea from 28 px to 46 px and
+  produced four editable PDF lines; reopening and editing that group again
+  produced three lines without leaving orphan continuation objects
+- Explicit save: pending edits turn on the top PDF save indicator; saving
+  clears the indicator while the current page and editable preview remain
 - Persistence: edited text was applied, saved, reopened, and independently
   quality-checked by the existing revision-bound PDF pipeline
 - Browser console: no error or warning entries after the edit flow

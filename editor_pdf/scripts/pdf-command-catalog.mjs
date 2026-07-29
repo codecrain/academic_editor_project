@@ -18,7 +18,7 @@ const PDF_COMMANDS = Object.freeze([
   {
     op: 'text.replaceObject',
     category: 'text',
-    summary: 'Replace an existing PDF text object, optionally embedding an approved open font and changing its size or color.',
+    summary: 'Replace an existing PDF text object, optionally embedding an approved open font, changing its style, and laying out wrapped lines.',
     required: ['page', 'objectIndex', 'objectId', 'expectedText', 'text'],
     precondition: 'target_inspect',
     example: { op: 'text.replaceObject', page: 1, objectIndex: 3, objectId: 'pdf-object-1-3-text-...', expectedText: 'Original', text: '수정된 본문', fontFamily: 'Noto Sans KR', fontSize: 12, color: '#172033' },
@@ -513,6 +513,34 @@ function validatePdfCommands(commands) {
         command.text = boundedText(command.text, 'text.replaceObject.text', 10000, { allowEmpty: true });
         if (command.fontFamily !== undefined) command.fontFamily = boundedText(command.fontFamily, 'text.replaceObject.fontFamily', 128);
         if (command.fontSize !== undefined) command.fontSize = finiteNumber(command.fontSize, 'text.replaceObject.fontSize', { minimum: 2, maximum: 500 });
+        if (command.maxWidth !== undefined) command.maxWidth = finiteNumber(command.maxWidth, 'text.replaceObject.maxWidth', { minimum: 1, maximum: 100000 });
+        if (command.lineHeight !== undefined) command.lineHeight = finiteNumber(command.lineHeight, 'text.replaceObject.lineHeight', { minimum: 1, maximum: 1000 });
+        if (command.removeFollowingObjects !== undefined) {
+          if (!Array.isArray(command.removeFollowingObjects) || command.removeFollowingObjects.length > 100) {
+            throw new Error('text.replaceObject.removeFollowingObjects must contain at most 100 object targets.');
+          }
+          command.removeFollowingObjects = command.removeFollowingObjects.map((target, targetIndex) => {
+            if (!target || typeof target !== 'object' || Array.isArray(target)) {
+              throw new Error(`text.replaceObject.removeFollowingObjects[${targetIndex}] must be an object.`);
+            }
+            const objectIndex = finiteNumber(
+              target.objectIndex,
+              `text.replaceObject.removeFollowingObjects[${targetIndex}].objectIndex`,
+              { minimum: 0, maximum: 100000 },
+            );
+            if (!Number.isInteger(objectIndex) || objectIndex <= command.objectIndex) {
+              throw new Error('text.replaceObject continuation object indexes must be integers after the primary object.');
+            }
+            return {
+              objectIndex,
+              objectId: boundedText(
+                target.objectId,
+                `text.replaceObject.removeFollowingObjects[${targetIndex}].objectId`,
+                256,
+              ),
+            };
+          }).sort((left, right) => right.objectIndex - left.objectIndex);
+        }
         if (command.color !== undefined && !/^#[0-9a-f]{6}$/i.test(String(command.color))) throw new Error('text.replaceObject.color must be a six-digit hex color.');
         if (command.opacity !== undefined) command.opacity = finiteNumber(command.opacity, 'text.replaceObject.opacity', { minimum: 0, maximum: 1 });
       } else if (command.op === 'image.replaceObject') {

@@ -49,6 +49,33 @@ i.ti { font-size: 19px; }
 .nav-tool.is-loading { color: var(--accent); }
 .nav-tool.is-loading i { animation: edit-pulse 900ms ease-in-out infinite alternate; }
 .global-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 4px; }
+.save-pdf-button {
+  position: relative;
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  padding: 0 10px;
+  background: #fff;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 700;
+}
+.save-pdf-button:hover:not(:disabled) { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
+.save-pdf-button:disabled { cursor: default; opacity: .45; }
+.save-pdf-button[data-dirty="true"] { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+.save-pdf-button[data-dirty="true"]::after {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #f59e0b;
+  content: "";
+}
 .icon-action, .icon-button, .toolbar-action {
   display: grid;
   place-items: center;
@@ -114,6 +141,15 @@ i.ti { font-size: 19px; }
 .object-hitbox.is-selected::before, .object-hitbox.is-selected::after { position: absolute; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 1px; background: #2563eb; content: ""; }
 .object-hitbox.is-selected::before { top: -5px; left: -5px; }
 .object-hitbox.is-selected::after { right: -5px; bottom: -5px; }
+.text-object-preview {
+  position: absolute;
+  z-index: 1;
+  overflow: visible;
+  padding: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
 .inline-edit-shell {
   position: absolute;
   z-index: 12;
@@ -150,6 +186,8 @@ i.ti { font-size: 19px; }
   caret-color: #2563eb;
   line-height: 1.12;
   resize: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .inline-text-editor::selection { background: rgb(37 99 235 / 24%); }
 .inline-edit-actions {

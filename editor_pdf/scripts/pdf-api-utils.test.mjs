@@ -174,6 +174,49 @@ test('PDF session replaces existing text with an embedded Korean open font', asy
   assert.equal(reopened.objectInventory().textObjects.some((object) => object.text === '한글 본문 교체 완료'), true);
 });
 
+test('PDF session lays out wrapped replacement text as consecutive editable lines', async () => {
+  const session = await PdfApiSession.create(await samplePdf());
+  const target = session.objectInventory().textObjects.find((object) => object.text === 'Original content remains intact.');
+  await session.apply([{
+    op: 'text.replaceObject',
+    page: target.page,
+    objectIndex: target.objectIndex,
+    objectId: target.id,
+    expectedText: target.text,
+    text: '자동 줄바꿈 첫째 줄\n자동 줄바꿈 둘째 줄',
+    fontFamily: 'Noto Sans KR',
+    fontSize: 11,
+    lineHeight: 14,
+  }]);
+
+  const lines = session.objectInventory().textObjects
+    .filter((object) => object.text.startsWith('자동 줄바꿈'))
+    .sort((left, right) => left.editorBounds.y - right.editorBounds.y);
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].text, '자동 줄바꿈 첫째 줄');
+  assert.equal(lines[1].text, '자동 줄바꿈 둘째 줄');
+  assert.ok(lines[1].editorBounds.y > lines[0].editorBounds.y);
+  assert.deepEqual(lines.map((line) => line.objectIndex), [target.objectIndex, target.objectIndex + 1]);
+  await session.apply([{
+    op: 'text.replaceObject',
+    page: lines[0].page,
+    objectIndex: lines[0].objectIndex,
+    objectId: lines[0].id,
+    expectedText: lines[0].text,
+    text: '두 번째 편집 첫째 줄\n두 번째 편집 둘째 줄',
+    fontFamily: 'Noto Sans KR',
+    fontSize: 11,
+    lineHeight: 14,
+    removeFollowingObjects: [{
+      objectIndex: lines[1].objectIndex,
+      objectId: lines[1].id,
+    }],
+  }]);
+  assert.equal(session.objectInventory().textObjects.filter((object) => object.text.startsWith('두 번째 편집')).length, 2);
+  const reopened = await PdfApiSession.create((await session.save()).bytes);
+  assert.equal(reopened.objectInventory().textObjects.filter((object) => object.text.startsWith('두 번째 편집')).length, 2);
+});
+
 test('PDF session adds searchable Korean text as an embedded text object, not a raster image', async () => {
   const session = await PdfApiSession.create(await samplePdf());
   const imageCountBefore = session.objectInventory().imageObjects.length;
