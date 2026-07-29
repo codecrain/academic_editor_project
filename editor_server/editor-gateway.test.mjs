@@ -251,6 +251,22 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_save_checkpoint',
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
+      'editor_pdf_open',
+      'editor_pdf_discard',
+      'editor_pdf_read_json',
+      'editor_pdf_target_map',
+      'editor_pdf_target_find',
+      'editor_pdf_target_inspect',
+      'editor_pdf_object_inventory',
+      'editor_pdf_command_catalog',
+      'editor_pdf_apply',
+      'editor_pdf_render_pages',
+      'editor_pdf_quality_check',
+      'editor_pdf_export_pdf',
+      'editor_pdf_save_source',
+      'editor_pdf_save_checkpoint',
+      'editor_pdf_artifact_read',
+      'editor_pdf_artifact_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');
     assert.deepEqual(discardTool.inputSchema.required, ['documentId', 'baseRevision']);

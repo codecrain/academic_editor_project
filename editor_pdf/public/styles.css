@@ -1,0 +1,63 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, Pretendard, "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  background: #e7e9ee;
+  color: #172033;
+}
+
+* { box-sizing: border-box; }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { display: grid; grid-template-rows: 44px minmax(0, 1fr); background: #e7e9ee; }
+
+.product-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 0 16px;
+  background: #fff;
+  border-bottom: 1px solid #d8dde8;
+  box-shadow: 0 1px 3px rgb(16 24 40 / 6%);
+  z-index: 10;
+}
+
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 700; white-space: nowrap; }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  color: #fff;
+  background: #4f46e5;
+}
+.engine-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  color: #3730a3;
+  background: #eef2ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+#runtimeStatus { overflow: hidden; color: #667085; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+#pdfViewer { min-width: 0; min-height: 0; width: 100%; height: 100%; }
+.boot-error {
+  position: fixed;
+  inset: 72px 24px auto;
+  display: grid;
+  gap: 7px;
+  padding: 18px 20px;
+  border: 1px solid #fda29b;
+  border-radius: 12px;
+  background: #fff1f0;
+  color: #912018;
+  box-shadow: 0 10px 30px rgb(16 24 40 / 12%);
+  z-index: 100;
+}
+.boot-error[hidden] { display: none; }
+
+@media (max-width: 720px) {
+  .product-strip { padding: 0 10px; }
+  .engine-badge { display: none; }
+}
