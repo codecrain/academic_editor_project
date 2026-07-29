@@ -1535,6 +1535,7 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     const secondSession = await createSession(second.documentId);
     assert.notEqual(firstSession.formParameters.access_token, secondSession.formParameters.access_token);
     assert.match(firstSession.formParameters.wopi_src, new RegExp(first.documentId));
+    assert.equal(new URL(firstSession.formParameters.wopi_src).origin, gatewayOrigin);
 
     const openFirst = await fetch(firstSession.actionUrl, {
       method: 'POST',

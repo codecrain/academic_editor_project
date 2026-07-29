@@ -200,6 +200,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(prod, /EDITOR_REQUIRE_PUBLIC_URL/);
   assert.match(prod, /http:\/\/175\.193\.85\.86:11004/);
   assert.match(prod, /EDITOR_WOPI_BASE_URL=.*code-dev-v2\.tlooto\.com/);
+  assert.match(prod, /EDITOR_GATEWAY_WOPI_BASE_URL=.*EDITOR_WOPI_BASE_URL/);
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP1=.*EDITOR_WOPI_BASE_URL/);
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP2=.*https:\/\/tlooto\.com/);
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP3=.*127\.0\.0\.1.*EDITOR_PUBLIC_URL/);
@@ -210,6 +211,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(prod, /deploy-native-editor\.sh/);
   assert.match(dev, /http:\/\/175\.193\.85\.86:11004/);
   assert.match(dev, /EDITOR_WOPI_BASE_URL=.*code-dev-v2\.tlooto\.com/);
+  assert.match(dev, /EDITOR_GATEWAY_WOPI_BASE_URL=.*EDITOR_WOPI_BASE_URL/);
   assert.match(dev, /EDITOR_WOPI_ALIASGROUP1=.*EDITOR_WOPI_BASE_URL/);
   assert.match(dev, /EDITOR_WOPI_ALIASGROUP2=.*https:\/\/tlooto\.com/);
   assert.match(dev, /EDITOR_WOPI_ALIASGROUP3=.*127\.0\.0\.1.*EDITOR_PUBLIC_URL/);
@@ -223,6 +225,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /\.config\/academic-editor\/mcp\.env/);
   assert.match(helper, /load_secret_env/);
   assert.match(helper, /git pull --ff-only/);
+  assert.match(helper, /EDITOR_GATEWAY_WOPI_BASE_URL.*EDITOR_WOPI_BASE_URL/);
+  assert.match(helper, /EDITOR_GATEWAY_WOPI_BASE_URL must be browser-reachable/);
   assert.match(helper, /before_head=.*git rev-parse HEAD/);
   assert.match(helper, /repository updated; restarting deployment with the latest script/);
   assert.match(helper, /exec bash "\$0" "\$@"/);
