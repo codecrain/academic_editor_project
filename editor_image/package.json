@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@phosphor-icons/web": "2.1.2",
     "fabric": "7.4.0"
   },
   "scripts": {

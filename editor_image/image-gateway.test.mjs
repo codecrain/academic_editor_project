@@ -55,11 +55,30 @@ test('gateway serves both image editors and round-trips editable projects', asyn
 
     const vectorPage = await fetch(`${origin}/image/vector/`);
     assert.equal(vectorPage.status, 200);
-    assert.match(await vectorPage.text(), /Tlooto Vector Studio/);
+    const vectorHtml = await vectorPage.text();
+    assert.match(vectorHtml, /Tlooto Image Studio — Vector/);
+    assert.match(vectorHtml, /command-search/);
+    assert.match(vectorHtml, /panel-tabs/);
 
     const fabric = await fetch(`${origin}/image/vendor/fabric.mjs`);
     assert.equal(fabric.status, 200);
     assert.match(fabric.headers.get('content-type') || '', /javascript/);
+
+    const phosphorStyles = await fetch(`${origin}/image/vendor/phosphor/regular/style.css`);
+    assert.equal(phosphorStyles.status, 200);
+    assert.match(phosphorStyles.headers.get('content-type') || '', /text\/css/);
+    assert.match(await phosphorStyles.text(), /\.ph\.ph-cursor:before/);
+
+    const phosphorFont = await fetch(`${origin}/image/vendor/phosphor/regular/Phosphor.woff2`);
+    assert.equal(phosphorFont.status, 200);
+    assert.match(phosphorFont.headers.get('content-type') || '', /font\/woff2|application\/octet-stream/);
+
+    const rasterPage = await fetch(`${origin}/image/`);
+    assert.equal(rasterPage.status, 200);
+    const rasterHtml = await rasterPage.text();
+    assert.match(rasterHtml, /tlooto-image-studio\.css/);
+    assert.match(rasterHtml, /vendor\/phosphor\/regular\/style\.css/);
+    assert.match(rasterHtml, /tlooto-image-studio\.js/);
 
     const createdResponse = await fetch(`${origin}/api/image-sessions`, {
       method: 'POST',

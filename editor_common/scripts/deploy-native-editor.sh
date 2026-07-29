@@ -560,6 +560,9 @@ prepare_image_runtime() {
     die "Vector Studio static assets were not found under $EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT/vector"
   [ -f "$EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/fabric/dist/index.min.mjs" ] ||
     die "Fabric.js runtime was not installed under $EDITOR_GATEWAY_IMAGE_VENDOR_ROOT"
+  [ -f "$EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/@phosphor-icons/web/src/regular/style.css" ] &&
+    [ -f "$EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/@phosphor-icons/web/src/regular/Phosphor.woff2" ] ||
+    die "Phosphor icon runtime was not installed under $EDITOR_GATEWAY_IMAGE_VENDOR_ROOT"
 }
 
 start_editor_gateway() {

@@ -6,11 +6,13 @@ Only permissively licensed components may be shipped by Image Studio.
 | --- | --- | --- | --- |
 | [miniPaint](https://github.com/viliusle/miniPaint) | MIT | `a79733eb803fc97084ef0ee4faa96b031e69e1c0` (4.14.3) | Raster editor, layer model, paint/selection/filter tools |
 | [Fabric.js](https://github.com/fabricjs/fabric.js) | MIT | `7.4.0` | Vector canvas, objects, transforms, SVG/JSON serialization |
+| [Phosphor Icons](https://github.com/phosphor-icons/web) | MIT | `2.1.2` | Familiar, accessible toolbar and command icons |
 
 The miniPaint MIT license is retained at
 `vendor/minipaint/MIT-LICENSE.txt`. Fabric.js is pinned in `package-lock.json`;
 its package license is retained by `npm ci` under
-`node_modules/fabric/LICENSE`.
+`node_modules/fabric/LICENSE`. Phosphor Icons is pinned in the same lockfile and
+its MIT license is retained at `node_modules/@phosphor-icons/web/LICENSE`.
 
 Fabric's Node-only `canvas` and `jsdom` dependency trees are marked optional and
 are not needed by the browser workbench. Local and production installation uses

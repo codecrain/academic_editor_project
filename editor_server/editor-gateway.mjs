@@ -1912,7 +1912,12 @@ function debrandImageEditorHtml(html) {
     .replace(/miniPaint is free online image editor[^<]*/g, 'Tlooto Image Studio is a local, non-generative image editor.')
     .replace(/https:\/\/viliusle\.github\.io\/miniPaint\//g, '')
     .replace(/<a class="logo" href="#">miniPaint<\/a>/, '<a class="logo" href="#">Image Studio</a>')
-    .replace('<script src="dist/bundle.js"></script>', '<script src="dist/bundle.js"></script><script defer src="tlooto-image-studio.js"></script>');
+    .replace(
+      '<script src="dist/bundle.js"></script>',
+      '<link rel="stylesheet" href="vendor/phosphor/regular/style.css">'
+        + '<link rel="stylesheet" href="tlooto-image-studio.css">'
+        + '<script src="dist/bundle.js"></script><script defer src="tlooto-image-studio.js"></script>',
+    );
 }
 
 function handleImageStaticRequest(req, res, config, pathname) {
@@ -1951,9 +1956,34 @@ function handleImageStaticRequest(req, res, config, pathname) {
     });
     return true;
   }
-  const integrationPath = `${config.imageBasePath}tlooto-image-studio.js`;
-  if (pathname === integrationPath) {
-    sendStaticFile(req, res, path.join(config.imageIntegrationRoot, 'tlooto-image-studio.js'), {
+  const phosphorMatch = pathname.match(
+    new RegExp(`^${imageBasePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}vendor/phosphor/regular/(style\\.css|Phosphor\\.(?:woff2|woff|ttf|svg))$`),
+  );
+  if (phosphorMatch) {
+    const phosphorPath = path.join(
+      config.imageVendorRoot,
+      '@phosphor-icons',
+      'web',
+      'src',
+      'regular',
+      phosphorMatch[1],
+    );
+    if (!existsSync(phosphorPath) || !statSync(phosphorPath).isFile()) {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+    sendStaticFile(req, res, phosphorPath, {
+      'Content-Security-Policy': IMAGE_EDITOR_CSP,
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return true;
+  }
+  const integrationMatch = pathname.match(
+    new RegExp(`^${imageBasePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(tlooto-image-studio\\.(?:js|css))$`),
+  );
+  if (integrationMatch) {
+    sendStaticFile(req, res, path.join(config.imageIntegrationRoot, integrationMatch[1]), {
       'Content-Security-Policy': IMAGE_EDITOR_CSP, 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
     });
     return true;

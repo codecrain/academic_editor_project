@@ -1,0 +1,420 @@
+:root {
+  --tlooto-app: #171819;
+  --tlooto-elevated: #202225;
+  --tlooto-panel: #242629;
+  --tlooto-control: #2c2f33;
+  --tlooto-hover: #373b40;
+  --tlooto-active: #253c59;
+  --tlooto-border: #3b3e43;
+  --tlooto-border-strong: #4a4e54;
+  --tlooto-text: #f2f3f5;
+  --tlooto-muted: #aeb3ba;
+  --tlooto-dim: #7f858d;
+  --tlooto-accent: #2684ff;
+  --tlooto-focus: #75b6ff;
+}
+
+body.tlooto-pro-editor {
+  --background: #34373a;
+  --text-color: var(--tlooto-text);
+  --text-color-muted: var(--tlooto-muted);
+  --section-background-color: var(--tlooto-elevated);
+  --area-background-color: var(--tlooto-control);
+  --block-background-color: var(--tlooto-panel);
+  --header-background-color: var(--tlooto-panel);
+  --input-background-color: var(--tlooto-control);
+  --input-background-color-hover: var(--tlooto-hover);
+  --input-text-color: var(--tlooto-text);
+  --input-border-color: var(--tlooto-border);
+  --input-border-color-active: var(--tlooto-focus);
+  --input-group-border-color: var(--tlooto-border);
+  --menu-background-color: var(--tlooto-app);
+  --menu-text-color: var(--tlooto-muted);
+  --menu-dropdown-background-color: #25272a;
+  --menu-dropdown-border-color: var(--tlooto-border-strong);
+  --menu-dropdown-text-color: var(--tlooto-text);
+  --menu-dropdown-text-muted-color: var(--tlooto-dim);
+  --menu-dropdown-hover-background-color: var(--tlooto-hover);
+  --menu-dropdown-hover-text-color: var(--tlooto-text);
+  --menu-dropdown-divider-color: var(--tlooto-border);
+  --background-color-active: var(--tlooto-active);
+  --background-color-hover: var(--tlooto-hover);
+  --text-color-active: #9ac8ff;
+  --border-color: var(--tlooto-border);
+  background: var(--background);
+  color: var(--tlooto-text);
+  font: 14px/1.35 "Pretendard Variable", Pretendard, Inter, "Noto Sans KR", system-ui, sans-serif;
+}
+
+.tlooto-pro-editor button:focus-visible,
+.tlooto-pro-editor a:focus-visible,
+.tlooto-pro-editor input:focus-visible,
+.tlooto-pro-editor select:focus-visible {
+  outline: 2px solid var(--tlooto-focus) !important;
+  outline-offset: -2px;
+}
+
+.tlooto-pro-editor .main_menu {
+  display: flex;
+  height: 42px;
+  align-items: center;
+  border-bottom: 1px solid var(--tlooto-border);
+  background: var(--tlooto-app);
+  padding: 0 12px;
+}
+.tlooto-pro-editor .main_menu > ul.menu_bar {
+  position: static;
+  height: 42px;
+  flex: 0 1 auto;
+  background: transparent;
+  padding: 0;
+}
+.tlooto-pro-editor .main_menu > ul.menu_bar > li > a {
+  height: 42px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+.tlooto-pro-editor .main_menu > ul.menu_dropdown {
+  border-radius: 5px;
+  box-shadow: 0 10px 30px #0009;
+  padding: 5px;
+}
+.tlooto-pro-editor .main_menu > ul.menu_dropdown > li > a {
+  min-width: 230px;
+  height: 32px;
+  border-radius: 3px;
+  font-size: 13px;
+}
+
+.tlooto-brand {
+  display: flex;
+  min-width: 166px;
+  align-items: center;
+  gap: 8px;
+  color: var(--tlooto-text);
+  text-decoration: none;
+}
+.tlooto-brand > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 5px;
+  background: var(--tlooto-accent);
+  color: white;
+  font-size: 13px;
+  font-weight: 800;
+}
+.tlooto-brand strong { font-size: 14px; font-weight: 650; }
+
+.tlooto-command-search {
+  display: flex;
+  min-width: 180px;
+  max-width: 300px;
+  height: 30px;
+  flex: 1;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--tlooto-border);
+  border-radius: 5px;
+  background: var(--tlooto-control);
+  padding: 0 8px;
+  color: var(--tlooto-muted);
+}
+.tlooto-command-search:focus-within { border-color: var(--tlooto-focus); }
+.tlooto-command-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--tlooto-text);
+}
+.tlooto-command-search kbd,
+.tlooto-command-results kbd {
+  color: var(--tlooto-dim);
+  font: 11px/1.2 inherit;
+}
+.tlooto-command-results {
+  position: fixed;
+  z-index: 1000;
+  top: 38px;
+  left: 50%;
+  width: 420px;
+  max-height: 420px;
+  overflow: auto;
+  transform: translateX(-50%);
+  border: 1px solid var(--tlooto-border-strong);
+  border-radius: 6px;
+  background: #25272a;
+  padding: 6px;
+  box-shadow: 0 14px 44px #000b;
+}
+.tlooto-command-results button {
+  display: flex;
+  width: 100%;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--tlooto-text);
+  padding: 0 10px;
+  cursor: pointer;
+}
+.tlooto-command-results button:hover { background: var(--tlooto-hover); }
+
+.tlooto-workspace-picker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  color: var(--tlooto-dim);
+  font-size: 12px;
+}
+.tlooto-workspace-picker select {
+  height: 30px;
+  border: 1px solid var(--tlooto-border);
+  border-radius: 4px;
+  background: var(--tlooto-control);
+  color: var(--tlooto-text);
+  padding: 0 24px 0 8px;
+}
+.tlooto-top-actions { display: flex; align-items: center; gap: 6px; margin-left: 10px; }
+.tlooto-action {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--tlooto-border-strong);
+  border-radius: 4px;
+  background: var(--tlooto-control);
+  color: var(--tlooto-text);
+  padding: 0 11px;
+  cursor: pointer;
+}
+.tlooto-action:hover { background: var(--tlooto-hover); }
+.tlooto-action.primary { border-color: #1876da; background: var(--tlooto-accent); color: white; }
+.tlooto-action.primary:hover { background: #4b9cff; }
+#tlooto-image-save-status { max-width: 200px; overflow: hidden; color: #9ac8ff; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+#tlooto-image-save-status[data-error=true], #tlooto-raster-status[data-error=true] { color: #ff8d8d; }
+
+.tlooto-pro-editor .wrapper {
+  top: 42px;
+  bottom: 30px;
+  grid-template-rows: 46px 1fr;
+  grid-template-columns: 52px minmax(0, 1fr) 304px;
+  grid-template-areas:
+    "submenu submenu submenu"
+    "sidebar_left main sidebar_right";
+}
+.tlooto-pro-editor .submenu {
+  height: 46px;
+  gap: 8px;
+  border-bottom: 1px solid var(--tlooto-border);
+  background: #25272a;
+  margin: 0;
+  padding: 0 8px;
+}
+.tlooto-workspace-switch {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  border-right: 1px solid var(--tlooto-border);
+  padding-right: 8px;
+}
+.tlooto-workspace-switch a {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 5px;
+  border-radius: 4px;
+  color: var(--tlooto-muted);
+  padding: 0 9px;
+  text-decoration: none;
+}
+.tlooto-workspace-switch a:hover { background: var(--tlooto-hover); color: var(--tlooto-text); }
+.tlooto-workspace-switch a.active { background: var(--tlooto-active); color: #9ac8ff; }
+.tlooto-pro-editor .logo.tlooto-document-tab {
+  width: 170px;
+  height: 34px;
+  overflow: hidden;
+  border-top: 2px solid var(--tlooto-accent);
+  border-right: 1px solid var(--tlooto-border);
+  border-left: 1px solid var(--tlooto-border);
+  background: var(--tlooto-panel);
+  color: var(--tlooto-text);
+  margin: 0;
+  padding: 8px 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tlooto-pro-editor .logo.tlooto-document-tab::after { display: none; }
+.tlooto-pro-editor .attributes {
+  min-height: 34px;
+  height: 34px;
+  flex: 1;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  margin: 0 !important;
+  padding: 2px 8px;
+}
+.tlooto-pro-editor .attributes .item { margin-right: 14px; }
+.tlooto-pro-editor .attributes input,
+.tlooto-pro-editor .attributes select,
+.tlooto-pro-editor .attributes button {
+  min-height: 28px;
+  border-radius: 3px;
+}
+
+.tlooto-pro-editor .sidebar_left {
+  width: 52px;
+  max-height: 100%;
+  align-content: flex-start;
+  border-right: 1px solid var(--tlooto-border);
+  background: var(--tlooto-elevated);
+  margin: 0;
+  padding: 5px 6px;
+}
+.tlooto-pro-editor .sidebar_left .item {
+  width: 40px;
+  height: 38px;
+  overflow: visible;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  margin: 1px 0;
+}
+.tlooto-pro-editor .sidebar_left .item::after { background-size: 20px 20px; }
+.tlooto-pro-editor .sidebar_left .item:hover { background: var(--tlooto-hover); }
+.tlooto-pro-editor .sidebar_left .item.active {
+  border-color: #315f94;
+  background: var(--tlooto-active);
+  color: #9ac8ff;
+}
+.tlooto-pro-editor .sidebar_left .item.tool-break-before { margin-top: 8px; }
+.tlooto-pro-editor .sidebar_left .item.tool-break-before::before {
+  position: absolute;
+  top: -5px;
+  left: 3px;
+  width: 34px;
+  height: 1px;
+  background: var(--tlooto-border);
+  content: "";
+}
+.tlooto-pro-editor .sidebar_left .item[data-tooltip]:hover > * { pointer-events: none; }
+.tlooto-pro-editor .sidebar_left .item[data-tooltip]:hover::marker { display: none; }
+
+.tlooto-pro-editor .middle_area { min-width: 0; min-height: 0; background: #34373a; }
+.tlooto-pro-editor .main_wrapper { background: #34373a; }
+.tlooto-pro-editor .loaded .canvas_wrapper canvas {
+  border: 0;
+  box-shadow: 0 5px 24px #0009;
+}
+
+.tlooto-pro-editor .sidebar_right {
+  width: 304px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-left: 1px solid var(--tlooto-border);
+  background: var(--tlooto-panel);
+  margin: 0;
+  padding: 0;
+  scrollbar-width: thin;
+}
+.tlooto-inspector-tabs {
+  position: sticky;
+  z-index: 5;
+  top: 0;
+  display: flex;
+  min-height: 38px;
+  flex: 0 0 38px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--tlooto-border);
+  background: var(--tlooto-panel);
+}
+.tlooto-inspector-tabs > button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--tlooto-muted);
+  padding: 0 10px;
+  cursor: pointer;
+}
+.tlooto-inspector-tabs > button:hover { color: var(--tlooto-text); }
+.tlooto-inspector-tabs > button[aria-selected=true] { border-bottom-color: var(--tlooto-accent); color: var(--tlooto-text); }
+.tlooto-inspector-tabs .tlooto-panel-collapse { min-width: 34px; margin-left: auto; padding: 0; }
+.tlooto-pro-editor .sidebar_right .block {
+  flex: 0 0 auto;
+  border: 0;
+  border-bottom: 1px solid var(--tlooto-border);
+  border-radius: 0;
+  background: var(--tlooto-panel);
+  box-shadow: none;
+  margin: 0;
+}
+.tlooto-pro-editor .sidebar_right .block h2 {
+  min-height: 38px;
+  border: 0;
+  border-radius: 0;
+  background: var(--tlooto-panel);
+  padding: 11px 14px;
+  color: var(--tlooto-text);
+  font-size: 13px;
+}
+.tlooto-pro-editor .sidebar_right .block .content { padding: 10px 12px; }
+.tlooto-pro-editor .sidebar_right .block.layers { min-height: 260px; flex: 1 0 auto; }
+.tlooto-pro-editor #layers_base .layer {
+  min-height: 38px;
+  border-color: var(--tlooto-border);
+  background: transparent;
+}
+
+.tlooto-status-bar {
+  position: fixed;
+  z-index: 90;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  height: 30px;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--tlooto-border);
+  background: var(--tlooto-app);
+  color: var(--tlooto-muted);
+  padding: 0 10px;
+  font-size: 12px;
+}
+#tlooto-raster-status { color: #9ac8ff; }
+
+.tlooto-panels-collapsed .wrapper {
+  grid-template-columns: 52px minmax(0, 1fr) 42px;
+}
+.tlooto-panels-collapsed .sidebar_right > :not(.tlooto-inspector-tabs) { display: none; }
+.tlooto-panels-collapsed .tlooto-inspector-tabs {
+  width: 42px;
+  flex-direction: column;
+  height: 100%;
+}
+.tlooto-panels-collapsed .tlooto-inspector-tabs > button:not(.tlooto-panel-collapse) { display: none; }
+.tlooto-panels-collapsed .tlooto-panel-collapse i { transform: rotate(180deg); }
+.tlooto-focus-mode .wrapper { grid-template-columns: 0 minmax(0, 1fr) 0; }
+.tlooto-focus-mode .sidebar_left, .tlooto-focus-mode .sidebar_right { display: none; }
+
+@media (max-width: 1480px) {
+  .tlooto-workspace-picker span,
+  #tlooto-image-save-status { display: none; }
+  .tlooto-brand { min-width: 145px; }
+}
+
+@media (max-width: 1180px) {
+  .tlooto-pro-editor .wrapper { grid-template-columns: 52px minmax(0, 1fr) 270px; }
+  .tlooto-workspace-picker span,
+  .tlooto-action span,
+  #tlooto-image-save-status { display: none; }
+  .tlooto-brand { min-width: 130px; }
+}

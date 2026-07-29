@@ -1,58 +1,219 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Tlooto Vector Studio</title>
+  <title>Tlooto Image Studio — Vector</title>
   <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/image/vendor/phosphor/regular/style.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-  <header>
-    <strong>Vector Studio</strong>
-    <nav aria-label="Document actions">
-      <button data-action="new">New</button>
-      <label class="file-button">Open SVG/JSON<input id="open-file" type="file" accept=".svg,.json,image/svg+xml,application/json"></label>
-      <button data-action="save-project">Save editable JSON</button>
-      <button data-action="export-svg">Export SVG</button>
-      <button data-action="export-png">Export PNG</button>
-      <a href="../">Raster Studio</a>
-    </nav>
-  </header>
-  <main>
-    <aside id="tools" aria-label="Vector tools">
-      <button data-tool="select" class="active">Select</button>
-      <button data-tool="draw">Pencil</button>
-      <button data-tool="rect">Rectangle</button>
-      <button data-tool="ellipse">Ellipse</button>
-      <button data-tool="triangle">Triangle</button>
-      <button data-tool="line">Line</button>
-      <button data-tool="text">Text</button>
-      <hr>
-      <label>Fill <input id="fill" type="color" value="#2563eb"></label>
-      <label>Stroke <input id="stroke" type="color" value="#111827"></label>
-      <label>Width <input id="stroke-width" type="number" min="0" max="100" step="1" value="2"></label>
-      <hr>
-      <button data-action="duplicate">Duplicate</button>
-      <button data-action="group">Group</button>
-      <button data-action="ungroup">Ungroup</button>
-      <button data-action="front">Bring front</button>
-      <button data-action="back">Send back</button>
-      <button data-action="delete">Delete</button>
-      <hr>
-      <button data-action="undo">Undo</button>
-      <button data-action="redo">Redo</button>
-      <label>Zoom <input id="zoom" type="range" min="10" max="400" value="100"></label>
-    </aside>
-    <section id="stage" aria-label="Artboard">
-      <canvas id="canvas" width="1200" height="800"></canvas>
+  <div class="app-shell">
+    <header class="application-bar">
+      <a class="brand" href="../" aria-label="Tlooto Image Studio raster workspace">
+        <span class="brand-mark">T</span>
+        <span>Image Studio</span>
+      </a>
+      <nav class="menu-bar" aria-label="애플리케이션 메뉴">
+        <details>
+          <summary>파일</summary>
+          <div class="menu-popover">
+            <button data-action="new"><span>새 문서</span><kbd>Ctrl N</kbd></button>
+            <label><span>열기…</span><kbd>Ctrl O</kbd><input id="open-file" type="file" accept=".svg,.json,image/svg+xml,application/json"></label>
+            <button data-action="save-project"><span>편집 프로젝트 저장</span><kbd>Ctrl S</kbd></button>
+            <hr>
+            <button data-action="export-svg"><span>SVG 내보내기</span></button>
+            <button data-action="export-png"><span>PNG 내보내기</span></button>
+          </div>
+        </details>
+        <details>
+          <summary>편집</summary>
+          <div class="menu-popover">
+            <button data-action="undo"><span>실행 취소</span><kbd>Ctrl Z</kbd></button>
+            <button data-action="redo"><span>다시 실행</span><kbd>Ctrl Shift Z</kbd></button>
+            <hr>
+            <button data-action="duplicate"><span>복제</span><kbd>Ctrl D</kbd></button>
+            <button data-action="delete"><span>삭제</span><kbd>Del</kbd></button>
+          </div>
+        </details>
+        <details>
+          <summary>오브젝트</summary>
+          <div class="menu-popover">
+            <button data-action="group"><span>그룹</span><kbd>Ctrl G</kbd></button>
+            <button data-action="ungroup"><span>그룹 해제</span><kbd>Ctrl Shift G</kbd></button>
+            <hr>
+            <button data-action="front"><span>맨 앞으로</span></button>
+            <button data-action="back"><span>맨 뒤로</span></button>
+          </div>
+        </details>
+        <details>
+          <summary>보기</summary>
+          <div class="menu-popover">
+            <button data-view="fit"><span>화면에 맞추기</span><kbd>Ctrl 0</kbd></button>
+            <button data-view="actual"><span>100%</span><kbd>Ctrl 1</kbd></button>
+            <button data-view="panels"><span>패널 표시/숨기기</span><kbd>Tab</kbd></button>
+          </div>
+        </details>
+      </nav>
+      <label class="command-search">
+        <i class="ph ph-magnifying-glass" aria-hidden="true"></i>
+        <input id="command-search" type="search" placeholder="도구와 명령 검색…" autocomplete="off">
+        <kbd>Ctrl K</kbd>
+      </label>
+      <div class="workspace-picker" aria-label="작업 영역">
+        <span>작업 영역</span>
+        <select id="workspace-select">
+          <option value="design">디자인</option>
+          <option value="photo">사진</option>
+          <option value="paint">페인팅</option>
+          <option value="export">내보내기</option>
+        </select>
+      </div>
+      <div class="top-actions">
+        <button class="quiet-button" data-action="save-project"><i class="ph ph-floppy-disk"></i><span>저장</span></button>
+        <button class="primary-button" data-action="export-png"><i class="ph ph-export"></i><span>내보내기</span></button>
+      </div>
+    </header>
+
+    <section class="document-bar" aria-label="문서 탭">
+      <div class="workspace-switch" aria-label="편집 모드">
+        <a href="../"><i class="ph ph-image"></i>래스터</a>
+        <a class="active" href="./" aria-current="page"><i class="ph ph-vector-three"></i>벡터</a>
+      </div>
+      <div class="document-tab active">
+        <i class="ph ph-file-svg"></i>
+        <span id="document-name">제목 없음.svg</span>
+        <span class="dirty-indicator" aria-label="저장되지 않은 변경"></span>
+        <button class="icon-button compact" type="button" title="문서 닫기" aria-label="문서 닫기"><i class="ph ph-x"></i></button>
+      </div>
+      <button class="icon-button compact" data-action="new" title="새 문서" aria-label="새 문서"><i class="ph ph-plus"></i></button>
     </section>
-    <aside id="layers-panel">
-      <h2>Layers / Objects</h2>
-      <ol id="layers"></ol>
-    </aside>
-  </main>
-  <output id="status" aria-live="polite"></output>
+
+    <section class="context-bar" aria-label="도구 옵션">
+      <strong id="active-tool-name">선택 도구</strong>
+      <span class="separator"></span>
+      <label class="swatch-control">채우기 <input id="fill" type="color" value="#2563eb"></label>
+      <label class="swatch-control">선 <input id="stroke" type="color" value="#111827"></label>
+      <label>선 굵기 <input id="stroke-width" type="number" min="0" max="100" step="1" value="2"><span>px</span></label>
+      <span class="separator"></span>
+      <div class="transform-summary" aria-label="선택 영역 변형">
+        <label>X <input id="object-x" type="number" step="1"></label>
+        <label>Y <input id="object-y" type="number" step="1"></label>
+        <label>W <input id="object-width" type="number" min="0" step="1"></label>
+        <label>H <input id="object-height" type="number" min="0" step="1"></label>
+      </div>
+      <div class="context-actions">
+        <button class="icon-button" data-action="undo" title="실행 취소 (Ctrl+Z)" aria-label="실행 취소"><i class="ph ph-arrow-counter-clockwise"></i></button>
+        <button class="icon-button" data-action="redo" title="다시 실행 (Ctrl+Shift+Z)" aria-label="다시 실행"><i class="ph ph-arrow-clockwise"></i></button>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <aside id="tools" class="tool-rail" aria-label="벡터 도구">
+        <div class="tool-group">
+          <button data-tool="select" class="tool-button active" title="선택 도구 (V)" aria-label="선택 도구"><i class="ph ph-cursor"></i></button>
+          <button data-tool="draw" class="tool-button" title="연필 도구 (P)" aria-label="연필 도구"><i class="ph ph-pencil"></i></button>
+        </div>
+        <div class="tool-group">
+          <button data-tool="rect" class="tool-button" title="사각형 도구 (R)" aria-label="사각형 도구"><i class="ph ph-rectangle"></i></button>
+          <button data-tool="ellipse" class="tool-button" title="타원 도구 (E)" aria-label="타원 도구"><i class="ph ph-circle"></i></button>
+          <button data-tool="triangle" class="tool-button" title="삼각형 도구" aria-label="삼각형 도구"><i class="ph ph-triangle"></i></button>
+          <button data-tool="line" class="tool-button" title="선분 도구 (L)" aria-label="선분 도구"><i class="ph ph-line-segment"></i></button>
+        </div>
+        <div class="tool-group">
+          <button data-tool="text" class="tool-button" title="문자 도구 (T)" aria-label="문자 도구"><i class="ph ph-text-t"></i></button>
+        </div>
+        <div class="tool-spacer"></div>
+        <div class="color-stack" title="채우기와 선">
+          <span id="fill-preview"></span>
+          <span id="stroke-preview"></span>
+        </div>
+        <button class="tool-button" data-view="panels" title="패널 표시/숨기기 (Tab)" aria-label="패널 표시/숨기기"><i class="ph ph-sidebar"></i></button>
+      </aside>
+
+      <section id="stage" class="canvas-stage" aria-label="아트보드">
+        <div class="ruler ruler-horizontal" aria-hidden="true"></div>
+        <div class="ruler ruler-vertical" aria-hidden="true"></div>
+        <canvas id="canvas" width="1200" height="800"></canvas>
+        <div id="selection-toolbar" class="selection-toolbar" hidden>
+          <button data-action="duplicate"><i class="ph ph-copy"></i><span>복제</span></button>
+          <button data-action="group"><i class="ph ph-intersect"></i><span>그룹</span></button>
+          <button data-action="front" title="맨 앞으로" aria-label="맨 앞으로"><i class="ph ph-stack"></i></button>
+          <button data-action="delete" title="삭제" aria-label="삭제"><i class="ph ph-trash"></i></button>
+        </div>
+      </section>
+
+      <aside id="inspector" class="inspector">
+        <div class="panel-tabs" role="tablist" aria-label="검사기 패널">
+          <button role="tab" aria-selected="true" data-panel-tab="properties">속성</button>
+          <button role="tab" aria-selected="false" data-panel-tab="layers">레이어</button>
+          <button role="tab" aria-selected="false" data-panel-tab="history">기록</button>
+          <button class="icon-button collapse-inspector" type="button" title="패널 접기" aria-label="패널 접기"><i class="ph ph-caret-double-right"></i></button>
+        </div>
+
+        <section class="panel-content active" data-panel="properties">
+          <div class="panel-section">
+            <h2>변형</h2>
+            <div class="property-grid">
+              <label>X <input id="prop-x" type="number" step="1"></label>
+              <label>Y <input id="prop-y" type="number" step="1"></label>
+              <label>너비 <input id="prop-width" type="number" min="0" step="1"></label>
+              <label>높이 <input id="prop-height" type="number" min="0" step="1"></label>
+              <label>회전 <input id="prop-angle" type="number" step="1"><span>°</span></label>
+              <label>불투명도 <input id="prop-opacity" type="number" min="0" max="100" step="1"><span>%</span></label>
+            </div>
+          </div>
+          <div class="panel-section">
+            <h2>모양</h2>
+            <div class="appearance-row">
+              <label>채우기 <input id="prop-fill" type="color" value="#2563eb"></label>
+              <label>선 <input id="prop-stroke" type="color" value="#111827"></label>
+            </div>
+          </div>
+          <div class="panel-section">
+            <h2>빠른 작업</h2>
+            <div class="quick-actions">
+              <button data-action="duplicate"><i class="ph ph-copy"></i>복제</button>
+              <button data-action="group"><i class="ph ph-intersect"></i>그룹</button>
+              <button data-action="ungroup"><i class="ph ph-squares-four"></i>해제</button>
+              <button data-action="delete"><i class="ph ph-trash"></i>삭제</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-content" data-panel="layers">
+          <div class="panel-toolbar">
+            <strong>레이어 / 오브젝트</strong>
+            <button class="icon-button" data-action="duplicate" title="복제" aria-label="복제"><i class="ph ph-copy"></i></button>
+            <button class="icon-button" data-action="delete" title="삭제" aria-label="삭제"><i class="ph ph-trash"></i></button>
+          </div>
+          <ol id="layers"></ol>
+        </section>
+
+        <section class="panel-content" data-panel="history">
+          <div class="panel-toolbar"><strong>작업 기록</strong></div>
+          <ol id="history-list" class="history-list"></ol>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="status-bar">
+      <div class="status-left">
+        <output id="status" aria-live="polite">준비됨</output>
+        <span id="object-count">오브젝트 0개</span>
+      </div>
+      <span>아트보드 1</span>
+      <div class="zoom-controls">
+        <button class="icon-button compact" data-view="zoom-out" title="축소" aria-label="축소"><i class="ph ph-minus"></i></button>
+        <label><input id="zoom" type="range" min="10" max="400" value="100"><output id="zoom-value">100%</output></label>
+        <button class="icon-button compact" data-view="zoom-in" title="확대" aria-label="확대"><i class="ph ph-plus"></i></button>
+        <button class="icon-button compact" data-view="fit" title="화면에 맞추기" aria-label="화면에 맞추기"><i class="ph ph-arrows-out"></i></button>
+      </div>
+    </footer>
+  </div>
+
+  <div id="command-results" class="command-results" hidden></div>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

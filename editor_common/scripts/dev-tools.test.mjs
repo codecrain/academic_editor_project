@@ -253,6 +253,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
   assert.match(helper, /prepare_image_runtime/);
+  assert.match(helper, /@phosphor-icons\/web\/src\/regular\/style\.css/);
+  assert.match(helper, /@phosphor-icons\/web\/src\/regular\/Phosphor\.woff2/);
   assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_image" "editor-image" --omit=dev --omit=optional/);
   assert.match(helper, /EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/);
   assert.match(helper, /fabric\/dist\/index\.min\.mjs/);
