@@ -56,6 +56,8 @@ sync_repo() {
   log "syncing repository branch ${branch}"
   git fetch --tags --prune
   git pull --ff-only
+  git submodule sync --recursive
+  git submodule update --init --recursive
   after_head="$(git rev-parse HEAD)"
 
   if [ "$before_head" != "$after_head" ]; then
@@ -93,6 +95,12 @@ apply_runtime_defaults() {
   export RHWP_STUDIO_PM2_NAME="${RHWP_STUDIO_PM2_NAME:-rhwp-studio-${EDITOR_DEPLOY_ENV}}"
   export RHWP_STUDIO_BASE_PATH="${RHWP_STUDIO_BASE_PATH:-/hwpx/}"
   export EDITOR_GATEWAY_HWPX_STATIC_ROOT="${EDITOR_GATEWAY_HWPX_STATIC_ROOT:-$ROOT_DIR/editor_hwpx/rhwp-studio/dist}"
+  export EDITOR_IMAGE_BASE_PATH="${EDITOR_IMAGE_BASE_PATH:-/image/}"
+  export EDITOR_GATEWAY_IMAGE_STATIC_ROOT="${EDITOR_GATEWAY_IMAGE_STATIC_ROOT:-$ROOT_DIR/editor_image/vendor/minipaint}"
+  export EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT="${EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT:-$ROOT_DIR/editor_image}"
+  export EDITOR_PDF_BASE_PATH="${EDITOR_PDF_BASE_PATH:-/pdf/}"
+  export EDITOR_GATEWAY_PDF_STATIC_ROOT="${EDITOR_GATEWAY_PDF_STATIC_ROOT:-$ROOT_DIR/editor_pdf/public}"
+  export EDITOR_GATEWAY_PDF_VENDOR_ROOT="${EDITOR_GATEWAY_PDF_VENDOR_ROOT:-$ROOT_DIR/editor_pdf/node_modules}"
   export EDITOR_GATEWAY_PUBLIC_ORIGIN="${EDITOR_GATEWAY_PUBLIC_ORIGIN:-http://${EDITOR_GATEWAY_HOST}:${EDITOR_GATEWAY_PORT}}"
   export ACADEMIC_EDITOR_API_ORIGIN="${ACADEMIC_EDITOR_API_ORIGIN:-${EDITOR_GATEWAY_PUBLIC_ORIGIN}}"
   export EDITOR_GATEWAY_WOPI_BASE_URL="${EDITOR_GATEWAY_WOPI_BASE_URL:-http://127.0.0.1:${EDITOR_GATEWAY_PORT}}"
@@ -384,10 +392,53 @@ resolve_latest_release_tag() {
   log "using EDITOR_NATIVE_RELEASE_TAG=${EDITOR_NATIVE_RELEASE_TAG}"
 }
 
+native_dependencies_ready() {
+  command -v pdftoppm >/dev/null 2>&1 &&
+    command -v pm2 >/dev/null 2>&1
+}
+
 install_deps_if_requested() {
   truthy "$EDITOR_NATIVE_AUTO_DEPS" || return 0
-  log "installing native dependencies"
-  npm run deps:native
+  native_dependencies_ready && {
+    log "native dependencies required by this deployment are already installed"
+    return 0
+  }
+  log "installing missing native dependencies"
+  npm run deps:native:runtime
+}
+
+dependency_lock_fingerprint() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+ensure_node_workspace_dependencies() {
+  local workspace="$1"
+  local label="$2"
+  shift 2
+
+  local package_file="$workspace/package.json"
+  local lock_file="$workspace/package-lock.json"
+  local marker_dir="$ROOT_DIR/.build/dependency-locks"
+  local marker_file="$marker_dir/${label}.sha256"
+  [ -f "$package_file" ] || die "${label} package manifest was not found: ${package_file}"
+  [ -f "$lock_file" ] || die "${label} lockfile was not found: ${lock_file}"
+
+  local expected actual=""
+  expected="$(dependency_lock_fingerprint "$lock_file")"
+  if [ -f "$marker_file" ]; then
+    actual="$(tr -d '\r\n' < "$marker_file")"
+  fi
+
+  if [ -d "$workspace/node_modules" ] && [ "$actual" = "$expected" ]; then
+    log "${label} dependencies match the tracked lockfile"
+    return 0
+  fi
+
+  log "installing ${label} dependencies from its tracked lockfile"
+  npm --prefix "$workspace" ci "$@"
+  [ -d "$workspace/node_modules" ] || die "${label} dependency installation did not create node_modules"
+  mkdir -p "$marker_dir"
+  printf '%s\n' "$expected" > "$marker_file"
 }
 
 should_install_artifact() {
@@ -474,6 +525,8 @@ prepare_rhwp_static_assets() {
 
   [ -f "$ROOT_DIR/editor_hwpx/package.json" ] || die "RHWP runtime package was not found: $ROOT_DIR/editor_hwpx"
 
+  ensure_node_workspace_dependencies "$ROOT_DIR/editor_hwpx" "editor-hwpx"
+  ensure_node_workspace_dependencies "$ROOT_DIR/editor_hwpx/rhwp-studio" "editor-hwpx-studio"
   log "validating the tracked HWPX core and building Studio static assets"
   RHWP_STUDIO_BASE_PATH="$RHWP_STUDIO_BASE_PATH" \
   npm --prefix "$ROOT_DIR/editor_hwpx" run build:studio
@@ -483,6 +536,19 @@ prepare_rhwp_static_assets() {
 
   pm2 delete "$RHWP_STUDIO_PM2_NAME" >/dev/null 2>&1 || true
   log "HWPX static assets ready: ${EDITOR_GATEWAY_HWPX_STATIC_ROOT}"
+}
+
+prepare_pdf_runtime() {
+  ensure_command pdftoppm
+  ensure_node_workspace_dependencies "$ROOT_DIR/editor_pdf" "editor-pdf" --omit=dev
+  [ -f "$EDITOR_GATEWAY_PDF_VENDOR_ROOT/pdfjs-dist/legacy/build/pdf.mjs" ] ||
+    die "PDF.js runtime was not installed under $EDITOR_GATEWAY_PDF_VENDOR_ROOT"
+  [ -f "$EDITOR_GATEWAY_PDF_VENDOR_ROOT/@embedpdf/snippet/dist/embedpdf.js" ] ||
+    die "EmbedPDF runtime was not installed under $EDITOR_GATEWAY_PDF_VENDOR_ROOT"
+  [ -f "$EDITOR_GATEWAY_PDF_VENDOR_ROOT/@embedpdf/snippet/dist/pdfium.wasm" ] ||
+    die "PDFium WASM runtime was not installed under $EDITOR_GATEWAY_PDF_VENDOR_ROOT"
+  [ -f "$EDITOR_GATEWAY_PDF_STATIC_ROOT/index.html" ] ||
+    die "PDF editor static assets were not found under $EDITOR_GATEWAY_PDF_STATIC_ROOT"
 }
 
 start_editor_gateway() {
@@ -505,6 +571,12 @@ start_editor_gateway() {
   EDITOR_GATEWAY_WOPI_BASE_URL="$EDITOR_GATEWAY_WOPI_BASE_URL" \
   EDITOR_GATEWAY_DOCX_ORIGIN="$EDITOR_GATEWAY_DOCX_ORIGIN" \
   EDITOR_GATEWAY_HWPX_STATIC_ROOT="$EDITOR_GATEWAY_HWPX_STATIC_ROOT" \
+  EDITOR_IMAGE_BASE_PATH="$EDITOR_IMAGE_BASE_PATH" \
+  EDITOR_GATEWAY_IMAGE_STATIC_ROOT="$EDITOR_GATEWAY_IMAGE_STATIC_ROOT" \
+  EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT="$EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT" \
+  EDITOR_PDF_BASE_PATH="$EDITOR_PDF_BASE_PATH" \
+  EDITOR_GATEWAY_PDF_STATIC_ROOT="$EDITOR_GATEWAY_PDF_STATIC_ROOT" \
+  EDITOR_GATEWAY_PDF_VENDOR_ROOT="$EDITOR_GATEWAY_PDF_VENDOR_ROOT" \
   EDITOR_SERVICE_ROOT="$EDITOR_SERVICE_ROOT" \
   RHWP_STUDIO_BASE_PATH="$RHWP_STUDIO_BASE_PATH" \
   pm2 start "$(command -v node)" --name "$EDITOR_GATEWAY_PM2_NAME" -- "$gateway_script"
@@ -513,6 +585,8 @@ start_editor_gateway() {
   if truthy "$RHWP_ENABLED"; then
     wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${RHWP_STUDIO_BASE_PATH}" "HWPX gateway"
   fi
+  wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_PDF_BASE_PATH}" "PDF gateway"
+  wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_IMAGE_BASE_PATH}" "Image Studio gateway"
 }
 
 run_optional_checks() {
@@ -524,6 +598,7 @@ run_optional_checks() {
   # Finish all build-only work before replacing either long-running service.
   # A static asset failure must leave the currently serving PM2 processes alone.
   prepare_rhwp_static_assets
+  prepare_pdf_runtime
   run_docx_runtime_npm start:native
   run_docx_runtime_npm doctor:native -- --require-installed
   start_editor_gateway
@@ -566,6 +641,7 @@ main() {
   ensure_command node
   ensure_command npm
   ensure_command curl
+  ensure_command sha256sum
   apply_runtime_defaults
   sync_repo "$@"
   install_deps_if_requested
@@ -585,6 +661,7 @@ main() {
   log "HWPX static root: ${EDITOR_GATEWAY_HWPX_STATIC_ROOT}"
   log "DOCX path: ${ACADEMIC_EDITOR_API_ORIGIN}${EDITOR_SERVICE_ROOT}/"
   log "HWPX path: ${ACADEMIC_EDITOR_API_ORIGIN}${RHWP_STUDIO_BASE_PATH}"
+  log "Image Studio path: ${ACADEMIC_EDITOR_API_ORIGIN}${EDITOR_IMAGE_BASE_PATH}"
   log "internal discovery: ${EDITOR_DISCOVERY_SERVER_URL}/hosting/discovery"
   if [ -n "${EDITOR_PUBLIC_URL:-}" ]; then
     log "public url: ${EDITOR_PUBLIC_URL}"

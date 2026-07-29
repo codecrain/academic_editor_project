@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PDFium 기반 Academic PDF 편집기">
+  <meta name="application-name" content="Academic PDF Editor">
+  <title>Academic PDF Editor</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="product-strip">
+    <div class="brand" aria-label="Academic PDF Editor">
+      <span class="brand-mark">A</span>
+      <span>Academic PDF</span>
+      <span class="engine-badge">PDFium</span>
+    </div>
+    <div id="runtimeStatus" role="status">편집 엔진을 준비하는 중…</div>
+  </header>
+  <main id="pdfViewer" aria-label="PDF 편집기"></main>
+  <section id="bootError" class="boot-error" hidden>
+    <strong>PDF 편집기를 시작하지 못했습니다.</strong>
+    <span id="bootErrorMessage"></span>
+  </section>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

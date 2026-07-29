@@ -12,11 +12,13 @@ import { fileURLToPath } from 'node:url';
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
+import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 import { ImageSessionStore } from '../editor_image/image-session-store.mjs';
 
 const formatAdapters = new Map([
   [docxAdapter.format, docxAdapter],
   [hwpxAdapter.format, hwpxAdapter],
+  [pdfAdapter.format, pdfAdapter],
 ]);
 const EditorDocumentStore = docxAdapter.documentStoreClass;
 const DEFAULT_EDITOR_TOKEN_TTL_MS = docxAdapter.defaultDocumentTokenTtlMs;
@@ -40,15 +42,8 @@ const MCP_CELL_PREVIEW_DEFAULT_LIMIT = 3;
 const MCP_CELL_PREVIEW_MAX_LIMIT = 12;
 const STATIC_MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
-  ['.gif', 'image/gif'],
   ['.html', 'text/html; charset=utf-8'],
-  ['.ico', 'image/x-icon'],
-  ['.jpeg', 'image/jpeg'],
   ['.js', 'text/javascript; charset=utf-8'],
-  ['.jpg', 'image/jpeg'],
-  ['.png', 'image/png'],
-  ['.svg', 'image/svg+xml'],
-  ['.webp', 'image/webp'],
   ['.mjs', 'text/javascript; charset=utf-8'],
   ['.json', 'application/json; charset=utf-8'],
   ['.map', 'application/json; charset=utf-8'],
@@ -171,9 +166,14 @@ function isHwpxPath(pathname, hwpxBasePath) {
   return pathname === base || pathname.startsWith(`${base}/`);
 }
 
+function isPdfPath(pathname, pdfBasePath) {
+  const normalizedBasePath = normalizeBasePath(pdfBasePath || '/pdf/');
+  return pathname === normalizedBasePath.slice(0, -1) || pathname.startsWith(normalizedBasePath);
+}
+
 function isImagePath(pathname, imageBasePath) {
-  const base = imageBasePath.replace(/\/$/, '');
-  return pathname === base || pathname.startsWith(`${base}/`);
+  const normalizedBasePath = normalizeBasePath(imageBasePath || '/image/');
+  return pathname === normalizedBasePath.slice(0, -1) || pathname.startsWith(normalizedBasePath);
 }
 
 function resolveStaticPath(staticRoot, basePath, pathname) {
@@ -488,91 +488,6 @@ function editorDocumentApiMatch(pathname) {
   return match ? { action: match[2] || 'item', documentId: match[1] } : null;
 }
 
-function imageSessionApiMatch(pathname) {
-  if (pathname === '/api/image-sessions') return { action: 'collection', sessionId: '' };
-  const match = pathname.match(/^\/api\/image-sessions\/(img_[0-9a-f-]+)\/([A-Za-z0-9_-]{20,})\/(source|export|download)$/);
-  return match ? { action: match[3], sessionId: match[1], token: match[2] } : null;
-}
-
-function imageSessionUrls(config, record) {
-  const sourcePath = `/api/image-sessions/${record.id}/${record.token}/source`;
-  const exportPath = `/api/image-sessions/${record.id}/${record.token}/export`;
-  const downloadPath = `/api/image-sessions/${record.id}/${record.token}/download`;
-  return {
-    sourceUrl: `${config.publicOrigin}${sourcePath}`,
-    exportUrl: `${config.publicOrigin}${exportPath}`,
-    downloadUrl: `${config.publicOrigin}${downloadPath}`,
-    editorUrl: `${config.publicOrigin}${config.imageBasePath}?image=${sourcePath}&save=${exportPath}`,
-  };
-}
-
-function sendImageSessionBytes(res, bytes, mimeType, filename = '') {
-  res.writeHead(200, {
-    'Content-Type': mimeType,
-    'Content-Length': String(bytes.length),
-    'Cache-Control': 'no-store',
-    'Content-Disposition': filename ? `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` : 'inline',
-    'X-Content-Type-Options': 'nosniff',
-  });
-  res.end(bytes);
-}
-
-async function handleImageSessionApi(req, res, config, route) {
-  const store = config.imageSessionStore;
-  try {
-    if (route.action === 'collection' && req.method === 'POST') {
-      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
-      const bytes = Buffer.from(String(body.bytesBase64 || ''), 'base64');
-      const record = store.create({ bytes, filename: body.filename });
-      sendJson(res, 201, {
-        ok: true,
-        sessionId: record.id,
-        filename: record.filename,
-        mimeType: record.sourceMimeType,
-        byteLength: record.sourceBytes.length,
-        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
-        ...imageSessionUrls(config, record),
-      });
-      return true;
-    }
-    const record = store.get(route.sessionId, route.token);
-    if (!record) {
-      sendJson(res, 404, { ok: false, message: 'Image session was not found or the capability token is invalid.' });
-      return true;
-    }
-    if (route.action === 'source' && req.method === 'GET') {
-      sendImageSessionBytes(res, record.sourceBytes, record.sourceMimeType);
-      return true;
-    }
-    if (route.action === 'export' && req.method === 'POST') {
-      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
-      const saved = store.save(record.id, record.token, Buffer.from(String(body.bytesBase64 || ''), 'base64'));
-      sendJson(res, 200, {
-        ok: true,
-        sessionId: saved.id,
-        mimeType: saved.resultMimeType,
-        byteLength: saved.resultBytes.length,
-        downloadUrl: imageSessionUrls(config, saved).downloadUrl,
-      });
-      return true;
-    }
-    if (route.action === 'download' && req.method === 'GET') {
-      if (!record.resultBytes) {
-        sendJson(res, 409, { ok: false, message: 'The image session has no saved result yet.' });
-        return true;
-      }
-      sendImageSessionBytes(res, record.resultBytes, record.resultMimeType, record.filename.replace(/\.[^.]+$/, '.png'));
-      return true;
-    }
-    sendJson(res, 405, { ok: false, message: 'Method not allowed.' });
-    return true;
-  } catch (error) {
-    const status = /exceeds|exceeded/i.test(String(error?.message || '')) ? 413 : 400;
-    sendJson(res, status, { ok: false, message: error instanceof Error ? error.message : String(error) });
-    return true;
-  }
-}
-
 function editorDocumentErrorStatus(error) {
   if (error?.code === 'DOCUMENT_NOT_FOUND') {
     return 404;
@@ -670,7 +585,7 @@ function sendStaticFile(req, res, filePath, headers = {}) {
 }
 
 function isEditorApiPath(pathname) {
-  return /^\/v1\/(?:docx|hwpx)\//.test(pathname);
+  return /^\/v1\/(?:docx|hwpx|pdf)\//.test(pathname);
 }
 
 async function readJsonBody(req, limitBytes) {
@@ -683,6 +598,67 @@ async function readJsonBody(req, limitBytes) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`invalid JSON request body: ${message}`);
+  }
+}
+
+function imageSessionApiMatch(pathname) {
+  if (pathname === '/api/image-sessions') return { action: 'collection', sessionId: '' };
+  const match = pathname.match(/^\/api\/image-sessions\/(img_[0-9a-f-]+)\/([A-Za-z0-9_-]{20,})\/(source|export|download)$/);
+  return match ? { action: match[3], sessionId: match[1], token: match[2] } : null;
+}
+
+function imageSessionUrls(config, record) {
+  const sourcePath = `/api/image-sessions/${record.id}/${record.token}/source`;
+  const exportPath = `/api/image-sessions/${record.id}/${record.token}/export`;
+  const downloadPath = `/api/image-sessions/${record.id}/${record.token}/download`;
+  return {
+    sourceUrl: `${config.publicOrigin}${sourcePath}`,
+    exportUrl: `${config.publicOrigin}${exportPath}`,
+    downloadUrl: `${config.publicOrigin}${downloadPath}`,
+    editorUrl: `${config.publicOrigin}${config.imageBasePath}?image=${sourcePath}&save=${exportPath}`,
+  };
+}
+
+function sendImageSessionBytes(res, bytes, mimeType, filename = '') {
+  res.writeHead(200, {
+    'Content-Type': mimeType,
+    'Content-Length': String(bytes.length),
+    'Cache-Control': 'no-store',
+    'Content-Disposition': filename ? `attachment; filename*=UTF-8''${encodeURIComponent(filename)}` : 'inline',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(bytes);
+}
+
+async function handleImageSessionApi(req, res, config, route) {
+  const store = config.imageSessionStore;
+  try {
+    if (route.action === 'collection' && req.method === 'POST') {
+      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
+      const record = store.create({ bytes: Buffer.from(String(body.bytesBase64 || ''), 'base64'), filename: body.filename });
+      sendJson(res, 201, { ok: true, sessionId: record.id, filename: record.filename, mimeType: record.sourceMimeType, byteLength: record.sourceBytes.length, expiresAt: record.lastAccessedAt + config.imageSessionTtlMs, ...imageSessionUrls(config, record) });
+      return true;
+    }
+    const record = store.get(route.sessionId, route.token);
+    if (!record) { sendJson(res, 404, { ok: false, message: 'Image session was not found or the capability token is invalid.' }); return true; }
+    if (route.action === 'source' && req.method === 'GET') { sendImageSessionBytes(res, record.sourceBytes, record.sourceMimeType); return true; }
+    if (route.action === 'export' && req.method === 'POST') {
+      const body = await readJsonBody(req, Math.ceil(config.imageSessionMaxBytes * 1.4) + 4096);
+      const saved = store.save(record.id, record.token, Buffer.from(String(body.bytesBase64 || ''), 'base64'));
+      sendJson(res, 200, { ok: true, sessionId: saved.id, mimeType: saved.resultMimeType, byteLength: saved.resultBytes.length, downloadUrl: imageSessionUrls(config, saved).downloadUrl });
+      return true;
+    }
+    if (route.action === 'download' && req.method === 'GET') {
+      if (!record.resultBytes) { sendJson(res, 409, { ok: false, message: 'The image session has no saved result yet.' }); return true; }
+      sendImageSessionBytes(res, record.resultBytes, record.resultMimeType, record.filename.replace(/\.[^.]+$/, '.png'));
+      return true;
+    }
+    sendJson(res, 405, { ok: false, message: 'Method not allowed.' });
+    return true;
+  } catch (error) {
+    const status = /exceeds|exceeded/i.test(String(error?.message || '')) ? 413 : 400;
+    sendJson(res, status, { ok: false, message: error instanceof Error ? error.message : String(error) });
+    return true;
   }
 }
 
@@ -1578,6 +1554,13 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 200, { page: pages[0], pages, renderer: 'rhwp-svg' });
       return true;
     }
+    if (fmt === 'pdf') {
+      const saved = await session.save();
+      const rendered = await (config.pdfRenderer || pdfAdapter.renderPages)(saved.bytes, { pages: [pageNumber] });
+      const response = publicRenderedPages(rendered, session.revision);
+      sendJson(res, 200, { ...response, page: response.pages[0] });
+      return true;
+    }
     const rendered = await renderDocxBytes(config, (await session.save()).bytes, [pageNumber]);
     const response = publicRenderedPages(rendered, session.revision);
     sendJson(res, 200, { ...response, page: response.pages[0] });
@@ -1593,6 +1576,12 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 200, { pages: renderHwpxSvgPages(session, hwpxPages), renderer: 'rhwp-svg' });
       return true;
     }
+    if (fmt === 'pdf') {
+      const saved = await session.save();
+      const rendered = await (config.pdfRenderer || pdfAdapter.renderPages)(saved.bytes, { pages });
+      sendJson(res, 200, publicRenderedPages(rendered, session.revision));
+      return true;
+    }
     const rendered = await renderDocxBytes(config, (await session.save()).bytes, pages);
     sendJson(res, 200, publicRenderedPages(rendered, session.revision));
     return true;
@@ -1606,6 +1595,21 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       const pages = renderPageSelection(body, 'first');
       const baselineRendered = await renderDocxBytes(config, record.sourceBytes, pages);
       const currentRendered = await renderDocxBytes(config, (await session.save()).bytes, pages);
+      sendJson(res, 200, {
+        ok: quality.ok,
+        revision: session.revision,
+        quality,
+        baseline: publicRenderedPages(baselineRendered, 1),
+        current: publicRenderedPages(currentRendered, session.revision),
+        visualComparisonRequired: true,
+      });
+      return true;
+    }
+    if (fmt === 'pdf') {
+      const pages = renderPageSelection(body, 'first');
+      const baselineRendered = await (config.pdfRenderer || pdfAdapter.renderPages)(record.sourceBytes, { pages });
+      const currentSaved = await session.save();
+      const currentRendered = await (config.pdfRenderer || pdfAdapter.renderPages)(currentSaved.bytes, { pages });
       sendJson(res, 200, {
         ok: quality.ok,
         revision: session.revision,
@@ -1647,7 +1651,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         timeoutMs: config.hwpxPdfTimeoutMs,
         tempRoot: config.hwpxPdfTempRoot,
       })
-      : await renderDocxBytes(config, sourceBytes, 'none');
+      : fmt === 'pdf'
+        ? await (config.pdfRenderer || pdfAdapter.renderPages)(sourceBytes, { pages: 'none' })
+        : await renderDocxBytes(config, sourceBytes, 'none');
     const pdf = fmt === 'hwpx' ? rendered : rendered.pdf;
     const filename = path.basename(String(body.filename || record.filename || `edited.${fmt}`)).replace(/\.(?:docx|hwpx|pdf)$/i, '') || 'edited';
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : '';
@@ -1674,20 +1680,20 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
 }
 
 async function handleEditorApi(req, res, config, state, pathname) {
-  const openMatch = pathname.match(/^\/v1\/(docx|hwpx)\/(?:documents\/open|sessions)$/);
+  const openMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/(?:documents\/open|sessions)$/);
   if (openMatch) {
     return handleEditorApiOpen(req, res, config, state, openMatch[1]);
   }
-  const collectionMatch = pathname.match(/^\/v1\/(docx|hwpx)\/(?:documents|sessions)$/);
+  const collectionMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/(?:documents|sessions)$/);
   if (collectionMatch) {
     sendJson(res, 405, { ok: false, message: 'Method not allowed. Use POST to open a document.' }, { Allow: 'POST' });
     return true;
   }
-  const documentMatch = pathname.match(/^\/v1\/(docx|hwpx)\/documents\/([^/]+)\/(.+)$/);
+  const documentMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/documents\/([^/]+)\/(.+)$/);
   if (documentMatch) {
     return handleEditorApiAction(req, res, config, state, documentMatch[1], documentMatch[2], documentMatch[3]);
   }
-  const sessionMatch = pathname.match(/^\/v1\/(docx|hwpx)\/sessions\/([^/]+)\/(.+)$/);
+  const sessionMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/sessions\/([^/]+)\/(.+)$/);
   if (sessionMatch) {
     return handleEditorApiAction(req, res, config, state, sessionMatch[1], sessionMatch[2], sessionMatch[3]);
   }
@@ -1725,6 +1731,66 @@ function handleHwpxStaticRequest(req, res, config, pathname) {
   return true;
 }
 
+const PDF_VENDOR_FILES = Object.freeze(new Map([
+  ['pdf.mjs', ['pdfjs-dist', 'legacy', 'build', 'pdf.mjs']],
+  ['pdf.worker.mjs', ['pdfjs-dist', 'legacy', 'build', 'pdf.worker.mjs']],
+  ['pdf-lib.min.js', ['pdf-lib', 'dist', 'pdf-lib.min.js']],
+]));
+
+const PDF_EMBEDPDF_VENDOR_FILE = /^(?:embedpdf(?:-[A-Za-z0-9_-]+)?|browser-[A-Za-z0-9_-]+|direct-engine-[A-Za-z0-9_-]+|worker-engine-[A-Za-z0-9_-]+)\.js$|^pdfium\.wasm$/;
+
+function handlePdfStaticRequest(req, res, config, pathname) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    sendText(res, 405, 'Method not allowed');
+    return true;
+  }
+  const basePath = normalizeBasePath(config.pdfBasePath || '/pdf/');
+  const relative = pathname === basePath.slice(0, -1)
+    ? ''
+    : decodeURIComponent(pathname.slice(basePath.length));
+  if (relative.startsWith('vendor/')) {
+    const embedPdfRelative = relative.slice('vendor/embedpdf/'.length);
+    if (relative.startsWith('vendor/embedpdf/')) {
+      if (!PDF_EMBEDPDF_VENDOR_FILE.test(embedPdfRelative)) {
+        sendText(res, 404, 'Not found');
+        return true;
+      }
+      const filePath = path.join(config.pdfVendorRoot, '@embedpdf', 'snippet', 'dist', embedPdfRelative);
+      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+        sendText(res, 502, 'PDFium editor dependencies are not installed. Run npm install in editor_pdf.');
+        return true;
+      }
+      sendStaticFile(req, res, filePath);
+      return true;
+    }
+    const vendorFile = PDF_VENDOR_FILES.get(relative.slice('vendor/'.length));
+    if (!vendorFile) {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+    const filePath = path.join(config.pdfVendorRoot, ...vendorFile);
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      sendText(res, 502, 'PDF editor dependencies are not installed. Run npm install in editor_pdf.');
+      return true;
+    }
+    sendStaticFile(req, res, filePath);
+    return true;
+  }
+  let filePath = resolveStaticPath(config.pdfStaticRoot, basePath, pathname);
+  if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+    const hasExtension = Boolean(path.extname(pathname));
+    const fallbackPath = path.join(config.pdfStaticRoot, 'index.html');
+    if (!hasExtension && existsSync(fallbackPath) && statSync(fallbackPath).isFile()) {
+      filePath = fallbackPath;
+    } else {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+  }
+  sendStaticFile(req, res, filePath);
+  return true;
+}
+
 const IMAGE_EDITOR_CSP = [
   "default-src 'self' blob: data:",
   "connect-src 'self'",
@@ -1745,44 +1811,23 @@ function debrandImageEditorHtml(html) {
 }
 
 function handleImageStaticRequest(req, res, config, pathname) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    sendText(res, 405, 'Method not allowed');
-    return true;
-  }
-
+  if (req.method !== 'GET' && req.method !== 'HEAD') { sendText(res, 405, 'Method not allowed'); return true; }
   const integrationPath = `${config.imageBasePath}tlooto-image-studio.js`;
   if (pathname === integrationPath) {
     sendStaticFile(req, res, path.join(config.imageIntegrationRoot, 'tlooto-image-studio.js'), {
-      'Content-Security-Policy': IMAGE_EDITOR_CSP,
-      'Referrer-Policy': 'no-referrer',
-      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': IMAGE_EDITOR_CSP, 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
     });
     return true;
   }
   let filePath = resolveStaticPath(config.imageStaticRoot, config.imageBasePath, pathname);
   if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
-    const hasExtension = Boolean(path.extname(pathname));
     const fallbackPath = path.join(config.imageStaticRoot, 'index.html');
-    if (!hasExtension && existsSync(fallbackPath) && statSync(fallbackPath).isFile()) {
-      filePath = fallbackPath;
-    } else {
-      sendText(res, 404, 'Not found');
-      return true;
-    }
+    if (!path.extname(pathname) && existsSync(fallbackPath) && statSync(fallbackPath).isFile()) filePath = fallbackPath;
+    else { sendText(res, 404, 'Not found'); return true; }
   }
-
-  const headers = {
-    'Content-Security-Policy': IMAGE_EDITOR_CSP,
-    'Referrer-Policy': 'no-referrer',
-    'X-Content-Type-Options': 'nosniff',
-  };
-  if (path.extname(filePath).toLowerCase() !== '.html') {
-    sendStaticFile(req, res, filePath, headers);
-    return true;
-  }
-
-  const html = debrandImageEditorHtml(readFileSync(filePath, 'utf8'));
-  sendText(res, 200, html, 'text/html; charset=utf-8', headers);
+  const headers = { 'Content-Security-Policy': IMAGE_EDITOR_CSP, 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
+  if (path.extname(filePath).toLowerCase() !== '.html') { sendStaticFile(req, res, filePath, headers); return true; }
+  sendText(res, 200, debrandImageEditorHtml(readFileSync(filePath, 'utf8')), 'text/html; charset=utf-8', headers);
   return true;
 }
 
@@ -2420,7 +2465,7 @@ function qualityAllowsFinalization(quality, fmt) {
   if (quality?.ok !== true || quality?.stable === false || !Array.isArray(quality?.issues)) {
     return false;
   }
-  if (fmt === 'hwpx') {
+  if (fmt === 'hwpx' || fmt === 'pdf') {
     return quality.issues.every((issue) => issue?.severity !== 'error');
   }
   return quality.issues.every((issue) => issue?.severity === 'info');
@@ -2431,53 +2476,23 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     const store = config.imageSessionStore;
     if (name === 'editor_image_open') {
       const record = store.create({ bytes: Buffer.from(args.bytesBase64, 'base64'), filename: args.filename });
-      return {
-        ok: true,
-        sessionId: record.id,
-        token: record.token,
-        filename: record.filename,
-        mimeType: record.sourceMimeType,
-        byteLength: record.sourceBytes.length,
-        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
-        ...imageSessionUrls(config, record),
-      };
+      return { ok: true, sessionId: record.id, token: record.token, filename: record.filename, mimeType: record.sourceMimeType, byteLength: record.sourceBytes.length, expiresAt: record.lastAccessedAt + config.imageSessionTtlMs, ...imageSessionUrls(config, record) };
     }
     const record = store.get(args.sessionId, args.token);
     if (!record) throw new Error('Image session was not found or the capability token is invalid.');
-    if (name === 'editor_image_session_read') {
-      return {
-        ok: true,
-        sessionId: record.id,
-        token: record.token,
-        filename: record.filename,
-        source: { mimeType: record.sourceMimeType, byteLength: record.sourceBytes.length },
-        result: record.resultBytes ? { mimeType: record.resultMimeType, byteLength: record.resultBytes.length } : null,
-        expiresAt: record.lastAccessedAt + config.imageSessionTtlMs,
-        ...imageSessionUrls(config, record),
-      };
-    }
+    if (name === 'editor_image_session_read') return { ok: true, sessionId: record.id, token: record.token, filename: record.filename, source: { mimeType: record.sourceMimeType, byteLength: record.sourceBytes.length }, result: record.resultBytes ? { mimeType: record.resultMimeType, byteLength: record.resultBytes.length } : null, expiresAt: record.lastAccessedAt + config.imageSessionTtlMs, ...imageSessionUrls(config, record) };
     if (name === 'editor_image_session_result_read') {
       if (!record.resultBytes) throw new Error('The image session has no saved result yet.');
-      return {
-        ok: true,
-        sessionId: record.id,
-        filename: record.filename.replace(/\.[^.]+$/, '.png'),
-        mimeType: record.resultMimeType,
-        byteLength: record.resultBytes.length,
-        sha256: sha256(record.resultBytes),
-        bytesBase64: record.resultBytes.toString('base64'),
-      };
+      return { ok: true, sessionId: record.id, filename: record.filename.replace(/\.[^.]+$/, '.png'), mimeType: record.resultMimeType, byteLength: record.resultBytes.length, sha256: sha256(record.resultBytes), bytesBase64: record.resultBytes.toString('base64') };
     }
     if (name === 'editor_image_session_save') {
       const saved = store.save(record.id, record.token, Buffer.from(args.bytesBase64, 'base64'));
       return { ok: true, sessionId: saved.id, mimeType: saved.resultMimeType, byteLength: saved.resultBytes.length, downloadUrl: imageSessionUrls(config, saved).downloadUrl };
     }
-    if (name === 'editor_image_session_delete') {
-      return { ok: true, sessionId: record.id, deleted: store.delete(record.id, record.token) };
-    }
+    if (name === 'editor_image_session_delete') return { ok: true, sessionId: record.id, deleted: store.delete(record.id, record.token) };
     throw new Error(`Unsupported Image Studio MCP tool: ${name}`);
   }
-  const fmt = name.match(/^editor_(docx|hwpx)_/)?.[1];
+  const fmt = name.match(/^editor_(docx|hwpx|pdf)_/)?.[1];
   if (!fmt) throw new Error(`Unknown editor MCP tool prefix: ${name}`);
   const toolPrefix = `editor_${fmt}`;
   const adapter = formatAdapters.get(fmt);
@@ -2700,13 +2715,13 @@ function createGatewayServer(config) {
     imageIntegrationRoot: path.join(repoRoot, 'editor_image'),
     imageSessionMaxBytes: 25 * 1024 * 1024,
     imageSessionTtlMs: 2 * 60 * 60 * 1000,
+    pdfBasePath: '/pdf/',
+    pdfStaticRoot: path.join(repoRoot, 'editor_pdf', 'public'),
+    pdfVendorRoot: path.join(repoRoot, 'editor_pdf', 'node_modules'),
     ...config,
   };
   config.documentLocks ??= new Map();
-  config.imageSessionStore ??= new ImageSessionStore({
-    maxImageBytes: config.imageSessionMaxBytes,
-    ttlMs: config.imageSessionTtlMs,
-  });
+  config.imageSessionStore ??= new ImageSessionStore({ maxImageBytes: config.imageSessionMaxBytes, ttlMs: config.imageSessionTtlMs });
   const state = {
     lock: '',
     version: 1,
@@ -2729,15 +2744,12 @@ function createGatewayServer(config) {
         return;
       }
 
+      const imageSessionRoute = imageSessionApiMatch(pathname);
+      if (imageSessionRoute && await handleImageSessionApi(req, res, config, imageSessionRoute)) return;
+
       const storedDocumentRoute = editorDocumentApiMatch(pathname);
       if (storedDocumentRoute && config.documentStore) {
         await handleStoredDocumentApi(req, res, config, storedDocumentRoute);
-        return;
-      }
-
-      const imageSessionRoute = imageSessionApiMatch(pathname);
-      if (imageSessionRoute) {
-        await handleImageSessionApi(req, res, config, imageSessionRoute);
         return;
       }
 
@@ -2819,9 +2831,11 @@ function createGatewayServer(config) {
         return;
       }
 
-      if (isImagePath(pathname, config.imageBasePath) && handleImageStaticRequest(req, res, config, pathname)) {
+      if (isPdfPath(pathname, config.pdfBasePath) && handlePdfStaticRequest(req, res, config, pathname)) {
         return;
       }
+
+      if (isImagePath(pathname, config.imageBasePath) && handleImageStaticRequest(req, res, config, pathname)) return;
 
       const targetOrigin = resolveTargetOrigin(req, config);
       if (targetOrigin) {
@@ -2862,6 +2876,7 @@ function buildConfigFromEnv() {
   const docxServiceRoot = normalizeServiceRoot(readEnv('EDITOR_SERVICE_ROOT', '/docx'));
   const hwpxBasePath = normalizeBasePath(readEnv('RHWP_STUDIO_BASE_PATH', '/hwpx/'));
   const imageBasePath = normalizeBasePath(readEnv('EDITOR_IMAGE_BASE_PATH', '/image/'));
+  const pdfBasePath = normalizeBasePath(readEnv('EDITOR_PDF_BASE_PATH', '/pdf/'));
   const publicOrigin = normalizeOrigin(readEnv(
     'ACADEMIC_EDITOR_API_ORIGIN',
     readEnv('EDITOR_GATEWAY_PUBLIC_ORIGIN', `http://${host}:${port}`),
@@ -2895,6 +2910,7 @@ function buildConfigFromEnv() {
     docxServiceRoot,
     hwpxBasePath,
     imageBasePath,
+    pdfBasePath,
     docxRuntimeOrigin: normalizeOrigin(
       readEnv('EDITOR_GATEWAY_DOCX_ORIGIN', `http://127.0.0.1:${readEnv('EDITOR_HOST_PORT', '9980')}`),
     ),
@@ -2902,12 +2918,16 @@ function buildConfigFromEnv() {
     hwpxStaticRoot: path.resolve(
       readEnv('EDITOR_GATEWAY_HWPX_STATIC_ROOT', path.join(repoRoot, 'editor_hwpx', 'rhwp-studio', 'dist')),
     ),
-    imageStaticRoot: path.resolve(
-      readEnv('EDITOR_GATEWAY_IMAGE_STATIC_ROOT', path.join(repoRoot, 'editor_image', 'vendor', 'minipaint')),
-    ),
+    imageStaticRoot: path.resolve(readEnv('EDITOR_GATEWAY_IMAGE_STATIC_ROOT', path.join(repoRoot, 'editor_image', 'vendor', 'minipaint'))),
     imageIntegrationRoot: path.resolve(readEnv('EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT', path.join(repoRoot, 'editor_image'))),
     imageSessionMaxBytes: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_MAX_BYTES', String(25 * 1024 * 1024)), 25 * 1024 * 1024),
     imageSessionTtlMs: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_TTL_MS', String(2 * 60 * 60 * 1000)), 2 * 60 * 60 * 1000),
+    pdfStaticRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_PDF_STATIC_ROOT', path.join(repoRoot, 'editor_pdf', 'public')),
+    ),
+    pdfVendorRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_PDF_VENDOR_ROOT', path.join(repoRoot, 'editor_pdf', 'node_modules')),
+    ),
     wopiBaseUrl,
     sampleDocxPath: path.resolve(readEnv('EDITOR_GATEWAY_SAMPLE_DOCX', DEFAULT_GATEWAY_DOCX)),
     enableSampleDocx: readEnv('EDITOR_GATEWAY_ENABLE_SAMPLE_DOCX', 'false').toLowerCase() === 'true',
@@ -2995,6 +3015,7 @@ export {
   isDocxRuntimePath,
   isHwpxPath,
   isImagePath,
+  isPdfPath,
   normalizeBasePath,
   normalizeServiceRoot,
   main,

@@ -1,6 +1,7 @@
 import { createEditorMcpTools } from '../editor_common/editor-mcp-tool-factory.mjs';
 import { docxAdapter } from './format-adapters/docx-adapter.mjs';
 import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
+import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -18,15 +19,25 @@ const HWPX_MCP_TOOLS = createEditorMcpTools({
   commandOps: hwpxAdapter.commandOps,
 });
 
+const PDF_MCP_TOOLS = createEditorMcpTools({
+  format: 'pdf',
+  commandCategories: pdfAdapter.commandCategories,
+  commandOps: pdfAdapter.commandOps,
+});
+
+const imageSessionProperties = {
+  sessionId: { type: 'string', pattern: '^img_[0-9a-f-]+$' },
+  token: { type: 'string', minLength: 20 },
+};
 const IMAGE_MCP_TOOLS = Object.freeze([
-  { name: 'editor_image_open', description: 'Open trusted local PNG/JPEG/GIF/WebP bytes in the isolated Image Studio and return its capability-scoped editor URL.', inputSchema: { type: 'object', additionalProperties: false, required: ['filename', 'bytesBase64'], properties: { filename: { type: 'string', minLength: 1, maxLength: 128 }, bytesBase64: { type: 'string', minLength: 4 } } } },
-  { name: 'editor_image_session_read', description: 'Read active Image Studio session metadata and capability-scoped URLs without returning image bytes.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: { sessionId: { type: 'string', pattern: '^img_[0-9a-f-]+$' }, token: { type: 'string', minLength: 20 } } } },
-  { name: 'editor_image_session_result_read', description: 'Read saved result bytes and SHA-256 from an active Image Studio session so they can be passed to a document image command.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: { sessionId: { type: 'string', pattern: '^img_[0-9a-f-]+$' }, token: { type: 'string', minLength: 20 } } } },
-  { name: 'editor_image_session_save', description: 'Save trusted local PNG/JPEG/GIF/WebP bytes as the result of an active Image Studio session.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token', 'bytesBase64'], properties: { sessionId: { type: 'string', pattern: '^img_[0-9a-f-]+$' }, token: { type: 'string', minLength: 20 }, bytesBase64: { type: 'string', minLength: 4 } } } },
-  { name: 'editor_image_session_delete', description: 'Discard an active Image Studio session and its in-memory source/result bytes.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: { sessionId: { type: 'string', pattern: '^img_[0-9a-f-]+$' }, token: { type: 'string', minLength: 20 } } } },
+  { name: 'editor_image_open', description: 'Open trusted local PNG/JPEG/GIF/WebP bytes in Image Studio.', inputSchema: { type: 'object', additionalProperties: false, required: ['filename', 'bytesBase64'], properties: { filename: { type: 'string', minLength: 1, maxLength: 128 }, bytesBase64: { type: 'string', minLength: 4 } } } },
+  { name: 'editor_image_session_read', description: 'Read Image Studio session metadata and capability-scoped URLs.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
+  { name: 'editor_image_session_result_read', description: 'Read saved image bytes and SHA-256 for document insertion.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
+  { name: 'editor_image_session_save', description: 'Save trusted local PNG/JPEG/GIF/WebP bytes as the session result.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token', 'bytesBase64'], properties: { ...imageSessionProperties, bytesBase64: { type: 'string', minLength: 4 } } } },
+  { name: 'editor_image_session_delete', description: 'Discard an Image Studio session and its in-memory bytes.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
 ]);
 
-const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS, ...IMAGE_MCP_TOOLS]);
+const EDITOR_MCP_TOOLS = Object.freeze([...DOCX_MCP_TOOLS, ...HWPX_MCP_TOOLS, ...PDF_MCP_TOOLS, ...IMAGE_MCP_TOOLS]);
 
 const toolByName = new Map(EDITOR_MCP_TOOLS.map((tool) => [tool.name, tool]));
 
@@ -232,6 +243,7 @@ export {
   EDITOR_MCP_TOOLS,
   HWPX_MCP_TOOLS,
   IMAGE_MCP_TOOLS,
+  PDF_MCP_TOOLS,
   handleEditorMcpJsonRpc,
   normalizeProtocolVersion,
   redactBinaryFields,

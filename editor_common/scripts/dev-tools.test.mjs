@@ -205,6 +205,7 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(prod, /EDITOR_WOPI_ALIASGROUP3=.*127\.0\.0\.1.*EDITOR_PUBLIC_URL/);
   assert.match(prod, /EDITOR_GATEWAY_PUBLIC_ORIGIN=.*EDITOR_PUBLIC_URL/);
   assert.match(prod, /EDITOR_GATEWAY_HOST=.*0\.0\.0\.0/);
+  assert.match(prod, /EDITOR_NATIVE_AUTO_DEPS=.*true/);
   assert.match(prod, /academic-editor-native/);
   assert.match(prod, /deploy-native-editor\.sh/);
   assert.match(dev, /http:\/\/175\.193\.85\.86:11004/);
@@ -226,6 +227,16 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   assert.match(helper, /repository updated; restarting deployment with the latest script/);
   assert.match(helper, /exec bash "\$0" "\$@"/);
   assert.match(helper, /npm run install:native:artifact/);
+  assert.match(helper, /native_dependencies_ready\(\)/);
+  assert.match(helper, /command -v pdftoppm/);
+  assert.match(helper, /npm run deps:native:runtime/);
+  assert.doesNotMatch(helper, /npm run deps:native\s*$/m);
+  const runtimeInstaller = readProjectFile('editor_docx/scripts/install-native-runtime-deps.sh');
+  assert.match(runtimeInstaller, /poppler-utils/);
+  assert.doesNotMatch(runtimeInstaller, /libcap-dev|build-essential|libpixman-1-dev/);
+  assert.match(helper, /ensure_node_workspace_dependencies\(\)/);
+  assert.match(helper, /dependency-locks/);
+  assert.match(helper, /npm --prefix "\$workspace" ci/);
   assert.match(helper, /ensure_academic_fonts/);
   assert.match(helper, /install_complete=yes/);
   assert.match(helper, /tlooto-academic-substitutions\.conf/);
@@ -241,6 +252,8 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   );
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
+  assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_hwpx" "editor-hwpx"/);
+  assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_hwpx\/rhwp-studio" "editor-hwpx-studio"/);
   assert.match(helper, /npm --prefix "\$ROOT_DIR\/editor_hwpx" run build:studio/);
   assert.doesNotMatch(helper, /npm --prefix "\$ROOT_DIR\/editor_hwpx" run build(?:\s|$)/);
   assert.match(
