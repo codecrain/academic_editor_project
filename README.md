@@ -23,11 +23,14 @@ the open-source tree.
 - Unified DOCX/HWPX/PDF REST and MCP editing contracts.
 - A PDFium browser editor plus transactional PDF API for annotations, forms,
   redaction, page composition, security, attachments, and signing.
+- Self-hosted raster and vector Image Studio routes with flattened and editable
+  project session contracts.
 - A versioned 100-case public-sector HWPX acceptance suite.
 
 DOCX, HWPX, and PDF are separate editor engines. `editor_docx/` owns the
 Collabora/WOPI implementation and `editor_hwpx/` owns RHWP Studio and HWPX
-package mutation. `editor_pdf/` owns PDF.js rendering and PDF overlay editing.
+package mutation. `editor_pdf/` owns PDF.js/Poppler verification, PDFium
+source-object editing, and additive PDF operations.
 Engine code shares only the format-neutral modules in
 `editor_common/` and the HTTP/MCP/WOPI transport in `editor_server/`.
 Repository-wide start, stop, deployment, compliance, and development checks
@@ -87,6 +90,8 @@ stable subpaths:
 - DOCX discovery: `http://127.0.0.1:9980/docx/hosting/discovery`
 - HWP/HWPX Studio: `http://127.0.0.1:11004/hwpx/`
 - PDF editor: `http://127.0.0.1:11004/pdf/`
+- Raster image editor: `http://127.0.0.1:11004/image/`
+- Vector image editor: `http://127.0.0.1:11004/image/vector/`
 
 ## MCP Endpoint
 

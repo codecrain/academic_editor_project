@@ -1,0 +1,24 @@
+:root { color-scheme: dark; font: 13px/1.4 system-ui, sans-serif; background:#111827; color:#f9fafb; }
+* { box-sizing:border-box; }
+body { margin:0; min-width:980px; }
+header { height:48px; display:flex; align-items:center; gap:24px; padding:0 14px; background:#0b1220; border-bottom:1px solid #374151; }
+header strong { font-size:16px; }
+header nav { display:flex; align-items:center; gap:6px; }
+button,.file-button,a { border:1px solid #4b5563; border-radius:5px; background:#1f2937; color:#f9fafb; padding:6px 9px; text-decoration:none; cursor:pointer; }
+button:hover,.file-button:hover,a:hover,button.active { background:#374151; }
+.file-button input { display:none; }
+main { height:calc(100vh - 76px); display:grid; grid-template-columns:132px 1fr 240px; }
+aside { padding:10px; background:#111827; overflow:auto; }
+#tools { border-right:1px solid #374151; display:flex; flex-direction:column; gap:6px; }
+#tools label { display:grid; grid-template-columns:46px 1fr; align-items:center; gap:4px; }
+#tools input[type=number] { width:62px; }
+#stage { overflow:auto; padding:48px; background-color:#252b36; background-image:linear-gradient(45deg,#2f3745 25%,transparent 25%),linear-gradient(-45deg,#2f3745 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#2f3745 75%),linear-gradient(-45deg,transparent 75%,#2f3745 75%); background-size:24px 24px; background-position:0 0,0 12px,12px -12px,-12px 0; }
+.canvas-container { box-shadow:0 12px 40px #0009; background:white; }
+#layers-panel { border-left:1px solid #374151; }
+#layers-panel h2 { font-size:13px; margin:0 0 8px; }
+#layers { list-style:none; margin:0; padding:0; display:flex; flex-direction:column-reverse; gap:4px; }
+#layers li { display:grid; grid-template-columns:28px 1fr 28px; align-items:center; border:1px solid #374151; border-radius:4px; padding:4px; }
+#layers li.selected { border-color:#60a5fa; background:#1e3a5f; }
+#layers button { padding:3px; }
+#status { height:28px; display:block; padding:5px 10px; background:#0b1220; color:#93c5fd; }
+hr { width:100%; border:0; border-top:1px solid #374151; }

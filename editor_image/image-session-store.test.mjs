@@ -18,6 +18,15 @@ test('image session store uses an opaque capability token and keeps source/resul
   const saved = store.save(created.id, created.token, PNG_BYTES);
   assert.equal(saved.resultMimeType, 'image/png');
   assert.equal(saved.resultBytes.equals(PNG_BYTES), true);
+
+  const project = JSON.stringify({
+    info: { width: 1, height: 1 },
+    layers: [{ id: 1, type: 'image', name: 'Layer 1' }],
+    data: [],
+  });
+  const layered = store.saveProject(created.id, created.token, project);
+  assert.equal(layered.projectMimeType, 'application/vnd.tlooto.image-project+json');
+  assert.deepEqual(JSON.parse(layered.projectBytes.toString('utf8')).layers[0].name, 'Layer 1');
 });
 
 test('image session store rejects bytes outside the supported local image boundary', () => {
@@ -25,4 +34,20 @@ test('image session store rejects bytes outside the supported local image bounda
   const store = new ImageSessionStore({ maxImageBytes: 10 });
   assert.throws(() => store.create({ bytes: Buffer.alloc(11), filename: 'too-large.png' }), /exceeds/);
   assert.throws(() => store.create({ bytes: Buffer.from('nope'), filename: 'bad.png' }), /complete PNG/);
+  const projectStore = new ImageSessionStore({ maxProjectBytes: 1000 });
+  const created = projectStore.create({ bytes: PNG_BYTES, filename: 'project.png' });
+  assert.throws(() => projectStore.saveProject(created.id, created.token, '{}'), /info and layers/);
+  assert.throws(
+    () => projectStore.saveProject(created.id, created.token, JSON.stringify({ info: {}, layers: [] })),
+    /numeric canvas dimensions/,
+  );
+  const tinyProjectStore = new ImageSessionStore({ maxProjectBytes: 10 });
+  const tinyCreated = tinyProjectStore.create({ bytes: PNG_BYTES, filename: 'too-large-project.png' });
+  assert.throws(
+    () => tinyProjectStore.saveProject(tinyCreated.id, tinyCreated.token, JSON.stringify({
+      info: { width: 1, height: 1 },
+      layers: [],
+    })),
+    /exceeds/,
+  );
 });

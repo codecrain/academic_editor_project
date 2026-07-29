@@ -58,7 +58,8 @@ test('MCP validates advertised input schemas before executing a tool', async () 
 test('MCP advertises and validates capability-scoped Image Studio tools', async () => {
   assert.deepEqual(IMAGE_MCP_TOOLS.map((tool) => tool.name), [
     'editor_image_open', 'editor_image_session_read', 'editor_image_session_result_read',
-    'editor_image_session_save', 'editor_image_session_delete',
+    'editor_image_session_save', 'editor_image_session_project_save',
+    'editor_image_session_project_read', 'editor_image_session_delete',
   ]);
   const invalid = await handleEditorMcpJsonRpc({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'editor_image_open', arguments: { filename: 'sample.png' } } }, { executeTool: async () => ({ ok: true }) });
   assert.equal(invalid.result.isError, true);

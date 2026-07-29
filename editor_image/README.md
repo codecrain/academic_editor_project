@@ -1,39 +1,72 @@
-# Image Studio foundation
+# Image Studio
 
-`/image/` is the local, non-generative raster image editor that complements the DOCX and HWPX engines. It is deliberately separate from document editing: users can make precise image changes, export the result, and then reinsert the file into a document through the existing document workflows.
+Image Studio is the self-hosted, non-generative image-editing engine beside the
+DOCX, HWPX, and PDF editors.
 
-The first foundation uses the pinned miniPaint source in `vendor/minipaint`. It provides a practical professional raster baseline: layers, masks, selections, brush and clone tools, crop and resize, transforms, color adjustments, filters, text, shapes, compositing, import/export, and undo/redo.
+- `/image/` serves the layer-based raster editor built on pinned miniPaint.
+- `/image/vector/` serves the object-based vector workbench built on pinned
+  Fabric.js.
+- Image-session REST and MCP contracts preserve both a flattened result and an
+  editable layered project.
+
+The target is Photoshop/Illustrator-class local editing, not a claim that the
+current build already implements every Adobe feature. The authoritative,
+testable parity scope and current gaps are tracked in
+[ADOBE_PARITY_MATRIX.md](ADOBE_PARITY_MATRIX.md). A feature is not marked
+complete until it has a UI or MCP entrypoint, survives save/reopen, produces the
+expected rendered output, and has a regression check.
 
 ## Intentional boundaries
 
-- OCR is not included.
-- No OpenAI API or other hosted AI service is invoked.
-- The editor is served with a content-security policy that permits only this gateway origin, `blob:`, and `data:`. The upstream editor's online asset, font, and image-search links therefore cannot send image data to third parties.
-- Semantic generation and broad image rewriting remain a Codex responsibility. This engine focuses on exact, user-controlled local editing that a document agent cannot reliably express through a prompt.
+- OCR is excluded by product decision.
+- Adobe cloud services, Stock, Libraries, collaboration, and Firefly/generative
+  features are excluded. No OpenAI API or hosted image service is invoked.
+- The gateway content-security policy permits only the gateway origin, `blob:`,
+  and `data:`. Image bytes are not sent to third-party search, font, or asset
+  services.
+- Editing is local and deterministic; broad semantic generation remains a
+  Codex responsibility.
 
 ## Run
 
-Start the existing gateway and open `http://127.0.0.1:11004/image/`:
+Install the pinned vector dependency, initialize the pinned raster source, start
+the existing gateway, and open the two editor routes:
 
 ```powershell
-$env:EDITOR_IMAGE_BASE_PATH = '/image/'
-$env:EDITOR_GATEWAY_IMAGE_STATIC_ROOT = "$PWD/editor_image/vendor/minipaint"
+git submodule update --init --recursive editor_image/vendor/minipaint
+npm.cmd --prefix editor_image ci --omit=optional
 node editor_server/editor-gateway.mjs
 ```
 
-The gateway configuration defaults to those same values, so the two environment variables are only needed for a custom deployment path.
+- Raster: `http://127.0.0.1:11004/image/`
+- Vector: `http://127.0.0.1:11004/image/vector/`
 
-## Local image-session bridge
+Production deployment performs the same dependency checks and refuses to
+replace a healthy gateway if either editor's tracked assets are unavailable.
 
-The gateway also exposes an in-memory bridge for opening an existing local image and returning its edited PNG without exposing a global editor token to the browser.
+## Image-session bridge
 
-1. `POST /api/image-sessions` with `{ "filename": "figure.png", "bytesBase64": "..." }`.
-2. Open the returned `editorUrl`. It contains an unguessable, session-scoped capability in its path; miniPaint loads the source bytes automatically.
-3. Use **Save image**. The flattened PNG is retained as the session result and is available at the returned `downloadUrl`.
-4. Use the existing DOCX `image.replace` or `image.insertAfterParagraph` command with those result bytes, then save, reopen, and render the document as usual.
+1. `POST /api/image-sessions` with a filename and PNG/JPEG/GIF/WebP
+   `bytesBase64`.
+2. Open the returned capability-scoped `editorUrl`.
+3. **Save editable project** stores miniPaint JSON without flattening layers.
+4. **Save flattened image** stores the rendered PNG for document insertion.
+5. Read the selected artifact through REST or MCP, then insert it into DOCX or
+   HWPX and perform that document engine's save/reopen/render verification.
 
-Sessions are memory-only, expire after two hours by default, accept only complete PNG/JPEG/GIF/WebP payloads, and cap each source/result at 25 MiB. The browser receives no MCP bearer token and cannot enumerate other sessions.
+Sessions are memory-only, unguessable, expire after two hours by default, and
+cannot be enumerated by the browser. Source/result images are capped at 25 MiB;
+editable projects are capped at 100 MiB.
 
-For Codex, the same bridge is exposed through MCP as `editor_image_open`, `editor_image_session_read`, `editor_image_session_result_read`, `editor_image_session_save`, and `editor_image_session_delete`. `editor_image_session_result_read` returns the saved bytes and SHA-256 only after an explicit save, so Codex can pass the exact bytes to DOCX `image.replace` or `image.insertAfterParagraph`. `editor_image_open` returns the isolated editor URL plus the session capability; it never puts image bytes into the tool-list response or a browser-visible global credential.
+MCP tools:
 
-See [OPEN_SOURCE_NOTICE.md](OPEN_SOURCE_NOTICE.md) for the license and pinned revision.
+- `editor_image_open`
+- `editor_image_session_read`
+- `editor_image_session_save`
+- `editor_image_session_result_read`
+- `editor_image_session_project_save`
+- `editor_image_session_project_read`
+- `editor_image_session_delete`
+
+See [OPEN_SOURCE_NOTICE.md](OPEN_SOURCE_NOTICE.md) for the pinned components and
+license intake rule.

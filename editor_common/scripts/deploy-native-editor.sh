@@ -98,6 +98,7 @@ apply_runtime_defaults() {
   export EDITOR_IMAGE_BASE_PATH="${EDITOR_IMAGE_BASE_PATH:-/image/}"
   export EDITOR_GATEWAY_IMAGE_STATIC_ROOT="${EDITOR_GATEWAY_IMAGE_STATIC_ROOT:-$ROOT_DIR/editor_image/vendor/minipaint}"
   export EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT="${EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT:-$ROOT_DIR/editor_image}"
+  export EDITOR_GATEWAY_IMAGE_VENDOR_ROOT="${EDITOR_GATEWAY_IMAGE_VENDOR_ROOT:-$ROOT_DIR/editor_image/node_modules}"
   export EDITOR_PDF_BASE_PATH="${EDITOR_PDF_BASE_PATH:-/pdf/}"
   export EDITOR_GATEWAY_PDF_STATIC_ROOT="${EDITOR_GATEWAY_PDF_STATIC_ROOT:-$ROOT_DIR/editor_pdf/public}"
   export EDITOR_GATEWAY_PDF_VENDOR_ROOT="${EDITOR_GATEWAY_PDF_VENDOR_ROOT:-$ROOT_DIR/editor_pdf/node_modules}"
@@ -551,6 +552,16 @@ prepare_pdf_runtime() {
     die "PDF editor static assets were not found under $EDITOR_GATEWAY_PDF_STATIC_ROOT"
 }
 
+prepare_image_runtime() {
+  ensure_node_workspace_dependencies "$ROOT_DIR/editor_image" "editor-image" --omit=dev --omit=optional
+  [ -f "$EDITOR_GATEWAY_IMAGE_STATIC_ROOT/index.html" ] ||
+    die "Image Studio static assets were not found under $EDITOR_GATEWAY_IMAGE_STATIC_ROOT"
+  [ -f "$EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT/vector/index.html" ] ||
+    die "Vector Studio static assets were not found under $EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT/vector"
+  [ -f "$EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/fabric/dist/index.min.mjs" ] ||
+    die "Fabric.js runtime was not installed under $EDITOR_GATEWAY_IMAGE_VENDOR_ROOT"
+}
+
 start_editor_gateway() {
   local gateway_script="$ROOT_DIR/editor_server/editor-gateway.mjs"
   [ -f "$gateway_script" ] || die "editor gateway script was not found: $gateway_script"
@@ -574,6 +585,7 @@ start_editor_gateway() {
   EDITOR_IMAGE_BASE_PATH="$EDITOR_IMAGE_BASE_PATH" \
   EDITOR_GATEWAY_IMAGE_STATIC_ROOT="$EDITOR_GATEWAY_IMAGE_STATIC_ROOT" \
   EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT="$EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT" \
+  EDITOR_GATEWAY_IMAGE_VENDOR_ROOT="$EDITOR_GATEWAY_IMAGE_VENDOR_ROOT" \
   EDITOR_PDF_BASE_PATH="$EDITOR_PDF_BASE_PATH" \
   EDITOR_GATEWAY_PDF_STATIC_ROOT="$EDITOR_GATEWAY_PDF_STATIC_ROOT" \
   EDITOR_GATEWAY_PDF_VENDOR_ROOT="$EDITOR_GATEWAY_PDF_VENDOR_ROOT" \
@@ -587,6 +599,7 @@ start_editor_gateway() {
   fi
   wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_PDF_BASE_PATH}" "PDF gateway"
   wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_IMAGE_BASE_PATH}" "Image Studio gateway"
+  wait_for_url "http://127.0.0.1:${EDITOR_GATEWAY_PORT}${EDITOR_IMAGE_BASE_PATH}vector/" "Vector Studio gateway"
 }
 
 run_optional_checks() {
@@ -599,6 +612,7 @@ run_optional_checks() {
   # A static asset failure must leave the currently serving PM2 processes alone.
   prepare_rhwp_static_assets
   prepare_pdf_runtime
+  prepare_image_runtime
   run_docx_runtime_npm start:native
   run_docx_runtime_npm doctor:native -- --require-installed
   start_editor_gateway

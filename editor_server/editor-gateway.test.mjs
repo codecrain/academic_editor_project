@@ -271,6 +271,8 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_image_session_read',
       'editor_image_session_result_read',
       'editor_image_session_save',
+      'editor_image_session_project_save',
+      'editor_image_session_project_read',
       'editor_image_session_delete',
     ]);
     const discardTool = listed.result.tools.find((tool) => tool.name === 'editor_docx_discard');

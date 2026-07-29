@@ -34,6 +34,8 @@ const IMAGE_MCP_TOOLS = Object.freeze([
   { name: 'editor_image_session_read', description: 'Read Image Studio session metadata and capability-scoped URLs.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
   { name: 'editor_image_session_result_read', description: 'Read saved image bytes and SHA-256 for document insertion.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
   { name: 'editor_image_session_save', description: 'Save trusted local PNG/JPEG/GIF/WebP bytes as the session result.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token', 'bytesBase64'], properties: { ...imageSessionProperties, bytesBase64: { type: 'string', minLength: 4 } } } },
+  { name: 'editor_image_session_project_save', description: 'Save the editable layered Image Studio JSON project without flattening its layers.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token', 'bytesBase64'], properties: { ...imageSessionProperties, bytesBase64: { type: 'string', minLength: 4 } } } },
+  { name: 'editor_image_session_project_read', description: 'Read the saved editable layered project bytes and SHA-256 from an active Image Studio session.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
   { name: 'editor_image_session_delete', description: 'Discard an Image Studio session and its in-memory bytes.', inputSchema: { type: 'object', additionalProperties: false, required: ['sessionId', 'token'], properties: imageSessionProperties } },
 ]);
 

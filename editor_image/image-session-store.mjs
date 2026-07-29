@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 
 const DEFAULT_MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const DEFAULT_MAX_PROJECT_BYTES = 100 * 1024 * 1024;
 const DEFAULT_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 
 function bytesStartWith(bytes, signature) {
@@ -29,8 +30,13 @@ function tokenMatches(expected, provided) {
 }
 
 export class ImageSessionStore {
-  constructor({ maxImageBytes = DEFAULT_MAX_IMAGE_BYTES, ttlMs = DEFAULT_SESSION_TTL_MS } = {}) {
+  constructor({
+    maxImageBytes = DEFAULT_MAX_IMAGE_BYTES,
+    maxProjectBytes = DEFAULT_MAX_PROJECT_BYTES,
+    ttlMs = DEFAULT_SESSION_TTL_MS,
+  } = {}) {
     this.maxImageBytes = maxImageBytes;
+    this.maxProjectBytes = maxProjectBytes;
     this.ttlMs = ttlMs;
     this.sessions = new Map();
   }
@@ -53,6 +59,8 @@ export class ImageSessionStore {
       sourceMimeType: mimeType,
       resultBytes: null,
       resultMimeType: '',
+      projectBytes: null,
+      projectMimeType: '',
       createdAt: now,
       lastAccessedAt: now,
     };
@@ -78,6 +86,31 @@ export class ImageSessionStore {
     if (!resultMimeType) throw new Error('Image export supports complete PNG, JPEG, GIF, or WebP bytes only.');
     record.resultBytes = resultBytes;
     record.resultMimeType = resultMimeType;
+    return record;
+  }
+
+  saveProject(id, token, value) {
+    const record = this.get(id, token);
+    if (!record) throw new Error('Image session was not found or the capability token is invalid.');
+    const projectBytes = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(String(value || ''), 'utf8');
+    if (!projectBytes.length) throw new Error('Layered project export requires non-empty JSON bytes.');
+    if (projectBytes.length > this.maxProjectBytes) {
+      throw new Error(`Layered project export exceeds ${this.maxProjectBytes} bytes.`);
+    }
+    let project;
+    try {
+      project = JSON.parse(projectBytes.toString('utf8'));
+    } catch {
+      throw new Error('Layered project export must be valid UTF-8 JSON.');
+    }
+    if (!project || typeof project !== 'object' || !project.info || !Array.isArray(project.layers)) {
+      throw new Error('Layered project export must contain info and layers.');
+    }
+    if (!Number.isFinite(Number(project.info.width)) || !Number.isFinite(Number(project.info.height))) {
+      throw new Error('Layered project export must contain numeric canvas dimensions.');
+    }
+    record.projectBytes = projectBytes;
+    record.projectMimeType = 'application/vnd.tlooto.image-project+json';
     return record;
   }
 

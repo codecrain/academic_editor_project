@@ -603,7 +603,9 @@ async function readJsonBody(req, limitBytes) {
 
 function imageSessionApiMatch(pathname) {
   if (pathname === '/api/image-sessions') return { action: 'collection', sessionId: '' };
-  const match = pathname.match(/^\/api\/image-sessions\/(img_[0-9a-f-]+)\/([A-Za-z0-9_-]{20,})\/(source|export|download)$/);
+  const match = pathname.match(
+    /^\/api\/image-sessions\/(img_[0-9a-f-]+)\/([A-Za-z0-9_-]{20,})\/(source|export|download|project|project-download)$/,
+  );
   return match ? { action: match[3], sessionId: match[1], token: match[2] } : null;
 }
 
@@ -611,11 +613,15 @@ function imageSessionUrls(config, record) {
   const sourcePath = `/api/image-sessions/${record.id}/${record.token}/source`;
   const exportPath = `/api/image-sessions/${record.id}/${record.token}/export`;
   const downloadPath = `/api/image-sessions/${record.id}/${record.token}/download`;
+  const projectExportPath = `/api/image-sessions/${record.id}/${record.token}/project`;
+  const projectDownloadPath = `/api/image-sessions/${record.id}/${record.token}/project-download`;
   return {
     sourceUrl: `${config.publicOrigin}${sourcePath}`,
     exportUrl: `${config.publicOrigin}${exportPath}`,
     downloadUrl: `${config.publicOrigin}${downloadPath}`,
-    editorUrl: `${config.publicOrigin}${config.imageBasePath}?image=${sourcePath}&save=${exportPath}`,
+    projectExportUrl: `${config.publicOrigin}${projectExportPath}`,
+    projectDownloadUrl: `${config.publicOrigin}${projectDownloadPath}`,
+    editorUrl: `${config.publicOrigin}${config.imageBasePath}?image=${sourcePath}&save=${exportPath}&projectSave=${projectExportPath}`,
   };
 }
 
@@ -648,9 +654,34 @@ async function handleImageSessionApi(req, res, config, route) {
       sendJson(res, 200, { ok: true, sessionId: saved.id, mimeType: saved.resultMimeType, byteLength: saved.resultBytes.length, downloadUrl: imageSessionUrls(config, saved).downloadUrl });
       return true;
     }
+    if (route.action === 'project' && req.method === 'POST') {
+      const projectBytes = await readRequestBody(req, config.imageProjectMaxBytes);
+      const saved = store.saveProject(record.id, record.token, projectBytes);
+      sendJson(res, 200, {
+        ok: true,
+        sessionId: saved.id,
+        mimeType: saved.projectMimeType,
+        byteLength: saved.projectBytes.length,
+        downloadUrl: imageSessionUrls(config, saved).projectDownloadUrl,
+      });
+      return true;
+    }
     if (route.action === 'download' && req.method === 'GET') {
       if (!record.resultBytes) { sendJson(res, 409, { ok: false, message: 'The image session has no saved result yet.' }); return true; }
       sendImageSessionBytes(res, record.resultBytes, record.resultMimeType, record.filename.replace(/\.[^.]+$/, '.png'));
+      return true;
+    }
+    if (route.action === 'project-download' && req.method === 'GET') {
+      if (!record.projectBytes) {
+        sendJson(res, 409, { ok: false, message: 'The image session has no saved editable project yet.' });
+        return true;
+      }
+      sendImageSessionBytes(
+        res,
+        record.projectBytes,
+        record.projectMimeType,
+        record.filename.replace(/\.[^.]+$/, '.tlooto-image.json'),
+      );
       return true;
     }
     sendJson(res, 405, { ok: false, message: 'Method not allowed.' });
@@ -1820,6 +1851,40 @@ function debrandImageEditorHtml(html) {
 
 function handleImageStaticRequest(req, res, config, pathname) {
   if (req.method !== 'GET' && req.method !== 'HEAD') { sendText(res, 405, 'Method not allowed'); return true; }
+  const imageBasePath = normalizeBasePath(config.imageBasePath || '/image/');
+  const vectorBasePath = `${imageBasePath}vector/`;
+  if (pathname === vectorBasePath.slice(0, -1)) {
+    res.writeHead(308, { Location: vectorBasePath, 'Cache-Control': 'no-store' });
+    res.end();
+    return true;
+  }
+  if (pathname.startsWith(vectorBasePath)) {
+    const vectorRoot = path.join(config.imageIntegrationRoot, 'vector');
+    const filePath = resolveStaticPath(vectorRoot, vectorBasePath, pathname);
+    if (!filePath || !existsSync(filePath) || !statSync(filePath).isFile()) {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+    sendStaticFile(req, res, filePath, {
+      'Content-Security-Policy': IMAGE_EDITOR_CSP,
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return true;
+  }
+  if (pathname === `${imageBasePath}vendor/fabric.mjs`) {
+    const fabricPath = path.join(config.imageVendorRoot, 'fabric', 'dist', 'index.min.mjs');
+    if (!existsSync(fabricPath) || !statSync(fabricPath).isFile()) {
+      sendText(res, 404, 'Not found');
+      return true;
+    }
+    sendStaticFile(req, res, fabricPath, {
+      'Content-Security-Policy': IMAGE_EDITOR_CSP,
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    return true;
+  }
   const integrationPath = `${config.imageBasePath}tlooto-image-studio.js`;
   if (pathname === integrationPath) {
     sendStaticFile(req, res, path.join(config.imageIntegrationRoot, 'tlooto-image-studio.js'), {
@@ -2497,6 +2562,28 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       const saved = store.save(record.id, record.token, Buffer.from(args.bytesBase64, 'base64'));
       return { ok: true, sessionId: saved.id, mimeType: saved.resultMimeType, byteLength: saved.resultBytes.length, downloadUrl: imageSessionUrls(config, saved).downloadUrl };
     }
+    if (name === 'editor_image_session_project_save') {
+      const saved = store.saveProject(record.id, record.token, Buffer.from(args.bytesBase64, 'base64'));
+      return {
+        ok: true,
+        sessionId: saved.id,
+        mimeType: saved.projectMimeType,
+        byteLength: saved.projectBytes.length,
+        downloadUrl: imageSessionUrls(config, saved).projectDownloadUrl,
+      };
+    }
+    if (name === 'editor_image_session_project_read') {
+      if (!record.projectBytes) throw new Error('The image session has no saved editable project yet.');
+      return {
+        ok: true,
+        sessionId: record.id,
+        filename: record.filename.replace(/\.[^.]+$/, '.tlooto-image.json'),
+        mimeType: record.projectMimeType,
+        byteLength: record.projectBytes.length,
+        sha256: sha256(record.projectBytes),
+        bytesBase64: record.projectBytes.toString('base64'),
+      };
+    }
     if (name === 'editor_image_session_delete') return { ok: true, sessionId: record.id, deleted: store.delete(record.id, record.token) };
     throw new Error(`Unsupported Image Studio MCP tool: ${name}`);
   }
@@ -2721,7 +2808,9 @@ function createGatewayServer(config) {
     imageBasePath: '/image/',
     imageStaticRoot: path.join(repoRoot, 'editor_image', 'vendor', 'minipaint'),
     imageIntegrationRoot: path.join(repoRoot, 'editor_image'),
+    imageVendorRoot: path.join(repoRoot, 'editor_image', 'node_modules'),
     imageSessionMaxBytes: 25 * 1024 * 1024,
+    imageProjectMaxBytes: 100 * 1024 * 1024,
     imageSessionTtlMs: 2 * 60 * 60 * 1000,
     pdfBasePath: '/pdf/',
     pdfStaticRoot: path.join(repoRoot, 'editor_pdf', 'public'),
@@ -2729,7 +2818,11 @@ function createGatewayServer(config) {
     ...config,
   };
   config.documentLocks ??= new Map();
-  config.imageSessionStore ??= new ImageSessionStore({ maxImageBytes: config.imageSessionMaxBytes, ttlMs: config.imageSessionTtlMs });
+  config.imageSessionStore ??= new ImageSessionStore({
+    maxImageBytes: config.imageSessionMaxBytes,
+    maxProjectBytes: config.imageProjectMaxBytes,
+    ttlMs: config.imageSessionTtlMs,
+  });
   const state = {
     lock: '',
     version: 1,
@@ -2928,7 +3021,14 @@ function buildConfigFromEnv() {
     ),
     imageStaticRoot: path.resolve(readEnv('EDITOR_GATEWAY_IMAGE_STATIC_ROOT', path.join(repoRoot, 'editor_image', 'vendor', 'minipaint'))),
     imageIntegrationRoot: path.resolve(readEnv('EDITOR_GATEWAY_IMAGE_INTEGRATION_ROOT', path.join(repoRoot, 'editor_image'))),
+    imageVendorRoot: path.resolve(
+      readEnv('EDITOR_GATEWAY_IMAGE_VENDOR_ROOT', path.join(repoRoot, 'editor_image', 'node_modules')),
+    ),
     imageSessionMaxBytes: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_MAX_BYTES', String(25 * 1024 * 1024)), 25 * 1024 * 1024),
+    imageProjectMaxBytes: parsePositiveInteger(
+      readEnv('EDITOR_IMAGE_PROJECT_MAX_BYTES', String(100 * 1024 * 1024)),
+      100 * 1024 * 1024,
+    ),
     imageSessionTtlMs: parsePositiveInteger(readEnv('EDITOR_IMAGE_SESSION_TTL_MS', String(2 * 60 * 60 * 1000)), 2 * 60 * 60 * 1000),
     pdfStaticRoot: path.resolve(
       readEnv('EDITOR_GATEWAY_PDF_STATIC_ROOT', path.join(repoRoot, 'editor_pdf', 'public')),

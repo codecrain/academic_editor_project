@@ -1,6 +1,7 @@
 (() => {
   const params = new URLSearchParams(window.location.search);
   const saveUrl = params.get('save');
+  const projectSaveUrl = params.get('projectSave');
   if (!saveUrl) return;
 
   function status(message, isError = false) {
@@ -29,31 +30,62 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.message || `Save failed (${response.status}).`);
-    status(`Saved ${payload.byteLength.toLocaleString()} bytes as PNG.`);
+    status(`Saved ${payload.byteLength.toLocaleString()} bytes as a flattened PNG.`);
   }
 
-  window.addEventListener('load', () => {
-    const controls = document.querySelector('.logo')?.parentElement;
-    if (!controls) return;
+  async function saveLayeredProject() {
+    if (!projectSaveUrl) throw new Error('This session does not provide layered-project storage.');
+    if (!window.FileSave || typeof window.FileSave.export_as_json !== 'function') {
+      throw new Error('The layered document model is not ready yet.');
+    }
+    const response = await fetch(projectSaveUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: window.FileSave.export_as_json(),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || `Layered save failed (${response.status}).`);
+    status(`Saved editable project (${payload.byteLength.toLocaleString()} bytes).`);
+  }
+
+  function createActionButton({ id, text, title, action }) {
     const button = document.createElement('button');
     button.type = 'button';
-    button.id = 'tlooto-image-save';
-    button.textContent = 'Save image';
-    button.title = 'Save the current flattened PNG to this local image session';
+    button.id = id;
+    button.textContent = text;
+    button.title = title;
     button.addEventListener('click', async () => {
       button.disabled = true;
       status('Saving…');
       try {
-        await saveCurrentCanvas();
+        await action();
       } catch (error) {
         status(error instanceof Error ? error.message : String(error), true);
       } finally {
         button.disabled = false;
       }
     });
+    return button;
+  }
+
+  window.addEventListener('load', () => {
+    const controls = document.querySelector('.logo')?.parentElement;
+    if (!controls) return;
+    const projectButton = createActionButton({
+      id: 'tlooto-image-save-project',
+      text: 'Save editable project',
+      title: 'Save all editable layers, text, shapes, guides, and image data',
+      action: saveLayeredProject,
+    });
+    const imageButton = createActionButton({
+      id: 'tlooto-image-save',
+      text: 'Save flattened image',
+      title: 'Save the current flattened PNG to this local image session',
+      action: saveCurrentCanvas,
+    });
     const message = document.createElement('span');
     message.id = 'tlooto-image-save-status';
     message.style.cssText = 'margin-left:8px;font-size:12px';
-    controls.append(button, message);
+    controls.append(projectButton, imageButton, message);
   });
 })();

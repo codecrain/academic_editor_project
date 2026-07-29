@@ -1,0 +1,11 @@
+{
+  "name": "@academic-editor/image",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "fabric": "7.4.0"
+  },
+  "scripts": {
+    "test": "node --test *.test.mjs scripts/*.test.mjs"
+  }
+}

@@ -252,6 +252,11 @@ test('ubuntu deployment entrypoints wrap the native runtime checks', () => {
   );
   assert.match(helper, /run_docx_runtime_npm start:native/);
   assert.match(helper, /prepare_rhwp_static_assets/);
+  assert.match(helper, /prepare_image_runtime/);
+  assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_image" "editor-image" --omit=dev --omit=optional/);
+  assert.match(helper, /EDITOR_GATEWAY_IMAGE_VENDOR_ROOT/);
+  assert.match(helper, /fabric\/dist\/index\.min\.mjs/);
+  assert.match(helper, /EDITOR_IMAGE_BASE_PATH\}vector\//);
   assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_hwpx" "editor-hwpx"/);
   assert.match(helper, /ensure_node_workspace_dependencies "\$ROOT_DIR\/editor_hwpx\/rhwp-studio" "editor-hwpx-studio"/);
   assert.match(helper, /npm --prefix "\$ROOT_DIR\/editor_hwpx" run build:studio/);
