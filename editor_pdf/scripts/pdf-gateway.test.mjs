@@ -41,6 +41,28 @@ test('gateway serves the PDF editor and only its pinned vendor entrypoints on /p
     const html = await fetch(`${origin}/pdf/`);
     assert.equal(html.status, 200);
     assert.match(await html.text(), /Academic PDF Editor/);
+    const browserCookie = html.headers.get('set-cookie');
+    assert.match(browserCookie, /academic_pdf_session=/);
+    assert.match(browserCookie, /HttpOnly/);
+    assert.match(browserCookie, /SameSite=Strict/);
+    const deniedBrowserApi = await fetch(`${origin}/pdf/api/documents/open`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, 'sec-fetch-site': 'same-origin' },
+      body: JSON.stringify({ filename: 'sample.pdf', source: { bytesBase64: (await samplePdf()).toString('base64') } }),
+    });
+    assert.equal(deniedBrowserApi.status, 403);
+    const browserOpened = await fetch(`${origin}/pdf/api/documents/open`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: browserCookie.split(';', 1)[0],
+        origin,
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify({ filename: 'sample.pdf', source: { bytesBase64: (await samplePdf()).toString('base64') } }),
+    });
+    assert.equal(browserOpened.status, 200);
+    assert.equal((await browserOpened.json()).fmt, 'pdf');
     const pdfjs = await fetch(`${origin}/pdf/vendor/pdf.mjs`);
     assert.equal(pdfjs.status, 200);
     assert.match(pdfjs.headers.get('content-type'), /text\/javascript/);
@@ -106,18 +128,41 @@ test('gateway exposes revision-bound PDF open, apply, quality, render, and save'
     });
     assert.equal(opened.fmt, 'pdf');
     assert.equal(opened.revision, 1);
-    const applied = await post(`/v1/pdf/documents/${opened.documentId}/commands/apply`, {
+    const inventory = await post(`/v1/pdf/documents/${opened.documentId}/object/inventory`, {});
+    const target = inventory.textObjects.find((object) => object.text === 'Gateway PDF API acceptance');
+    assert.ok(target);
+    await post(`/v1/pdf/documents/${opened.documentId}/target/inspect`, {
+      locations: [{ page: target.page, objectId: target.id, objectIndex: target.objectIndex }],
+    });
+    const replaced = await post(`/v1/pdf/documents/${opened.documentId}/commands/apply`, {
       baseRevision: 1,
+      commands: [{
+        op: 'text.replaceObject',
+        page: target.page,
+        objectIndex: target.objectIndex,
+        objectId: target.id,
+        expectedText: target.text,
+        text: 'Gateway object editing verified',
+      }],
+    });
+    assert.equal(replaced.revision, 2);
+    const applied = await post(`/v1/pdf/documents/${opened.documentId}/commands/apply`, {
+      baseRevision: 2,
       commands: [{ op: 'text.add', page: 1, x: 48, y: 90, text: '검토 완료', fontSize: 14 }],
     });
-    assert.equal(applied.revision, 2);
-    const quality = await post(`/v1/pdf/documents/${opened.documentId}/quality/check`, { baseRevision: 2 });
+    assert.equal(applied.revision, 3);
+    const quality = await post(`/v1/pdf/documents/${opened.documentId}/quality/check`, { baseRevision: 3 });
     assert.equal(quality.ok, true, JSON.stringify(quality));
+    const buffered = await post(`/v1/pdf/documents/${opened.documentId}/documents/save-buffer`, {
+      baseRevision: 3,
+      filename: 'edited.pdf',
+    });
+    assert.equal(Buffer.from(buffered.bytesBase64, 'base64').subarray(0, 5).toString(), '%PDF-');
     const rendered = await post(`/v1/pdf/documents/${opened.documentId}/pages/render-page`, { page: 1 });
     assert.equal(rendered.renderer, 'poppler-pdftoppm');
     assert.equal(rendered.page.mimeType, 'image/png');
     const saved = await post(`/v1/pdf/documents/${opened.documentId}/documents/save-source`, {
-      baseRevision: 2,
+      baseRevision: 3,
       filename: 'edited.pdf',
       outputPath,
     });

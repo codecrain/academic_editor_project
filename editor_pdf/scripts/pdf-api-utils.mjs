@@ -1,16 +1,19 @@
 import { createHash } from 'node:crypto';
 
-import { createCanvas } from '@napi-rs/canvas';
 import {
   degrees,
   PDFDocument,
   rgb,
-  StandardFonts,
 } from 'pdf-lib';
 import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { P12Signer, PDF as LibPDF } from '@libpdf/core';
 
 import { validatePdfCommands } from './pdf-command-catalog.mjs';
+import {
+  applyPdfObjectCommands,
+  inspectPdfObjects,
+  listPdfFonts,
+} from './pdfium-object-editor.mjs';
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
@@ -89,43 +92,24 @@ async function inspectPdfBytes(bytes) {
   }
 }
 
-function renderTextPng(text, fontSize, color) {
-  const scale = 2;
-  const lines = String(text).split(/\r?\n/).slice(0, 100);
-  const safeLines = lines.length ? lines : [' '];
-  const lineHeight = fontSize * 1.32;
-  const measureCanvas = createCanvas(8, 8);
-  const measure = measureCanvas.getContext('2d');
-  measure.font = `${fontSize * scale}px "Noto Sans KR", "Malgun Gothic", Arial, sans-serif`;
-  const width = Math.max(1, ...safeLines.map((line) => measure.measureText(line || ' ').width));
-  const canvas = createCanvas(Math.ceil(width + 4 * scale), Math.ceil(lineHeight * safeLines.length * scale + 2 * scale));
-  const context = canvas.getContext('2d');
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.font = `${fontSize * scale}px "Noto Sans KR", "Malgun Gothic", Arial, sans-serif`;
-  context.textBaseline = 'top';
-  context.fillStyle = normalizeHexColor(color, '#172033');
-  safeLines.forEach((line, index) => context.fillText(line, 2 * scale, index * lineHeight * scale));
-  return {
-    bytes: canvas.toBuffer('image/png'),
-    width: canvas.width / scale,
-    height: canvas.height / scale,
-  };
-}
-
 class PdfApiSession {
   static async create(sourceBytes) {
     const bytes = ensurePdfBytes(sourceBytes);
-    const [pdfDoc, inspection] = await Promise.all([
+    const [pdfDoc, inspection, objectInspection, fonts] = await Promise.all([
       PDFDocument.load(bytes, { ignoreEncryption: false, updateMetadata: false }),
       inspectPdfBytes(bytes),
+      inspectPdfObjects(bytes),
+      listPdfFonts(),
     ]);
-    return new PdfApiSession(bytes, pdfDoc, inspection);
+    return new PdfApiSession(bytes, pdfDoc, inspection, objectInspection, fonts);
   }
 
-  constructor(sourceBytes, pdfDoc, inspection) {
+  constructor(sourceBytes, pdfDoc, inspection, objectInspection, fonts) {
     this.sourceBytes = Buffer.from(sourceBytes);
     this.pdfDoc = pdfDoc;
     this.inspection = inspection;
+    this.objectInspection = objectInspection;
+    this.fonts = fonts;
     this.revision = 1;
     this.changes = [];
     this.helvetica = null;
@@ -158,7 +142,10 @@ class PdfApiSession {
           })),
         ],
         annotations: this.changes.filter((change) => ['highlight.add', 'ink.add'].includes(change.op)),
+        textObjects: this.objectInspection.textObjects,
+        pageObjects: this.objectInspection.objects,
       },
+      fonts: this.fonts.map(({ filePath, ...font }) => font),
       warnings: this.sourceBytes.includes(Buffer.from('/Type /Sig')) ? [{
         code: 'existing_digital_signature',
         severity: 'warning',
@@ -169,17 +156,32 @@ class PdfApiSession {
 
   targetMap() {
     return {
-      paragraphs: this.inspection.blocks.map((block, index) => ({
-        id: block.id,
+      paragraphs: this.objectInspection.textObjects.map((object) => ({
+        id: object.id,
         kind: 'paragraph',
-        location: { page: index + 1, objectId: block.id, paragraph: { section: index, number: 0 } },
-        textLength: block.text.length,
+        location: { page: object.page, objectId: object.id, objectIndex: object.objectIndex },
+        textLength: object.text.length,
+        fontFamily: object.fontFamily,
+        fontSize: object.fontSize,
+        bounds: object.editorBounds,
       })),
       cells: [],
     };
   }
 
   inspectTarget(location = {}) {
+    if (location.objectId || location.objectIndex !== undefined) {
+      const object = location.objectId
+        ? this.objectInspection.objects.find((candidate) => candidate.id === String(location.objectId))
+        : this.objectInspection.objects.find((candidate) => candidate.page === Number(location.page) && candidate.objectIndex === Number(location.objectIndex));
+      if (!object) throw new Error(`PDF object target ${location.objectId || `${location.page}:${location.objectIndex}`} does not exist.`);
+      return {
+        revision: this.revision,
+        location: { page: object.page, objectId: object.id, objectIndex: object.objectIndex },
+        id: object.id,
+        ...object,
+      };
+    }
     const pageNumber = Number(location.page ?? Number(location.paragraph?.section) + 1);
     const block = this.inspection.blocks[pageNumber - 1];
     if (!block) throw new Error(`PDF target page ${pageNumber} does not exist.`);
@@ -193,15 +195,25 @@ class PdfApiSession {
   }
 
   resolveText(query) {
-    const matches = this.inspection.blocks.filter((block) => block.text.includes(String(query)));
-    if (matches.length !== 1) throw new Error(`PDF target query matched ${matches.length} pages; provide a unique query.`);
-    const page = this.inspection.blocks.indexOf(matches[0]) + 1;
-    return { id: matches[0].id, location: { page, objectId: matches[0].id, paragraph: { section: page - 1, number: 0 } } };
+    const matches = this.objectInspection.textObjects.filter((object) => object.text.includes(String(query)));
+    if (matches.length !== 1) throw new Error(`PDF target query matched ${matches.length} text objects; provide a unique query.`);
+    const object = matches[0];
+    return { id: object.id, location: { page: object.page, objectId: object.id, objectIndex: object.objectIndex } };
   }
 
   objectInventory() {
     const graph = this.readJson().objectGraph;
-    return { images: graph.images, annotations: graph.annotations, imageCount: graph.images.length };
+    return {
+      images: graph.images,
+      annotations: graph.annotations,
+      pageObjects: graph.pageObjects,
+      textObjects: graph.textObjects,
+      imageObjects: this.objectInspection.imageObjects,
+      fonts: this.fonts.map(({ filePath, ...font }) => font),
+      imageCount: graph.images.length,
+      textObjectCount: graph.textObjects.length,
+      pageObjectCount: graph.pageObjects.length,
+    };
   }
 
   async apply(commands) {
@@ -227,28 +239,10 @@ class PdfApiSession {
         throw new Error(`${command.op} is blocked on rotated PDF page ${command.page} until rotation-aware object coordinates are available.`);
       }
       const pageHeight = page?.getHeight();
-      if (command.op === 'text.add') {
-        const isLatin1 = /^[\x00-\xff]*$/.test(command.text);
-        if (isLatin1) {
-          const helvetica = await candidate.embedFont(StandardFonts.Helvetica);
-          page.drawText(command.text, {
-            x: command.x,
-            y: pageHeight - command.y - command.fontSize,
-            size: command.fontSize,
-            font: helvetica,
-            color: pdfColor(command.color, '#172033'),
-            lineHeight: command.fontSize * 1.32,
-          });
-        } else {
-          const rendered = renderTextPng(command.text, command.fontSize, command.color);
-          const image = await candidate.embedPng(rendered.bytes);
-          page.drawImage(image, {
-            x: command.x,
-            y: pageHeight - command.y - rendered.height,
-            width: rendered.width,
-            height: rendered.height,
-          });
-        }
+      if (['text.add', 'text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete'].includes(command.op)) {
+        const intermediate = Buffer.from(await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false }));
+        const edited = await applyPdfObjectCommands(intermediate, [command]);
+        candidate = await PDFDocument.load(edited.bytes, { ignoreEncryption: false, updateMetadata: false });
       } else if (command.op === 'highlight.add') {
         page.drawRectangle({
           x: command.x,
@@ -361,9 +355,13 @@ class PdfApiSession {
       });
     }
     const candidateBytes = Buffer.from(await candidate.save({ useObjectStreams: true, addDefaultPage: false, updateFieldAppearances: false }));
-    const candidateInspection = await inspectPdfBytes(candidateBytes);
+    const [candidateInspection, candidateObjectInspection] = await Promise.all([
+      inspectPdfBytes(candidateBytes),
+      inspectPdfObjects(candidateBytes),
+    ]);
     this.pdfDoc = candidate;
     this.inspection = candidateInspection;
+    this.objectInspection = candidateObjectInspection;
     this.protection = candidateProtection;
     this.sealedBytes = candidateSealedBytes;
     this.helvetica = null;

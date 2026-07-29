@@ -74,7 +74,7 @@ test('documented command lists match executable catalogs exactly', () => {
     textBlockAfter(canonical.get('docs/PDF_EDITOR.md'), '## Supported commands'),
     PDF_COMMAND_OPS,
   );
-  assert.equal(PDF_COMMAND_OPS.length, 19);
+  assert.equal(PDF_COMMAND_OPS.length, 23);
 });
 
 test('documented MCP tool lists match executable HWPX and PDF tools', () => {

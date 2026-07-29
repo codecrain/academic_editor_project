@@ -30,9 +30,13 @@ test('PDF command catalog exposes implemented additive and advanced operations',
   const catalog = getPdfCommandCatalog();
   assert.deepEqual(catalog.commands.map((entry) => entry.op), [
     'text.add',
+    'text.replaceObject',
     'highlight.add',
     'ink.add',
     'image.add',
+    'image.replaceObject',
+    'object.transform',
+    'object.delete',
     'signature.addAppearance',
     'signature.addDigital',
     'page.rotate',
@@ -49,7 +53,56 @@ test('PDF command catalog exposes implemented additive and advanced operations',
     'security.encrypt',
     'security.remove',
   ]);
-  assert.throws(() => validatePdfCommands([{ op: 'text.replaceObject', page: 1 }]), /Unsupported PDF command/);
+  assert.throws(() => validatePdfCommands([{ op: 'text.replaceObject', page: 1 }]), /objectIndex is required/);
+});
+
+test('PDF session replaces existing text with an embedded Korean open font', async () => {
+  const session = await PdfApiSession.create(await samplePdf());
+  const target = session.objectInventory().textObjects.find((object) => object.text === 'Original content remains intact.');
+  assert.ok(target, 'expected an editable PDF text object');
+  const notoVariants = session.objectInventory().fonts.filter((font) => font.label === 'Noto Sans KR' && font.license === 'OFL-1.1');
+  assert.ok(notoVariants.length >= 7, `expected bundled Korean font weights, found ${notoVariants.length}`);
+  assert.ok(notoVariants.some((font) => font.style === 'Regular' && font.weight === 400));
+  assert.ok(notoVariants.some((font) => font.style === 'Bold' && font.weight === 700));
+
+  await session.apply([{
+    op: 'text.replaceObject',
+    page: target.page,
+    objectIndex: target.objectIndex,
+    objectId: target.id,
+    expectedText: target.text,
+    text: '한글 본문 교체 완료',
+    fontFamily: 'Noto Sans KR',
+    fontSize: 13,
+    color: '#17336a',
+  }]);
+
+  const edited = session.objectInventory().textObjects.find((object) => object.text === '한글 본문 교체 완료');
+  assert.equal(edited.fontFamily, 'Noto Sans KR');
+  assert.equal(edited.embeddedFont, true);
+  assert.equal(edited.fillColor.hex, '#17336a');
+  const reopened = await PdfApiSession.create((await session.save()).bytes);
+  assert.equal(reopened.objectInventory().textObjects.some((object) => object.text === '한글 본문 교체 완료'), true);
+});
+
+test('PDF session adds searchable Korean text as an embedded text object, not a raster image', async () => {
+  const session = await PdfApiSession.create(await samplePdf());
+  const imageCountBefore = session.objectInventory().imageObjects.length;
+  await session.apply([{
+    op: 'text.add',
+    page: 1,
+    x: 48,
+    y: 100,
+    text: '새 한글 본문',
+    fontFamily: 'noto-sans-kr-notosanskr-bold',
+    fontSize: 15,
+    color: '#172033',
+  }]);
+  const added = session.objectInventory().textObjects.find((object) => object.text === '새 한글 본문');
+  assert.ok(added);
+  assert.equal(added.fontFamily, 'Noto Sans KR');
+  assert.equal(added.embeddedFont, true);
+  assert.equal(session.objectInventory().imageObjects.length, imageCountBefore);
 });
 
 test('PDF session applies additive edits and survives save, independent reopen, and render', async () => {

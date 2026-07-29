@@ -7,7 +7,7 @@ test('/pdf UI boots the pinned PDFium editor with advanced editing categories', 
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
   ]);
-  for (const expected of ['id="pdfViewer"', 'Academic PDF', 'PDFium', 'id="runtimeStatus"']) {
+  for (const expected of ['id="pdfViewer"', 'Academic PDF', 'PDFium', 'id="runtimeStatus"', 'id="objectEditorButton"', '본문·이미지 편집', 'id="fontFamily"']) {
     assert.match(html, new RegExp(expected));
   }
   assert.match(source, /import EmbedPDF from '\.\/vendor\/embedpdf\/embedpdf\.js'/);
@@ -15,5 +15,8 @@ test('/pdf UI boots the pinned PDFium editor with advanced editing categories', 
   assert.match(source, /annotations:/);
   assert.match(source, /enforceDocumentPermissions: true/);
   assert.match(source, /window\.academicPdfEditor/);
+  assert.match(source, /text\.replaceObject/);
+  assert.match(source, /image\.replaceObject/);
+  assert.match(source, /documents\/save-buffer/);
   assert.doesNotMatch(source, /https?:\/\//);
 });

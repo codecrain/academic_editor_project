@@ -477,6 +477,56 @@ function authorizeInternalRoute(req, res, config) {
   return true;
 }
 
+const PDF_BROWSER_SESSION_COOKIE = 'academic_pdf_session';
+const PDF_BROWSER_SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+
+function requestCookies(req) {
+  return Object.fromEntries(String(getHeader(req, 'cookie') || '')
+    .split(';')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const separator = part.indexOf('=');
+      return separator === -1
+        ? [decodeURIComponent(part), '']
+        : [decodeURIComponent(part.slice(0, separator)), decodeURIComponent(part.slice(separator + 1))];
+    }));
+}
+
+function issuePdfBrowserSession(state, config) {
+  state.pdfBrowserSessions ??= new Map();
+  const now = Date.now();
+  for (const [token, lastAccessedAt] of state.pdfBrowserSessions) {
+    if (now - lastAccessedAt > PDF_BROWSER_SESSION_TTL_MS) state.pdfBrowserSessions.delete(token);
+  }
+  while (state.pdfBrowserSessions.size >= 200) {
+    state.pdfBrowserSessions.delete(state.pdfBrowserSessions.keys().next().value);
+  }
+  const token = randomBytes(32).toString('base64url');
+  state.pdfBrowserSessions.set(token, now);
+  const secure = String(config.publicOrigin || '').startsWith('https:') ? '; Secure' : '';
+  return `${PDF_BROWSER_SESSION_COOKIE}=${encodeURIComponent(token)}; Path=${normalizeBasePath(config.pdfBasePath || '/pdf/')}; Max-Age=${Math.floor(PDF_BROWSER_SESSION_TTL_MS / 1000)}; HttpOnly; SameSite=Strict${secure}`;
+}
+
+function authorizePdfBrowserSession(req, res, config, state) {
+  const token = requestCookies(req)[PDF_BROWSER_SESSION_COOKIE];
+  const lastAccessedAt = state.pdfBrowserSessions?.get(token);
+  const requestOrigin = String(getHeader(req, 'origin') || '');
+  const configuredOrigin = new URL(config.publicOrigin).origin;
+  const forwardedProtocol = String(getHeader(req, 'x-forwarded-proto') || '').split(',', 1)[0].trim();
+  const requestProtocol = forwardedProtocol || new URL(config.publicOrigin).protocol.slice(0, -1);
+  const hostOrigin = getHeader(req, 'host') ? `${requestProtocol}://${getHeader(req, 'host')}` : '';
+  const sameOrigin = [configuredOrigin, hostOrigin].includes(requestOrigin)
+    && String(getHeader(req, 'sec-fetch-site') || 'same-origin') === 'same-origin';
+  if (!token || !lastAccessedAt || Date.now() - lastAccessedAt > PDF_BROWSER_SESSION_TTL_MS || !sameOrigin) {
+    if (token) state.pdfBrowserSessions?.delete(token);
+    sendJson(res, 403, { ok: false, message: 'Open /pdf/ again to create a valid same-origin PDF editing session.' });
+    return false;
+  }
+  state.pdfBrowserSessions.set(token, Date.now());
+  return true;
+}
+
 function editorDocumentApiMatch(pathname) {
   if (pathname === '/api/documents') {
     return { action: 'collection', documentId: '' };
@@ -1560,6 +1610,22 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     });
     return true;
   }
+  if (actionPath === 'documents/save-buffer') {
+    assertMutationPreconditions(record, 'save-source', body);
+    const saved = await session.save();
+    sendJson(res, 200, {
+      ok: true,
+      revision: saved.revision,
+      filename: path.basename(String(body.filename || record.filename || `edited.${fmt}`)),
+      mimeType: fmt === 'pdf' ? 'application/pdf' : 'application/octet-stream',
+      bytesBase64: saved.bytes.toString('base64'),
+      byteLength: saved.bytes.length,
+      sha256: sha256(saved.bytes),
+      validation: saved.validation,
+      verified: true,
+    });
+    return true;
+  }
   if (actionPath === 'quality/check' || actionPath === 'health/check') {
     const { baseRevision } = assertMutationPreconditions(record, 'quality-check', body);
     const quality = await session.qualityCheck({
@@ -1770,7 +1836,7 @@ const PDF_VENDOR_FILES = Object.freeze(new Map([
 
 const PDF_EMBEDPDF_VENDOR_FILE = /^(?:embedpdf(?:-[A-Za-z0-9_-]+)?|browser-[A-Za-z0-9_-]+|direct-engine-[A-Za-z0-9_-]+|worker-engine-[A-Za-z0-9_-]+)\.js$|^pdfium\.wasm$/;
 
-function handlePdfStaticRequest(req, res, config, pathname) {
+function handlePdfStaticRequest(req, res, config, pathname, headers = {}) {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendText(res, 405, 'Method not allowed');
     return true;
@@ -1826,7 +1892,7 @@ function handlePdfStaticRequest(req, res, config, pathname) {
       return true;
     }
   }
-  sendStaticFile(req, res, filePath);
+  sendStaticFile(req, res, filePath, headers);
   return true;
 }
 
@@ -2895,6 +2961,18 @@ function createGatewayServer(config) {
         }
       }
 
+      const pdfBrowserApiPrefix = `${normalizeBasePath(config.pdfBasePath || '/pdf/')}api/`;
+      if (pathname.startsWith(pdfBrowserApiPrefix)) {
+        if (!authorizePdfBrowserSession(req, res, config, state)) return;
+        const browserActionPath = pathname.slice(pdfBrowserApiPrefix.length);
+        if (!browserActionPath || browserActionPath.includes('..')) {
+          sendJson(res, 404, { ok: false, message: 'Unknown PDF browser API route.' });
+          return;
+        }
+        await handleEditorApi(req, res, config, state, `/v1/pdf/${browserActionPath}`);
+        return;
+      }
+
       if (isDocxWopiPath(pathname, config.docxServiceRoot)) {
         const wopiDocumentId = getDocxWopiDocumentId(pathname, config.docxServiceRoot);
         if (config.documentStore?.isDocumentId(wopiDocumentId)) {
@@ -2932,8 +3010,14 @@ function createGatewayServer(config) {
         return;
       }
 
-      if (isPdfPath(pathname, config.pdfBasePath) && handlePdfStaticRequest(req, res, config, pathname)) {
-        return;
+      if (isPdfPath(pathname, config.pdfBasePath)) {
+        const pdfBasePath = normalizeBasePath(config.pdfBasePath || '/pdf/');
+        const headers = pathname === pdfBasePath && req.method === 'GET'
+          ? { 'Set-Cookie': issuePdfBrowserSession(state, config) }
+          : {};
+        if (handlePdfStaticRequest(req, res, config, pathname, headers)) {
+          return;
+        }
       }
 
       if (isImagePath(pathname, config.imageBasePath) && handleImageStaticRequest(req, res, config, pathname)) return;

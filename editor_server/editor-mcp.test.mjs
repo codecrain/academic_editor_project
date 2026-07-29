@@ -227,5 +227,8 @@ test('PDF MCP advertises every implemented PDF edit operation', () => {
   assert.ok(PDF_MCP_TOOLS.every((tool) => tool.name.startsWith('editor_pdf_')));
   const apply = PDF_MCP_TOOLS.find((tool) => tool.name === 'editor_pdf_apply');
   assert.deepEqual(apply.inputSchema.properties.commands.items.properties.op.enum, [...PDF_COMMAND_OPS]);
-  assert.doesNotMatch(JSON.stringify(PDF_MCP_TOOLS), /text\.replaceObject|image\.replaceObject/);
+  const schemaText = JSON.stringify(PDF_MCP_TOOLS);
+  for (const op of ['text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete']) {
+    assert.match(schemaText, new RegExp(op.replace('.', '\\.')));
+  }
 });

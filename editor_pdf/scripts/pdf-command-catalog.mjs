@@ -2,10 +2,18 @@ const PDF_COMMANDS = Object.freeze([
   {
     op: 'text.add',
     category: 'text',
-    summary: 'Add a positioned text overlay to one PDF page.',
+    summary: 'Add positioned Unicode text with an embedded approved open font.',
     required: ['page', 'x', 'y', 'text'],
     precondition: 'none',
-    example: { op: 'text.add', page: 1, x: 72, y: 96, text: 'Reviewed', fontSize: 14, color: '#172033' },
+    example: { op: 'text.add', page: 1, x: 72, y: 96, text: '검토 완료', fontFamily: 'Noto Sans KR', fontSize: 14, color: '#172033' },
+  },
+  {
+    op: 'text.replaceObject',
+    category: 'text',
+    summary: 'Replace an existing PDF text object, optionally embedding an approved open font and changing its size or color.',
+    required: ['page', 'objectIndex', 'objectId', 'expectedText', 'text'],
+    precondition: 'target_inspect',
+    example: { op: 'text.replaceObject', page: 1, objectIndex: 3, objectId: 'pdf-object-1-3-text-...', expectedText: 'Original', text: '수정된 본문', fontFamily: 'Noto Sans KR', fontSize: 12, color: '#172033' },
   },
   {
     op: 'highlight.add',
@@ -30,6 +38,30 @@ const PDF_COMMANDS = Object.freeze([
     required: ['page', 'x', 'y', 'width', 'height', 'bytesBase64', 'mimeType'],
     precondition: 'none',
     example: { op: 'image.add', page: 1, x: 72, y: 220, width: 144, height: 72, mimeType: 'image/png', bytesBase64: '<trusted image bytes>' },
+  },
+  {
+    op: 'image.replaceObject',
+    category: 'image',
+    summary: 'Replace the encoded PNG or JPEG data of an existing image object while preserving its placement.',
+    required: ['page', 'objectIndex', 'objectId', 'bytesBase64', 'mimeType'],
+    precondition: 'target_inspect',
+    example: { op: 'image.replaceObject', page: 1, objectIndex: 5, objectId: 'pdf-object-1-5-image-...', mimeType: 'image/png', bytesBase64: '<trusted image bytes>' },
+  },
+  {
+    op: 'object.transform',
+    category: 'object',
+    summary: 'Move, scale, rotate, or skew an existing page object with an explicit PDF transformation matrix.',
+    required: ['page', 'objectIndex', 'objectId', 'matrix'],
+    precondition: 'target_inspect',
+    example: { op: 'object.transform', page: 1, objectIndex: 5, objectId: 'pdf-object-1-5-image-...', matrix: { a: 120, b: 0, c: 0, d: 60, e: 72, f: 600 } },
+  },
+  {
+    op: 'object.delete',
+    category: 'object',
+    summary: 'Delete one inspected text, image, path, shading, or form page object.',
+    required: ['page', 'objectIndex', 'objectId'],
+    precondition: 'target_inspect',
+    example: { op: 'object.delete', page: 1, objectIndex: 5, objectId: 'pdf-object-1-5-image-...' },
   },
   {
     op: 'signature.addAppearance',
@@ -200,11 +232,13 @@ function validatePdfCommands(commands) {
     const entry = commandByOp.get(command.op);
     if (!entry) throw new Error(`Unsupported PDF command: ${command.op || '(empty)'}.`);
     for (const field of entry.required) {
-      if (command[field] === undefined || command[field] === null || command[field] === '') {
+      const allowsEmptyText = command.op === 'text.replaceObject' && ['expectedText', 'text'].includes(field);
+      if (command[field] === undefined || command[field] === null || (!allowsEmptyText && command[field] === '')) {
         throw new Error(`${command.op}.${field} is required.`);
       }
     }
-    const pageOps = new Set(['text.add', 'highlight.add', 'ink.add', 'image.add', 'signature.addAppearance', 'page.rotate', 'page.delete', 'page.duplicate', 'page.move', 'page.crop']);
+    const objectOps = new Set(['text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete']);
+    const pageOps = new Set(['text.add', 'text.replaceObject', 'highlight.add', 'ink.add', 'image.add', 'image.replaceObject', 'object.transform', 'object.delete', 'signature.addAppearance', 'page.rotate', 'page.delete', 'page.duplicate', 'page.move', 'page.crop']);
     if (pageOps.has(command.op)) {
       command.page = finiteNumber(command.page, `${command.op}.page`, { minimum: 1, maximum: 10000 });
       if (!Number.isInteger(command.page)) throw new Error(`${command.op}.page must be an integer.`);
@@ -213,8 +247,32 @@ function validatePdfCommands(commands) {
       command.x = finiteNumber(command.x, 'text.add.x', { minimum: 0, maximum: 100000 });
       command.y = finiteNumber(command.y, 'text.add.y', { minimum: 0, maximum: 100000 });
       command.fontSize = finiteNumber(command.fontSize ?? 14, 'text.add.fontSize', { minimum: 4, maximum: 144 });
+      if (command.fontFamily !== undefined) command.fontFamily = boundedText(command.fontFamily, 'text.add.fontFamily', 128);
+      if (command.color !== undefined && !/^#[0-9a-f]{6}$/i.test(String(command.color))) throw new Error('text.add.color must be a six-digit hex color.');
+      if (command.opacity !== undefined) command.opacity = finiteNumber(command.opacity, 'text.add.opacity', { minimum: 0, maximum: 1 });
       if (typeof command.text !== 'string' || !command.text.length || command.text.length > 5000) {
         throw new Error('text.add.text must contain 1-5000 characters.');
+      }
+    } else if (objectOps.has(command.op)) {
+      command.objectIndex = finiteNumber(command.objectIndex, `${command.op}.objectIndex`, { minimum: 0, maximum: 100000 });
+      if (!Number.isInteger(command.objectIndex)) throw new Error(`${command.op}.objectIndex must be an integer.`);
+      command.objectId = boundedText(command.objectId, `${command.op}.objectId`, 256);
+      if (command.op === 'text.replaceObject') {
+        command.expectedText = boundedText(command.expectedText, 'text.replaceObject.expectedText', 10000, { allowEmpty: true });
+        command.text = boundedText(command.text, 'text.replaceObject.text', 10000, { allowEmpty: true });
+        if (command.fontFamily !== undefined) command.fontFamily = boundedText(command.fontFamily, 'text.replaceObject.fontFamily', 128);
+        if (command.fontSize !== undefined) command.fontSize = finiteNumber(command.fontSize, 'text.replaceObject.fontSize', { minimum: 2, maximum: 500 });
+        if (command.color !== undefined && !/^#[0-9a-f]{6}$/i.test(String(command.color))) throw new Error('text.replaceObject.color must be a six-digit hex color.');
+        if (command.opacity !== undefined) command.opacity = finiteNumber(command.opacity, 'text.replaceObject.opacity', { minimum: 0, maximum: 1 });
+      } else if (command.op === 'image.replaceObject') {
+        validateImageCommand(command);
+        command.mimeType = String(command.mimeType).toLowerCase();
+      } else if (command.op === 'object.transform') {
+        if (!command.matrix || typeof command.matrix !== 'object' || Array.isArray(command.matrix)) throw new Error('object.transform.matrix must be an object.');
+        command.matrix = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f'].map((key) => [
+          key,
+          finiteNumber(command.matrix[key], `object.transform.matrix.${key}`, { minimum: -1000000, maximum: 1000000 }),
+        ]));
       }
     } else if (command.op === 'ink.add') {
       if (!Array.isArray(command.points) || command.points.length < 2 || command.points.length > 5000) {
@@ -310,12 +368,19 @@ function getPdfCommandCatalog(filters = {}) {
   return { format: 'pdf', commandCount: commands.length, categories: PDF_COMMAND_CATEGORIES, commands };
 }
 
-function commandsNeedPrecondition() {
-  return false;
+function commandsNeedPrecondition(entries = [], precondition) {
+  return entries.some((value) => value.entry?.precondition === precondition);
 }
 
-function requiredInspectionTargets() {
-  return [];
+function requiredInspectionTargets(commands = []) {
+  return commands
+    .filter((command) => ['text.replaceObject', 'image.replaceObject', 'object.transform', 'object.delete'].includes(command.op))
+    .map((command) => ({
+      op: command.op,
+      role: 'target',
+      key: stablePdfTargetKey({ page: command.page, objectId: command.objectId }),
+      location: { page: command.page, objectId: command.objectId, objectIndex: command.objectIndex },
+    }));
 }
 
 function stablePdfTargetKey(location = {}) {

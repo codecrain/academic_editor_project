@@ -37,10 +37,12 @@ write.
 1. editor_pdf_open
 2. editor_pdf_read_json and editor_pdf_object_inventory
 3. editor_pdf_command_catalog
-4. editor_pdf_apply with the current baseRevision
-5. editor_pdf_render_pages and editor_pdf_quality_check
-6. editor_pdf_save_source or editor_pdf_export_pdf
-7. editor_pdf_artifact_read, verify SHA-256, then editor_pdf_artifact_delete
+4. editor_pdf_target_inspect for every existing object that will be changed
+5. editor_pdf_apply with the current baseRevision, exact objectId/objectIndex,
+   and expectedText for text replacement
+6. editor_pdf_render_pages and editor_pdf_quality_check
+7. editor_pdf_save_source or editor_pdf_export_pdf
+8. editor_pdf_artifact_read, verify SHA-256, then editor_pdf_artifact_delete
 ```
 
 Call `editor_pdf_discard` instead of saving whenever the work is cancelled or
@@ -51,3 +53,9 @@ permissions, and final PKCS#12-backed PAdES signing. Secret passwords and
 certificate bytes are redacted from change logs. A signed session rejects later
 mutations; see [PDF_EDITOR.md](PDF_EDITOR.md) for the exact editing and
 source-object boundary.
+
+Existing PDF objects use `text.replaceObject`, `image.replaceObject`,
+`object.transform`, and `object.delete`. `object_inventory` returns stable
+revision-scoped IDs, bounds, matrices, font metadata, and the approved
+embeddable font list. These IDs are not durable across revisions: inspect again
+after every successful mutation.

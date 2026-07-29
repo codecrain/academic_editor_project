@@ -16,9 +16,106 @@
       <span>Academic PDF</span>
       <span class="engine-badge">PDFium</span>
     </div>
-    <div id="runtimeStatus" role="status">편집 엔진을 준비하는 중…</div>
+    <nav class="product-tools" aria-label="PDF 고급 편집 도구">
+      <button id="objectEditorButton" class="primary-tool" type="button" aria-expanded="false">
+        본문·이미지 편집
+      </button>
+      <span class="tool-hint">주석·서명·양식·페이지·보안은 아래 기본 툴바에서 사용할 수 있습니다.</span>
+    </nav>
+    <div id="runtimeStatus" role="status">PDF 편집 엔진을 준비하는 중…</div>
   </header>
-  <main id="pdfViewer" aria-label="PDF 편집기"></main>
+
+  <div class="workspace">
+    <main id="pdfViewer" aria-label="PDF 편집기"></main>
+    <aside id="objectEditor" class="object-editor" aria-label="본문 및 이미지 객체 편집기" hidden>
+      <header class="panel-header">
+        <div>
+          <strong>본문·이미지 객체 편집</strong>
+          <p>PDF 안의 실제 객체를 선택해 수정합니다.</p>
+        </div>
+        <button id="closeObjectEditor" class="icon-button" type="button" aria-label="객체 편집기 닫기">×</button>
+      </header>
+
+      <div id="editorEmpty" class="panel-empty">
+        PDF를 연 뒤 <strong>객체 불러오기</strong>를 누르세요.
+        <button id="loadObjectsButton" class="action-button" type="button">객체 불러오기</button>
+      </div>
+
+      <div id="editorBody" hidden>
+        <div class="panel-summary">
+          <span id="objectCount">객체 0개</span>
+          <span id="fontCount">임베드 폰트 0개</span>
+          <button id="refreshObjectsButton" class="text-button" type="button">새로고침</button>
+        </div>
+        <label class="search-field">
+          <span>객체 검색</span>
+          <input id="objectSearch" type="search" placeholder="본문 내용 또는 페이지">
+        </label>
+        <div class="object-tabs" role="tablist">
+          <button class="object-tab is-active" type="button" data-object-type="text" role="tab" aria-selected="true">본문</button>
+          <button class="object-tab" type="button" data-object-type="image" role="tab" aria-selected="false">이미지</button>
+          <button class="object-tab" type="button" data-object-type="all" role="tab" aria-selected="false">전체 객체</button>
+        </div>
+        <div id="objectList" class="object-list" aria-label="PDF 객체 목록"></div>
+
+        <form id="textEditorForm" class="properties" hidden>
+          <h2>본문 속성</h2>
+          <label>
+            <span>텍스트</span>
+            <textarea id="textValue" rows="5"></textarea>
+          </label>
+          <div class="field-grid">
+            <label>
+              <span>폰트</span>
+              <select id="fontFamily"></select>
+            </label>
+            <label>
+              <span>크기</span>
+              <input id="fontSize" type="number" min="2" max="500" step="0.5">
+            </label>
+            <label>
+              <span>색상</span>
+              <input id="fontColor" type="color" value="#172033">
+            </label>
+            <label>
+              <span>불투명도</span>
+              <input id="fontOpacity" type="number" min="0" max="1" step="0.05" value="1">
+            </label>
+          </div>
+          <div class="button-row">
+            <button class="action-button" type="submit">본문 적용</button>
+            <button class="danger-button" type="button" data-delete-object>객체 삭제</button>
+          </div>
+        </form>
+
+        <form id="imageEditorForm" class="properties" hidden>
+          <h2>이미지 속성</h2>
+          <label>
+            <span>PNG 또는 JPEG로 교체</span>
+            <input id="imageFile" type="file" accept="image/png,image/jpeg">
+          </label>
+          <div class="field-grid">
+            <label><span>가로 크기</span><input id="matrixA" type="number" step="0.1"></label>
+            <label><span>세로 크기</span><input id="matrixD" type="number" step="0.1"></label>
+            <label><span>X 위치</span><input id="matrixE" type="number" step="0.1"></label>
+            <label><span>Y 위치</span><input id="matrixF" type="number" step="0.1"></label>
+          </div>
+          <div class="button-row">
+            <button class="action-button" type="submit">이미지 적용</button>
+            <button class="danger-button" type="button" data-delete-object>객체 삭제</button>
+          </div>
+        </form>
+
+        <section id="genericEditor" class="properties" hidden>
+          <h2>객체 변환</h2>
+          <p id="genericObjectInfo"></p>
+          <button class="danger-button" type="button" data-delete-object>객체 삭제</button>
+        </section>
+      </div>
+      <div id="panelStatus" class="panel-status" role="status"></div>
+    </aside>
+  </div>
+
   <section id="bootError" class="boot-error" hidden>
     <strong>PDF 편집기를 시작하지 못했습니다.</strong>
     <span id="bootErrorMessage"></span>
