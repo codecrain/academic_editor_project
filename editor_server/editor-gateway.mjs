@@ -1745,6 +1745,14 @@ function handlePdfStaticRequest(req, res, config, pathname) {
     return true;
   }
   const basePath = normalizeBasePath(config.pdfBasePath || '/pdf/');
+  if (pathname === basePath.slice(0, -1)) {
+    res.writeHead(308, {
+      Location: basePath,
+      'Cache-Control': 'no-store',
+    });
+    res.end();
+    return true;
+  }
   const relative = pathname === basePath.slice(0, -1)
     ? ''
     : decodeURIComponent(pathname.slice(basePath.length));
