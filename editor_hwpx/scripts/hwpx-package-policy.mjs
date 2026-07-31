@@ -280,6 +280,91 @@ export function inspectHwpxPackage(bytes) {
   };
 }
 
+export function restoreExportOmittedEmbeddedEntries(sourceBytes, candidateBytes) {
+  const source = inspectHwpxPackage(sourceBytes);
+  let candidate = inspectHwpxPackage(candidateBytes);
+  const sourceEntries = readZip(sourceBytes);
+  const candidateEntries = readZip(candidateBytes);
+  const restoredEntries = [];
+  const candidateIds = new Set(
+    Object.values(candidate.manifestItems).map(item => item.id).filter(Boolean),
+  );
+  let candidateContent = candidateEntries.get('Contents/content.hpf')?.toString('utf8') ?? '';
+
+  const addCandidateManifestItem = (sourceItem) => {
+    if (candidate.manifestItems[sourceItem.href] || !sourceItem.id
+      || candidateIds.has(sourceItem.id)) {
+      return false;
+    }
+    const manifestClose = candidateContent.match(
+      /<\/((?:[A-Za-z_][\w.-]*:)?manifest)\s*>/i,
+    );
+    if (!manifestClose) return false;
+    const prefix = manifestClose[1].includes(':')
+      ? `${manifestClose[1].split(':', 1)[0]}:`
+      : '';
+    const escapeXml = value => String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('"', '&quot;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+    const itemXml = `<${prefix}item id="${escapeXml(sourceItem.id)}" href="${escapeXml(sourceItem.href)}" media-type="${escapeXml(sourceItem.mediaType)}" isEmbeded="1"/>`;
+    const closeIndex = manifestClose.index;
+    candidateContent = `${candidateContent.slice(0, closeIndex)}${itemXml}${candidateContent.slice(closeIndex)}`;
+    candidateEntries.set('Contents/content.hpf', Buffer.from(candidateContent));
+    candidateIds.add(sourceItem.id);
+    return true;
+  };
+
+  for (const sourceItem of Object.values(source.manifestItems)) {
+    if (!sourceItem.embedded || !sourceEntries.has(sourceItem.href)
+      || candidateEntries.has(sourceItem.href)) {
+      continue;
+    }
+    let candidateItem = candidate.manifestItems[sourceItem.href];
+    if (!candidateItem && addCandidateManifestItem(sourceItem)) {
+      candidate = inspectHwpxPackage(createZip([...candidateEntries.entries()]));
+      candidateItem = candidate.manifestItems[sourceItem.href];
+    }
+    if (!candidateItem || !candidateItem.embedded
+      || canonicalMediaType(candidateItem.mediaType)
+        !== canonicalMediaType(sourceItem.mediaType)) {
+      continue;
+    }
+    const bytes = sourceEntries.get(sourceItem.href);
+    candidateEntries.set(sourceItem.href, bytes);
+    restoredEntries.push({
+      name: sourceItem.href,
+      size: bytes.length,
+      sha256: sha256(bytes),
+    });
+  }
+
+  for (const sourceEntry of source.entries) {
+    const candidateEntry = candidate.entriesByName[sourceEntry.name];
+    if (!candidateEntry || candidateEntry.sha256 === sourceEntry.sha256
+      || isMutableStructuralEntry(sourceEntry.name)) {
+      continue;
+    }
+    const bytes = sourceEntries.get(sourceEntry.name);
+    candidateEntries.set(sourceEntry.name, bytes);
+    if (!restoredEntries.some(entry => entry.name === sourceEntry.name)) {
+      restoredEntries.push({
+        name: sourceEntry.name,
+        size: bytes.length,
+        sha256: sha256(bytes),
+      });
+    }
+  }
+
+  return {
+    bytes: restoredEntries.length > 0
+      ? createZip([...candidateEntries.entries()])
+      : Buffer.from(candidateBytes),
+    restoredEntries,
+  };
+}
+
 export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
   const source = inspectHwpxPackage(sourceBytes);
   const candidate = inspectHwpxPackage(candidateBytes);

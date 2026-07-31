@@ -22,6 +22,7 @@ import {
   classifyHwpxCommands,
   overlayPreservedEntries,
   qualifyHwpxCandidate,
+  restoreExportOmittedEmbeddedEntries,
 } from './hwpx-package-policy.mjs';
 import {
   resolveHwpxCommand,
@@ -1860,13 +1861,21 @@ function verifyExpectedRunStyle(target, result, propertiesAt) {
   const range = result.expectedRunRange;
   const offsets = [...new Set([range.start, Math.max(range.start, range.end - 1)])];
   const aliases = {
-    fontSizePt: ['fontSize', value => Number(value) * 100],
+    fontSizePt: ['fontSize', value => Number(value) * 100, value => value],
+    textColor: [
+      'textColor',
+      value => String(value).toLowerCase(),
+      value => String(value).toLowerCase(),
+    ],
   };
   for (const offset of offsets) {
     const properties = tryJson(() => propertiesAt(offset));
     for (const [field, expectedValue] of Object.entries(expected)) {
-      const [actualField, transform] = aliases[field] ?? [field, value => value];
-      if (!properties || properties[actualField] !== transform(expectedValue)) {
+      const identity = value => value;
+      const [actualField, expectedTransform, actualTransform] =
+        aliases[field] ?? [field, identity, identity];
+      if (!properties
+        || actualTransform(properties[actualField]) !== expectedTransform(expectedValue)) {
         throw structuralBatchError(
           'HWPX_CREATED_TARGET_MISMATCH',
           'Structural run formatting did not survive reopening exactly.',
@@ -1874,7 +1883,7 @@ function verifyExpectedRunStyle(target, result, propertiesAt) {
             target,
             offset,
             field,
-            expected: transform(expectedValue),
+            expected: expectedTransform(expectedValue),
             actual: properties?.[actualField],
           },
         );
@@ -2221,10 +2230,15 @@ function materializeStructuralTrial(session) {
     session.doc.reflowLinesegs();
   }
   const candidateBytes = Buffer.from(session.doc.exportHwpx());
-  const qualification = qualifyHwpxCandidate(session.inputBytes, candidateBytes);
-  const committedBytes = overlayPreservedEntries(
+  const restored = restoreExportOmittedEmbeddedEntries(
     session.inputBytes,
     candidateBytes,
+  );
+  const qualification = qualifyHwpxCandidate(session.inputBytes, restored.bytes);
+  qualification.restoredEntries = restored.restoredEntries;
+  const committedBytes = overlayPreservedEntries(
+    session.inputBytes,
+    restored.bytes,
     qualification,
   );
   const reopened = new HwpxApiSession(committedBytes, {

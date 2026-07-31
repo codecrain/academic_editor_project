@@ -25,7 +25,8 @@ the open-source tree.
   redaction, page composition, security, attachments, and signing.
 - Self-hosted raster and vector Image Studio routes with flattened and editable
   project session contracts.
-- A versioned 100-case public-sector HWPX acceptance suite.
+- The canonical 20-case HWPX Agent stress-validation contract, with a separate
+  deterministic editor replay gate.
 
 DOCX, HWPX, and PDF are separate editor engines. `editor_docx/` owns the
 Collabora/WOPI implementation and `editor_hwpx/` owns RHWP Studio and HWPX
@@ -40,9 +41,10 @@ are thin re-exports of the shared server, and no engine imports the other
 engine's implementation.
 
 Current documentation starts at [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md).
-The complete transport contract is [API.md](API.md), and the reproducible HWPX
-acceptance corpus is under
-[evaluation/hwpx-public-sector-v1](evaluation/hwpx-public-sector-v1).
+The complete transport contract is [API.md](API.md). The only canonical HWPX
+Agent validation inputs and completion criteria are under
+[evaluation/hwpx-agent-final-20-v1](evaluation/hwpx-agent-final-20-v1); its
+deterministic runner validates the editor, not the Agent.
 DOCX mixed-page preservation, the current iframe bridge, and the proposed
 host-owned context-action contract are specified in
 [docs/DOCX_IFRAME_INTEGRATION.md](docs/DOCX_IFRAME_INTEGRATION.md).

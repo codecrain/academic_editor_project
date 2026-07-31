@@ -1634,15 +1634,18 @@ npm.cmd run hwpx:fill:esg
 npm.cmd run hwpx:author:sample
 ```
 
-HWPX public-sector acceptance:
+HWPX deterministic editor replay gate:
 
 ```powershell
 npm.cmd run test:hwpx-evaluation
 ```
 
-The 100-case runner executes both REST and MCP open/catalog/inspect/apply/
+The 20-case runner executes both REST and MCP open/catalog/inspect/apply/
 quality/render/save/read/hash/delete workflows for every case and enforces
 privacy and exact binary-entry preservation gates. It makes no OpenAI calls.
+This command does not run or pass the HWPX Agent. The canonical Agent input,
+completion criteria, and claim boundary are defined in
+`evaluation/hwpx-agent-final-20-v1/FINAL_VALIDATION.md`.
 
 Known acceptable HWPX warning:
 

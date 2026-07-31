@@ -12,7 +12,7 @@ const {
 } = hwpxApiUtils;
 
 const ESG_FIXTURE_PATH = 'editor_hwpx/samples/api-fixtures/esg-original.hwpx';
-const PUBLIC_BRIEFING_FIXTURE_PATH = 'evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-briefing.hwpx';
+const PUBLIC_BRIEFING_FIXTURE_PATH = 'evaluation/hwpx-agent-final-20-v1/attachments/source/moe-2025-briefing.hwpx';
 
 const NESTED_TABLE_FIXTURE_PATH = 'editor_hwpx/samples/2025년 기부·답례품 실적 지자체 보고서_양식.hwpx';
 
@@ -41,7 +41,7 @@ test('HWPX paragraph template replacement preserves matching leading tab control
 
 test('HWPX API reports encrypted public-sector packages with an actionable error code', async () => {
   await initHwpxRuntime();
-  const input = readFileSync('evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-work-plan.hwpx');
+  const input = readFileSync('evaluation/hwpx-agent-final-20-v1/attachments/source/moe-2025-work-plan.hwpx');
   assert.throws(
     () => new HwpxApiSession(input),
     (error) => error?.code === 'unsupported_encrypted_hwpx'
@@ -1102,6 +1102,25 @@ test('setRunStyle verifier checks both paragraph range boundaries after reopen',
       && error.details?.offset === 3,
   );
   assert.deepEqual(calls, [[0, 0, 1], [0, 0, 3]]);
+});
+
+test('setRunStyle verifier treats equivalent hex color casing as exact', () => {
+  const session = {
+    doc: {
+      getSectionCount: () => 1,
+      getParagraphCount: () => 1,
+      getCharPropertiesAt: () => JSON.stringify({ textColor: '#0000ff' }),
+    },
+  };
+
+  assert.doesNotThrow(() => hwpxApiUtils.verifyStructuralTarget(
+    session,
+    { kind: 'paragraph', sectionIndex: 0, paragraphIndex: 0 },
+    {
+      expectedRunStyle: { textColor: '#0000FF' },
+      expectedRunRange: { start: 0, end: 2 },
+    },
+  ));
 });
 
 test('setRunStyle verifier checks both inspected table-cell range boundaries after reopen', () => {

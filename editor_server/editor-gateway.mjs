@@ -1773,6 +1773,9 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
   const issued = fmt === 'docx' && config.documentStore
     ? config.documentStore.issueToken(id, { canWrite: false })
     : null;
+  const hwpxLiveSourcePath = fmt === 'hwpx'
+    ? `/v1/hwpx/documents/${id}/live-source`
+    : null;
   sendJson(res, 200, {
     ok: true,
     documentId: id,
@@ -1809,22 +1812,40 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
         expiresAt: issued.expiresAt,
         readOnly: true,
       },
+    } : hwpxLiveSourcePath ? {
+      liveEditorSession: {
+        documentId: id,
+        sourcePath: hwpxLiveSourcePath,
+        expiresAt: now + config.apiSessionTtlMs,
+        readOnly: true,
+      },
     } : {}),
   });
   return true;
 }
 
 async function handleEditorApiAction(req, res, config, state, fmt, id, actionPath) {
-  if (req.method !== 'POST') {
-    sendJson(res, 405, { ok: false, message: 'Method not allowed. Use POST.' }, { Allow: 'POST' });
-    return true;
-  }
   const record = findApiRecord(state, fmt, id);
   if (!record) {
     sendJson(res, 404, { ok: false, message: 'Document session not found.' });
     return true;
   }
   record.lastAccessedAt = Date.now();
+  if (fmt === 'hwpx' && actionPath === 'live-source' && req.method === 'GET') {
+    const saved = await record.session.save();
+    const bytes = Buffer.from(saved.bytes || saved);
+    res.writeHead(200, {
+      'Content-Type': 'application/vnd.hancom.hwpx',
+      'Content-Length': String(bytes.length),
+      'Cache-Control': 'no-store',
+    });
+    res.end(bytes);
+    return true;
+  }
+  if (req.method !== 'POST') {
+    sendJson(res, 405, { ok: false, message: 'Method not allowed. Use POST.' }, { Allow: 'POST' });
+    return true;
+  }
   const body = await readJsonBody(req);
   const { session } = record;
 

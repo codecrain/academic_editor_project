@@ -23,7 +23,7 @@ import {
 
 const outputPath = path.resolve(
   process.argv[2]
-    || 'evaluation/hwpx-public-sector-v1/attachments/source/public-procurement-requirements.docx',
+    || 'evaluation/hwpx-agent-final-20-v1/attachments/source/public-procurement-requirements.docx',
 );
 
 const colors = {

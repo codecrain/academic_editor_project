@@ -1,0 +1,81 @@
+{
+  "version": "2.0.0",
+  "authority": {
+    "status": "canonical",
+    "scope": "hwpx-agent-final-20-validation-contract",
+    "inputSources": [
+      "scenarios.jsonl",
+      "attachments.json"
+    ],
+    "completionCriteriaSource": "gold/HWPX-PS-*.json",
+    "readableLosslessReport": "HWPX_AGENT_SCENARIO_REPORT.md",
+    "agentPassRequires": "real-agent-run-without-gold-or-oracle-access",
+    "editorReplayClaim": "editor-engine-gate-only",
+    "selectedScenarioIds": [
+      "HWPX-PS-001",
+      "HWPX-PS-013",
+      "HWPX-PS-025",
+      "HWPX-PS-031",
+      "HWPX-PS-043",
+      "HWPX-PS-052",
+      "HWPX-PS-054",
+      "HWPX-PS-061",
+      "HWPX-PS-064",
+      "HWPX-PS-067",
+      "HWPX-PS-070",
+      "HWPX-PS-073",
+      "HWPX-PS-076",
+      "HWPX-PS-079",
+      "HWPX-PS-081",
+      "HWPX-PS-082",
+      "HWPX-PS-085",
+      "HWPX-PS-088",
+      "HWPX-PS-091",
+      "HWPX-PS-100"
+    ],
+    "selectionPolicy": [
+      "retain known deterministic replay failures",
+      "retain prior incomplete rerun case HWPX-PS-081",
+      "maximize complex edit coverage: image replacement, pagination, formula traps, atomic rollback, large legacy HWP",
+      "retain template-based generation coverage"
+    ],
+    "legacyArchive": "../legacy/hwpx-public-sector-v1-retired-80"
+  },
+  "generatedAt": "2026-07-30",
+  "scenarioCount": 20,
+  "editCount": 18,
+  "generationCount": 2,
+  "minQuestionLength": 427,
+  "maxQuestionLength": 451,
+  "domains": [
+    "공공조달",
+    "교육행정",
+    "교통물류",
+    "디지털정부",
+    "보건의료",
+    "보훈복지",
+    "재난안전",
+    "지역균형",
+    "청년고용",
+    "환경기후"
+  ],
+  "sourceFormats": [
+    "csv",
+    "docx",
+    "hwp",
+    "hwpx",
+    "jpg",
+    "pdf",
+    "png",
+    "txt",
+    "xlsx"
+  ],
+  "attachmentCount": 11,
+  "files": {
+    "attachments": "attachments.json",
+    "scenarios": "scenarios.jsonl",
+    "scenarioSchema": "schema/scenario.schema.json",
+    "attachmentSchema": "schema/attachment.schema.json",
+    "goldDirectory": "gold"
+  }
+}

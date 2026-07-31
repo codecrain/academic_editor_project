@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { validateHwpxCommands } from '../../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
 
-const root = path.resolve('evaluation/hwpx-public-sector-v1');
+const root = path.resolve('evaluation/hwpx-agent-final-20-v1');
 const manifest = JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8'));
 const attachmentPayload = JSON.parse(await fs.readFile(path.join(root, 'attachments.json'), 'utf8'));
 const scenarios = (await fs.readFile(path.join(root, 'scenarios.jsonl'), 'utf8'))
@@ -15,14 +15,25 @@ const scenarios = (await fs.readFile(path.join(root, 'scenarios.jsonl'), 'utf8')
 const attachmentById = new Map(attachmentPayload.attachments.map((attachment) => [attachment.id, attachment]));
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
-assert.equal(manifest.version, '1.0.0');
-assert.equal(scenarios.length, 100);
-assert.equal(new Set(scenarios.map((scenario) => scenario.id)).size, 100);
-assert.equal(scenarios.filter((scenario) => scenario.mode === 'edit').length, 90);
-assert.equal(scenarios.filter((scenario) => scenario.mode === 'generation').length, 10);
+assert.equal(manifest.version, '2.0.0');
+assert.equal(manifest.authority?.status, 'canonical');
+assert.equal(manifest.authority?.scope, 'hwpx-agent-final-20-validation-contract');
+assert.deepEqual(manifest.authority?.inputSources, ['scenarios.jsonl', 'attachments.json']);
+assert.equal(manifest.authority?.completionCriteriaSource, 'gold/HWPX-PS-*.json');
+assert.equal(manifest.authority?.agentPassRequires, 'real-agent-run-without-gold-or-oracle-access');
+assert.equal(manifest.authority?.editorReplayClaim, 'editor-engine-gate-only');
+assert.equal(scenarios.length, 20);
+assert.equal(new Set(scenarios.map((scenario) => scenario.id)).size, 20);
+assert.deepEqual(scenarios.map((scenario) => scenario.id), manifest.authority.selectedScenarioIds);
+assert.equal(scenarios.filter((scenario) => scenario.mode === 'edit').length, 18);
+assert.equal(scenarios.filter((scenario) => scenario.mode === 'generation').length, 2);
 assert.ok(manifest.sourceFormats.length >= 9);
 assert.equal(attachmentPayload.attachmentCount, attachmentPayload.attachments.length);
-assert.equal(attachmentPayload.attachments.length, 13);
+assert.equal(attachmentPayload.attachments.length, 11);
+assert.equal(manifest.scenarioCount, scenarios.length);
+assert.equal(manifest.editCount, 18);
+assert.equal(manifest.generationCount, 2);
+assert.equal(manifest.attachmentCount, attachmentPayload.attachments.length);
 
 for (const attachment of attachmentPayload.attachments) {
   const bytes = await fs.readFile(path.join(root, attachment.path));
@@ -32,8 +43,7 @@ for (const attachment of attachmentPayload.attachments) {
   assert.ok(attachment.license);
 }
 
-for (const [index, scenario] of scenarios.entries()) {
-  assert.equal(scenario.id, `HWPX-PS-${String(index + 1).padStart(3, '0')}`);
+for (const scenario of scenarios) {
   assert.equal(scenario.difficulty, 'expert');
   assert.ok(scenario.question.length >= 100 && scenario.question.length <= 1000);
   assert.ok(scenario.attachments.includes(scenario.target.attachmentId));
@@ -78,7 +88,7 @@ for (const [index, scenario] of scenarios.entries()) {
   assert.equal(gold.answerContract.adjudication.hardFailureOverridesScore, true);
 }
 
-for (const scenario of scenarios.slice(60, 70)) {
+for (const scenario of scenarios.filter((item) => item.tags.includes('formula-error-trap'))) {
   const refFact = scenario.sourceFacts.find(fact => fact.locator === '기본현황(경합형태별현황)!#REF!');
   assert.equal(refFact?.fact, '#REF! 오류 68개; 대표 셀 J7, AA7', scenario.id);
 }

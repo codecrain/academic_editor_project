@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "generatedAt": "2026-07-27",
-  "attachmentCount": 13,
+  "version": "2.0.0",
+  "generatedAt": "2026-07-30",
+  "attachmentCount": 11,
   "attachments": [
     {
       "id": "target-moe-briefing-hwpx",
@@ -32,37 +32,6 @@
       },
       "license": "Repository test fixture; internal evaluation use.",
       "role": "Minimal one-page HWPX template for template-based generation cases."
-    },
-    {
-      "id": "target-public-form-hwpx",
-      "path": "attachments/source/public-form-template.hwpx",
-      "mediaType": "application/vnd.hancom.hwpx",
-      "sha256": "588f278e892c5bd644bcf73b6d3cd3b0ebe6e6ebe38df9f53dfb4d3fa38e079e",
-      "byteLength": 37946,
-      "origin": {
-        "kind": "repository-fixture",
-        "url": "editor_hwpx/samples/api-fixtures/esg-original.hwpx",
-        "publisher": "academic_editor_project fixture",
-        "retrievedAt": "2026-07-27"
-      },
-      "license": "Repository test fixture; internal evaluation use.",
-      "role": "Two-page structured public form with multiple tables for form-preservation cases."
-    },
-    {
-      "id": "adversarial-encrypted-moe-hwpx",
-      "path": "attachments/source/moe-2025-work-plan.hwpx",
-      "mediaType": "application/vnd.hancom.hwpx",
-      "sha256": "c77b7af0f3c69fb69b3cea63f0e852c2466dac217ddddd99928ec95573885514",
-      "byteLength": 3034487,
-      "origin": {
-        "kind": "official-public",
-        "url": "https://www.moe.go.kr/boardCnts/viewRenew.do?boardID=72713&boardSeq=104862&lev=0&m=031102&opType=N&page=1&s=moe",
-        "publisher": "대한민국 교육부",
-        "retrievedAt": "2026-07-27"
-      },
-      "license": "공공누리 제1유형 출처표시",
-      "role": "Official encrypted/distribution HWPX used by the separate loader rejection audit.",
-      "notes": "Contains ODF manifest encryption-data; expected loader result is unsupported_encrypted_hwpx."
     },
     {
       "id": "source-moe-work-plan-pdf",
@@ -118,7 +87,7 @@
       "byteLength": 935,
       "origin": {
         "kind": "generated-fixture",
-        "url": "evaluation/hwpx-public-sector-v1/attachments/source/procurement-evidence.csv",
+        "url": "evaluation/hwpx-agent-final-20-v1/attachments/source/procurement-evidence.csv",
         "publisher": "academic_editor_project evaluation generator",
         "retrievedAt": "2026-07-27"
       },
@@ -133,7 +102,7 @@
       "byteLength": 1847,
       "origin": {
         "kind": "generated-fixture",
-        "url": "evaluation/hwpx-public-sector-v1/attachments/source/steering-committee-decisions.txt",
+        "url": "evaluation/hwpx-agent-final-20-v1/attachments/source/steering-committee-decisions.txt",
         "publisher": "academic_editor_project evaluation generator",
         "retrievedAt": "2026-07-27"
       },
@@ -148,7 +117,7 @@
       "byteLength": 14539,
       "origin": {
         "kind": "generated-fixture",
-        "url": "evaluation/hwpx-public-sector-v1/scripts/build-supporting-docx.mjs",
+        "url": "evaluation/hwpx-agent-final-20-v1/scripts/build-supporting-docx.mjs",
         "publisher": "academic_editor_project evaluation generator",
         "retrievedAt": "2026-07-27"
       },

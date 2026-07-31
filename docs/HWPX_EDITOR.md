@@ -116,8 +116,13 @@ real HWPX in Chrome, edits it, saves a downloaded package, extracts the saved
 text, reopens the package, captures a screenshot, and always closes the Chrome
 process it created.
 
-The public-sector corpus contains 100 expert scenarios: 90 edits and 10
+The final corpus contains 20 selected expert stress scenarios: 18 edits and 2
 generations. Every scenario uses HWPX plus at least three heterogeneous
-evidence files. The current corpus has 13 unique attachments across HWPX, HWP,
+evidence files. The current corpus has 11 unique attachments across HWPX, HWP,
 PDF, DOCX, XLSX, CSV, TXT, PNG, and JPG. Every `sourceFact` has a stable
 `factId`, a real locator, a declared output target, and a reopen assertion.
+
+This directory is the canonical HWPX Agent final-20 validation contract, but
+`test:hwpx-evaluation` is only its deterministic editor replay gate. A real
+HWPX Agent pass requires the separate no-oracle run defined in
+`evaluation/hwpx-agent-final-20-v1/FINAL_VALIDATION.md`.

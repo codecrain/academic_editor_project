@@ -2048,6 +2048,12 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     });
     assert.equal(openedCall.result.isError, false, JSON.stringify(openedCall.result.structuredContent));
     const opened = openedCall.result.structuredContent;
+    assert.equal(opened.liveEditorSession.documentId, opened.documentId);
+    const initialLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
+    assert.equal(initialLiveSource.status, 200);
+    assert.match(initialLiveSource.headers.get('content-type'), /application\/vnd\.hancom\.hwpx/);
+    const initialLiveBytes = Buffer.from(await initialLiveSource.arrayBuffer());
+    assert.equal(initialLiveBytes.subarray(0, 2).toString(), 'PK');
 
     const structureCall = await mcp(3, 'editor_hwpx_read_json', {
       documentId: opened.documentId,
@@ -2075,6 +2081,10 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     });
     assert.equal(applyCall.result.isError, false, JSON.stringify(applyCall.result.structuredContent));
     const revision = applyCall.result.structuredContent.revision;
+    const updatedLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
+    assert.equal(updatedLiveSource.status, 200);
+    const updatedLiveBytes = Buffer.from(await updatedLiveSource.arrayBuffer());
+    assert.notDeepEqual(updatedLiveBytes, initialLiveBytes);
 
     const qualityCall = await mcp(6, 'editor_hwpx_quality_check', {
       documentId: opened.documentId,

@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 const scriptPath = path.resolve('editor_hwpx/scripts/hancom/Invoke-HwpxAcceptance.ps1');
-const fixturePath = path.resolve('evaluation/hwpx-public-sector-v1/attachments/source/blank-generation-template.hwpx');
+const fixturePath = path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/blank-generation-template.hwpx');
 
 async function hwpPids() {
   const { stdout } = await execFileAsync('powershell.exe', [

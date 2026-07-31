@@ -18,9 +18,13 @@ superseded design notes are intentionally not published as documentation.
 - [DOCX_IFRAME_INTEGRATION.md](DOCX_IFRAME_INTEGRATION.md): mixed-section page
   preservation, the implemented iframe bridge, and the proposed host/editor
   context-menu messaging contract.
-- [evaluation/hwpx-public-sector-v1/README.md](../evaluation/hwpx-public-sector-v1/README.md):
-  100-case public-sector evaluation corpus.
-- [evaluation/hwpx-public-sector-v1/METHODOLOGY.md](../evaluation/hwpx-public-sector-v1/METHODOLOGY.md):
+- [evaluation/hwpx-agent-final-20-v1/README.md](../evaluation/hwpx-agent-final-20-v1/README.md):
+  canonical 20-case HWPX Agent stress-validation contract and editor replay
+  gate.
+- [evaluation/hwpx-agent-final-20-v1/FINAL_VALIDATION.md](../evaluation/hwpx-agent-final-20-v1/FINAL_VALIDATION.md):
+  authoritative inputs, completion criteria, claim boundary, and latest
+  verified execution.
+- [evaluation/hwpx-agent-final-20-v1/METHODOLOGY.md](../evaluation/hwpx-agent-final-20-v1/METHODOLOGY.md):
   attachment grounding, scoring, and evidence limits.
 
 ## Executable sources of truth
@@ -59,6 +63,6 @@ Academic Editor API contract.
 ## Evaluation boundary
 
 The public-sector v1 runner uses local deterministic REST and MCP calls. It
-does not call OpenAI or any other model API. The calling agent reads the
-question and evidence; the runner verifies that every declared source fact is
-present at the expected saved target after reopen.
+does not call OpenAI or any other model API. It replays checked-in oracle
+commands and verifies every declared source fact after reopen, so it is an
+editor gate rather than an HWPX Agent run.

@@ -9,6 +9,7 @@ import {
   inspectHwpxPackage,
   overlayPreservedEntries,
   qualifyHwpxCandidate,
+  restoreExportOmittedEmbeddedEntries,
 } from './hwpx-package-policy.mjs';
 
 function packageBytes(extraEntries = [], manifestItems = []) {
@@ -192,6 +193,52 @@ test('qualification rejects embedded object loss and caller-forged deltas', () =
     error => error.code === 'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS'
       && error.details.objects.some(item =>
         item.kind === 'tc' && item.source === 2 && item.candidate === 1),
+  );
+});
+
+test('structural export restores exact source bytes only for preserved embedded relationships', () => {
+  const source = packageBytes([
+    ['BinData/ole1.bin', Buffer.from('opaque-attachment')],
+  ], [
+    { id: 'ole1', href: 'BinData/ole1.bin', mediaType: 'application/ole' },
+  ]);
+  const candidate = packageBytes([], [
+    { id: 'ole1', href: 'BinData/ole1.bin', mediaType: 'application/ole' },
+  ]);
+
+  const restored = restoreExportOmittedEmbeddedEntries(source, candidate);
+  const entries = readZip(restored.bytes);
+
+  assert.deepEqual(restored.restoredEntries.map(item => item.name), [
+    'BinData/ole1.bin',
+  ]);
+  assert.equal(entries.get('BinData/ole1.bin').toString(), 'opaque-attachment');
+  assert.equal(qualifyHwpxCandidate(source, restored.bytes).ok, true);
+
+  const withoutRelationship = packageBytes();
+  const restoredRelationship = restoreExportOmittedEmbeddedEntries(
+    source,
+    withoutRelationship,
+  );
+  const restoredInventory = inspectHwpxPackage(restoredRelationship.bytes);
+  assert.equal(
+    restoredInventory.manifestItems['BinData/ole1.bin'].mediaType,
+    'application/ole',
+  );
+  assert.equal(qualifyHwpxCandidate(source, restoredRelationship.bytes).ok, true);
+
+  const changedContainerEntries = readZip(source);
+  changedContainerEntries.set(
+    'META-INF/container.xml',
+    Buffer.from('<container regenerated="true"/>'),
+  );
+  const restoredContainer = restoreExportOmittedEmbeddedEntries(
+    source,
+    createZip([...changedContainerEntries]),
+  );
+  assert.equal(
+    readZip(restoredContainer.bytes).get('META-INF/container.xml').toString(),
+    '<container/>',
   );
 });
 

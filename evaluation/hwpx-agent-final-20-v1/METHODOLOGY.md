@@ -1,5 +1,18 @@
 # Evaluation methodology
 
+## Authority and completion claim
+
+This methodology belongs to the canonical HWPX Agent validation contract in
+this directory. The authoritative per-case input is the complete record in
+`scenarios.jsonl` plus every referenced record in `attachments.json`. The
+authoritative per-case completion criteria are the matching
+`gold/HWPX-PS-*.json` record. No prose summary may replace or add to those
+records.
+
+Deterministic REST/MCP oracle replay is an editor-engine gate. It is not an
+HWPX Agent pass. The Agent pass requires a real Agent run without gold or
+oracle access and verification against the unchanged gold record.
+
 ## Scenario design
 
 Each scenario combines an HWPX output target with at least three heterogeneous
@@ -8,10 +21,9 @@ recalculation, privacy controls, paragraph and multi-table edits, style
 cloning, image replacement, pagination constraints, package preservation, and
 large legacy-HWP reference handling.
 
-The 90 edit cases target an official 11-page HWPX briefing. The 10 generation
-cases start from a minimal valid HWPX template and build a structured public
-report through the same API. HWPX-PS-091 through HWPX-PS-100 are generation
-cases.
+The 18 selected edit cases target an official 11-page HWPX briefing. The two
+selected generation cases (`HWPX-PS-091`, `HWPX-PS-100`) start from a minimal
+valid HWPX template and build a structured public report through the same API.
 
 ## Oracle
 

@@ -17,8 +17,8 @@ const canonicalPaths = [
   'docs/HWPX_MCP_API.md',
   'docs/PDF_EDITOR.md',
   'docs/PDF_MCP_API.md',
-  'evaluation/hwpx-public-sector-v1/README.md',
-  'evaluation/hwpx-public-sector-v1/METHODOLOGY.md',
+  'evaluation/hwpx-agent-final-20-v1/README.md',
+  'evaluation/hwpx-agent-final-20-v1/METHODOLOGY.md',
 ];
 const canonical = new Map(canonicalPaths.map((relativePath) => [
   relativePath,
@@ -81,7 +81,7 @@ test('documented MCP tool lists match executable HWPX and PDF tools', () => {
   const documented = textBlockAfter(canonical.get('docs/HWPX_MCP_API.md'), '## Tools');
   assert.deepEqual(documented, HWPX_MCP_TOOLS.map((tool) => tool.name));
   assert.equal(HWPX_MCP_TOOLS.length, 16);
-  assert.equal(DOCX_MCP_TOOLS.length, 16);
+  assert.equal(DOCX_MCP_TOOLS.length, 17);
   assert.deepEqual(
     textBlockAfter(canonical.get('docs/PDF_MCP_API.md'), '## Tools'),
     PDF_MCP_TOOLS.map((tool) => tool.name),

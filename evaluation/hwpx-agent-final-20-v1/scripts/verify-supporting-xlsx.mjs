@@ -7,7 +7,7 @@ if (!files.length) {
   throw new Error('Pass one or more XLSX files.');
 }
 
-const qaRoot = path.resolve('evaluation/hwpx-public-sector-v1/.qa/xlsx-render');
+const qaRoot = path.resolve('evaluation/hwpx-agent-final-20-v1/.qa/xlsx-render');
 await fs.mkdir(qaRoot, { recursive: true });
 
 for (const file of files) {

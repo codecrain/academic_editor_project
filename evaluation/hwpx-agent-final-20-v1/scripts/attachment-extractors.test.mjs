@@ -8,7 +8,7 @@ import {
   verifyExtractedSourceFact,
 } from './attachment-extractors.mjs';
 
-const datasetRoot = path.resolve('evaluation/hwpx-public-sector-v1');
+const datasetRoot = path.resolve('evaluation/hwpx-agent-final-20-v1');
 
 async function loadDataset() {
   const attachmentPayload = JSON.parse(
@@ -130,7 +130,7 @@ test('every source fact is explicitly grounded in a reopen-verifiable result tar
   }
 });
 
-test('HWPX-PS-061 through 070 ground the actual beneficiaries workbook REF error count and representative cells', async () => {
+test('selected formula-error trap cases ground the actual beneficiaries workbook REF error count and representative cells', async () => {
   const { attachments, scenarios } = await loadDataset();
   const attachment = attachments.find(item => item.id === 'source-mpva-beneficiaries-xlsx');
   const bytes = await fs.readFile(path.join(datasetRoot, attachment.path));
@@ -143,7 +143,7 @@ test('HWPX-PS-061 through 070 ground the actual beneficiaries workbook REF error
   assert.ok(refCells.includes('기본현황(경합형태별현황)!J7'));
   assert.ok(refCells.includes('기본현황(경합형태별현황)!AA7'));
 
-  for (const scenario of scenarios.slice(60, 70)) {
+  for (const scenario of scenarios.filter(item => item.tags.includes('formula-error-trap'))) {
     const refFact = scenario.sourceFacts.find(fact => fact.locator === '기본현황(경합형태별현황)!#REF!');
     assert.ok(refFact, `${scenario.id} REF source fact`);
     assert.equal(refFact.fact, '#REF! 오류 68개; 대표 셀 J7, AA7', scenario.id);

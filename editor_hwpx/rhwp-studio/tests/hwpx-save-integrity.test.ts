@@ -11,7 +11,7 @@ import {
 
 test('HWPX save integrity reads a real public-sector package and accepts byte-identical output', async () => {
   const fixturePath = fileURLToPath(new URL(
-    '../../../evaluation/hwpx-public-sector-v1/attachments/source/moe-2025-briefing.hwpx',
+    '../../../evaluation/hwpx-agent-final-20-v1/attachments/source/moe-2025-briefing.hwpx',
     import.meta.url,
   ));
   const bytes = new Uint8Array(await readFile(fixturePath));

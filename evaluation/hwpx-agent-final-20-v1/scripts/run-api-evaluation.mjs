@@ -14,7 +14,8 @@ import {
   verifyExtractedSourceFact,
 } from './attachment-extractors.mjs';
 
-const datasetRoot = path.resolve('evaluation/hwpx-public-sector-v1');
+const datasetRoot = path.resolve('evaluation/hwpx-agent-final-20-v1');
+const datasetManifest = JSON.parse(await fs.readFile(path.join(datasetRoot, 'manifest.json'), 'utf8'));
 const attachmentsPayload = JSON.parse(await fs.readFile(path.join(datasetRoot, 'attachments.json'), 'utf8'));
 const attachmentById = new Map(attachmentsPayload.attachments.map((attachment) => [attachment.id, attachment]));
 const scenarioLines = (await fs.readFile(path.join(datasetRoot, 'scenarios.jsonl'), 'utf8'))
@@ -654,7 +655,7 @@ try {
 
 const completedAt = new Date().toISOString();
 const summary = {
-  version: '1.0.0',
+  version: datasetManifest.version,
   startedAt,
   completedAt,
   renderMode,
