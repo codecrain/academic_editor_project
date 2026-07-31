@@ -32,6 +32,15 @@ function textBlockAfter(source, heading) {
   return match[1].trim().split(/\r?\n/).map((item) => item.trim()).filter(Boolean);
 }
 
+function markdownToolListAfter(source, heading) {
+  const start = source.indexOf(heading);
+  assert.notEqual(start, -1, `missing heading: ${heading}`);
+  const following = source.slice(start + heading.length);
+  const boundary = following.search(/\n(?:HWPX MCP tools:|## )/);
+  const section = boundary < 0 ? following : following.slice(0, boundary);
+  return [...section.matchAll(/^\s*-\s+`([^`]+)`/gm)].map((match) => match[1]);
+}
+
 test('canonical documentation has no superseded editor claims', () => {
   const combined = [...canonical.entries()]
     .map(([relativePath, source]) => `\n# ${relativePath}\n${source}`)
@@ -78,6 +87,12 @@ test('documented command lists match executable catalogs exactly', () => {
 });
 
 test('documented MCP tool lists match executable HWPX and PDF tools', () => {
+  assert.deepEqual(
+    markdownToolListAfter(canonical.get('API.md'), 'DOCX MCP tools:'),
+    DOCX_MCP_TOOLS.map((tool) => tool.name),
+  );
+  assert.match(canonical.get('API.md'), /DOCX additionally supports\s+`references`/);
+  assert.match(canonical.get('API.md'), /Only `editor_docx_render_pages` and `editor_docx_export_pdf` return an\s+authoritative renderer page count/);
   const documented = textBlockAfter(canonical.get('docs/HWPX_MCP_API.md'), '## Tools');
   assert.deepEqual(documented, HWPX_MCP_TOOLS.map((tool) => tool.name));
   assert.equal(HWPX_MCP_TOOLS.length, 16);

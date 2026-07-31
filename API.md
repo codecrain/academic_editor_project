@@ -28,6 +28,7 @@ DOCX MCP tools:
 - `editor_docx_save_checkpoint`
 - `editor_docx_artifact_read` (application-side binary handoff)
 - `editor_docx_artifact_delete` (delete a handed-off DOCX/PDF artifact)
+- `editor_docx_prepare_review` (creates the candidate DOCX and tracked-review DOCX for approval; it closes the edit session)
 
 HWPX MCP tools:
 
@@ -114,7 +115,8 @@ projections instead:
 }
 ```
 
-`view` is `summary` (default), `blocks`, or `tables`. `limit` is `1..100`,
+`view` is `summary` (default), `blocks`, or `tables`; DOCX additionally supports
+`references` for native citation occurrences. `limit` is `1..100`,
 `textPreviewChars` is `32..512`, and `cellPreviewLimit` is `0..12`. The summary
 view is always one compact item. Blocks contain an exact location, length,
 style fingerprint, and capped `textPreview`; tables contain compact metadata
@@ -139,6 +141,12 @@ For table pages the envelope also includes `cellPreviewLimit`. An item whose
 own compact projection cannot fit the response budget is returned atomically
 with `oversizedItem=true`; the server never splits one target or table across
 pages.
+
+For DOCX, the page count in `open`, `summary`, and `quality_check` is a
+paragraph-heuristic estimate (`pageCountEstimate` / `pageCountIsEstimate=true`).
+Only `editor_docx_render_pages` and `editor_docx_export_pdf` return an
+authoritative renderer page count. Do not use an estimate for final page
+coverage or user-visible pagination.
 
 Target enumeration is a separate one-kind stream:
 
