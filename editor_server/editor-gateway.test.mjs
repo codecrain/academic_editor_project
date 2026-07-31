@@ -136,6 +136,7 @@ test('DOCX review comparison sends candidate and baseline and requires real revi
   try {
     const result = await compareDocxBytes({
       docxRuntimeOrigin: `http://127.0.0.1:${address.port}`,
+      docxServiceRoot: '/docx',
       docxRenderOperationTimeoutSeconds: 5,
       docxRenderMaxResultBytes: 2 * 1024 * 1024,
     }, createDocxBytes({ paragraphs: ['Revised sentence.'] }), createDocxBytes({
@@ -145,7 +146,7 @@ test('DOCX review comparison sends candidate and baseline and requires real revi
     assert.equal(result.revisionElements.total, 2);
     assert.deepEqual(observedRequest, {
       method: 'POST',
-      url: '/cool/convert-to',
+      url: '/docx/cool/convert-to',
       contentType: observedRequest.contentType,
     });
     assert.match(observedRequest.contentType, /^multipart\/form-data; boundary=/);

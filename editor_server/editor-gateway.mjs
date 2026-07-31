@@ -1695,7 +1695,8 @@ async function compareDocxBytes(config, candidateBytes, baselineBytes, filename 
     type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   }), `baseline-${safeFilename}`);
   form.append('format', 'docx');
-  const response = await fetch(`${config.docxRuntimeOrigin}/cool/convert-to`, {
+  const serviceRoot = String(config.docxServiceRoot || '').replace(/\/$/, '');
+  const response = await fetch(`${config.docxRuntimeOrigin}${serviceRoot}/cool/convert-to`, {
     method: 'POST',
     body: form,
     signal: AbortSignal.timeout(config.docxRenderOperationTimeoutSeconds * 1000),
