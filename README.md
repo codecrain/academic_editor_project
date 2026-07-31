@@ -199,16 +199,6 @@ document locale, but Korean is not offered as a verified spell-check language.
 A fully rendered acceptance check still requires an editable WOPI document;
 the source contract test does not substitute for that runtime check.
 
-DOCX automatic spelling is intentionally limited to English (US), English
-(UK), Spanish (Spain), French (France), and German (Germany). These menu choices
-map to the vendored LibreOffice Hunspell dictionaries and are checked by
-`editor_docx/scripts/spellcheck-dictionary-contract.test.mjs`, including locale
-registration, dictionary size, root-word lookup, affix-generated forms, and
-negative typo samples. The Korean engine pack remains installed for the UI and
-document locale, but Korean is not offered as a verified spell-check language.
-A fully rendered acceptance check still requires an editable WOPI document;
-the source contract test does not substitute for that runtime check.
-
 For browser/server source hacking on a Linux dev host, use the source loop:
 
 ```bash
