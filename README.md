@@ -129,6 +129,16 @@ the caller must start a fresh stream. Normal structured pages are budgeted near
 9 KiB so the complete MCP JSON-RPC response stays near or below 24 KiB at item
 boundaries. See `API.md` and `tools/list` for exact limits and fields.
 
+Document API work runs outside the gateway event loop. The gateway assigns a
+document to a stable worker lane, serializes operations for that document, and
+runs different document lanes concurrently. REST and MCP request and response
+shapes are unchanged: callers still wait for the normal response. The worker
+count defaults to the host's available CPU parallelism and can be overridden
+with `EDITOR_SESSION_WORKERS`; it is not a user or document-count limit.
+Worker threads start lazily. A lane that handles HWPX keeps its WASM runtime
+warm for reuse, so HWPX-heavy deployments should size the worker count against
+both CPU and available memory rather than treating it as a connection quota.
+
 When the gateway binds beyond loopback, startup is fail-closed unless a Bearer
 token is configured:
 
@@ -415,6 +425,10 @@ Runtime environment variables:
 - `EDITOR_NATIVE_PM2_NAME`: native pm2 process name. Default: `academic-editor-native`.
 - `EDITOR_HOST_PORT`: editor port. Default: `9980`.
 - `EDITOR_SERVICE_ROOT`: document editor URL prefix. `npm run dev` defaults to `/docx`.
+- `EDITOR_SESSION_WORKERS`: document API worker lanes. Defaults to the host's
+  available CPU parallelism; this is not a user or document-count limit.
+- `EDITOR_DOCUMENT_MAX_COUNT`: optional persistent DOCX storage count cap. It
+  is unset by default; configure it only when an operational quota is required.
 - `EDITOR_PUBLIC_URL`: public service origin used by browser iframes.
 - `EDITOR_INTERNAL_SERVER_URL`: internal editor origin. Default: `http://127.0.0.1:${EDITOR_HOST_PORT}`.
 - `EDITOR_DISCOVERY_SERVER_URL`: discovery origin. Default: `EDITOR_INTERNAL_SERVER_URL`.

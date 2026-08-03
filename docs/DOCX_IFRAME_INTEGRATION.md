@@ -23,6 +23,10 @@ Implemented today:
   product `Get_Document_UI_State` diagnostic response.
 - Native DOCX upload and WOPI save paths preserve the uploaded OOXML package
   rather than reconstructing it in the browser.
+- The gateway maps Korean browser or host locales to Collabora `lang=ko` and
+  English locales to `lang=en-US`. An explicit `lang` or `ui_language` value
+  on the signed editor request takes precedence over the browser's
+  `Accept-Language`; unsupported locales fall back to English.
 
 Not implemented in this pass:
 

@@ -15,6 +15,19 @@ interface FontEntry {
   unicodeRange?: string;
 }
 
+function appBasePath(): string {
+  const configured = import.meta.env.BASE_URL || '/';
+  return configured.endsWith('/') ? configured : `${configured}/`;
+}
+
+export function resolveFontAssetUrl(file: string, basePath = appBasePath()): string {
+  if (/^(?:[a-z]+:)?\/\//i.test(file) || file.startsWith('data:') || file.startsWith('blob:')) {
+    return file;
+  }
+  const normalizedBase = basePath.endsWith('/') ? basePath : `${basePath}/`;
+  return `${normalizedBase}${file.replace(/^\/+/, '')}`;
+}
+
 // 함초롬체 CDN (눈누 jsdelivr — 비상업적 사용 허용, 한컴 라이선스)
 const CDN_HAMCHOB_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatang.woff';
 const CDN_HAMCHOB_B = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatangB.woff';
@@ -226,7 +239,7 @@ export async function loadWebFonts(
     style.textContent = FONT_LIST.map(f => {
       const fmt = f.format ?? 'woff2';
       const ur = f.unicodeRange ? ` unicode-range: ${f.unicodeRange};` : '';
-      return `@font-face { font-family: "${f.name}"; src: url("${f.file}") format("${fmt}"); font-display: swap;${ur} }`;
+      return `@font-face { font-family: "${f.name}"; src: url("${resolveFontAssetUrl(f.file)}") format("${fmt}"); font-display: swap;${ur} }`;
     }).join('\n');
     document.head.appendChild(style);
     fontFaceRegistered = true;
@@ -278,7 +291,7 @@ export async function loadWebFonts(
         const names = fileToNames.get(f.file) ?? [f.name];
         const fmt = f.format ?? 'woff2';
         for (const name of names) {
-          const face = new FontFace(name, `url(${f.file}) format('${fmt}')`);
+          const face = new FontFace(name, `url(${resolveFontAssetUrl(f.file)}) format('${fmt}')`);
           const result = await face.load();
           document.fonts.add(result);
         }

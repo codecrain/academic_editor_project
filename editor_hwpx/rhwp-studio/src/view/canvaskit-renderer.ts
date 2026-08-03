@@ -13,6 +13,7 @@ import type {
 } from 'canvaskit-wasm';
 import canvaskitWasmUrl from 'canvaskit-wasm/bin/canvaskit.wasm?url';
 
+import { resolveFontAssetUrl } from '@/core/font-loader';
 import type {
   LayerBounds,
   LayerClipNode,
@@ -110,7 +111,7 @@ export class CanvasKitLayerRenderer {
     // non-goal 이며, 동일 컨트리뷰터의 후속 폰트 단계에서 다룬다 (Refs #536).
     let defaultTypeface: Typeface | null = null;
     try {
-      const response = await fetch('fonts/NotoSansKR-Regular.woff2');
+      const response = await fetch(resolveFontAssetUrl('fonts/NotoSansKR-Regular.woff2'));
       if (response.ok) {
         const bytes = await response.arrayBuffer();
         defaultTypeface = canvasKit.Typeface.MakeFreeTypeFaceFromData(bytes)

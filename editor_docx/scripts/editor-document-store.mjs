@@ -42,7 +42,10 @@ export class EditorDocumentStore {
     this.tokenSecret = String(options.tokenSecret || '');
     this.tokenTtlMs = Number(options.tokenTtlMs || DEFAULT_EDITOR_TOKEN_TTL_MS);
     this.maxFileSize = Number(options.maxFileSize || 50 * 1024 * 1024);
-    this.maxDocuments = Number(options.maxDocuments || 1000);
+    const maxDocuments = Number(options.maxDocuments);
+    this.maxDocuments = Number.isSafeInteger(maxDocuments) && maxDocuments > 0
+      ? maxDocuments
+      : Number.POSITIVE_INFINITY;
     if (this.tokenSecret.length < 32) {
       throw new Error('EDITOR_GATEWAY_TOKEN_SECRET must be at least 32 characters');
     }
@@ -74,7 +77,8 @@ export class EditorDocumentStore {
       throw new Error(`DOCX exceeds ${this.maxFileSize} bytes`);
     }
     const existing = await readdir(this.root, { withFileTypes: true });
-    if (existing.filter((entry) => entry.isDirectory() && this.isDocumentId(entry.name)).length >= this.maxDocuments) {
+    if (Number.isFinite(this.maxDocuments) &&
+        existing.filter((entry) => entry.isDirectory() && this.isDocumentId(entry.name)).length >= this.maxDocuments) {
       throw new Error('Editor document quota exceeded');
     }
     const documentId = randomUUID();

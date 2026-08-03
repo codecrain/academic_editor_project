@@ -18,6 +18,21 @@ import {
   EditorDocumentStore,
 } from '../../editor_docx/scripts/editor-document-store.mjs';
 
+function countRevisionElements(bytes) {
+  const session = new DocxApiSession(bytes);
+  let insertions = 0;
+  let deletions = 0;
+  let formatting = 0;
+  for (const [name, value] of session.entries) {
+    if (!name.startsWith('word/') || !name.endsWith('.xml')) continue;
+    const xml = value.toString('utf8');
+    insertions += (xml.match(/<w:ins(?:\s|>)/g) || []).length;
+    deletions += (xml.match(/<w:del(?:\s|>)/g) || []).length;
+    formatting += (xml.match(/<w:\w+PrChange(?:\s|>)/g) || []).length;
+  }
+  return { insertions, deletions, formatting, total: insertions + deletions + formatting };
+}
+
 const docxAdapter = Object.freeze({
   format: 'docx',
   extension: 'docx',
@@ -33,6 +48,7 @@ const docxAdapter = Object.freeze({
     return new DocxApiSession(bytes);
   },
   visibleText: getDocumentVisibleText,
+  countRevisionElements,
   renderPages: renderDocxWithUno,
   commandCatalog: getDocxCommandCatalog,
   validateCommands: validateDocxCommands,

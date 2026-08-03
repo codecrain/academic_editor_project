@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { copyFile, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -16,18 +17,19 @@ import {
   commandDescription,
   commandReviewMode,
 } from './docx-activity.mjs';
-import { docxAdapter } from './format-adapters/docx-adapter.mjs';
-import { hwpxAdapter } from './format-adapters/hwpx-adapter.mjs';
-import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
+import { EditorSessionWorkerPool, defaultWorkerCount } from './editor-session-runtime.mjs';
+import {
+  docxAdapter,
+  formatAdapters,
+  hwpxAdapter,
+  pdfAdapter,
+} from './format-adapters/index.mjs';
 import { ImageSessionStore } from '../editor_image/image-session-store.mjs';
 
-const formatAdapters = new Map([
-  [docxAdapter.format, docxAdapter],
-  [hwpxAdapter.format, hwpxAdapter],
-  [pdfAdapter.format, pdfAdapter],
-]);
 const EditorDocumentStore = docxAdapter.documentStoreClass;
 const DEFAULT_EDITOR_TOKEN_TTL_MS = docxAdapter.defaultDocumentTokenTtlMs;
+const DEFAULT_DOCX_UI_LANGUAGE = 'en-US';
+const editorOperationContext = new AsyncLocalStorage();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -90,6 +92,36 @@ function normalizeOrigin(value) {
 function normalizeOptionalOrigin(value) {
   const raw = String(value || '').trim();
   return raw ? normalizeOrigin(raw) : '';
+}
+
+function normalizeDocxUiLanguage(value) {
+  const normalized = String(value || '').trim().replace(/_/g, '-').toLowerCase();
+  if (normalized === 'ko' || normalized.startsWith('ko-')) return 'ko';
+  if (normalized === 'en' || normalized.startsWith('en-')) return 'en-US';
+  return '';
+}
+
+function resolveDocxUiLanguage(explicitLanguage, acceptLanguage = '') {
+  const explicit = normalizeDocxUiLanguage(explicitLanguage);
+  if (explicit) return explicit;
+  if (String(explicitLanguage || '').trim()) return DEFAULT_DOCX_UI_LANGUAGE;
+
+  const accepted = String(acceptLanguage || '')
+    .split(',')
+    .map((entry, index) => {
+      const [language, ...parameters] = entry.trim().split(';');
+      const qualityParameter = parameters.find((parameter) => parameter.trim().toLowerCase().startsWith('q='));
+      const quality = qualityParameter ? Number.parseFloat(qualityParameter.split('=')[1]) : 1;
+      return { language, quality: Number.isFinite(quality) ? quality : 0, index };
+    })
+    .filter((entry) => entry.quality > 0)
+    .sort((left, right) => right.quality - left.quality || left.index - right.index);
+
+  for (const entry of accepted) {
+    const supported = normalizeDocxUiLanguage(entry.language);
+    if (supported) return supported;
+  }
+  return DEFAULT_DOCX_UI_LANGUAGE;
 }
 
 function htmlEscape(value) {
@@ -299,23 +331,42 @@ function renderDocxActivityUi(options = {}) {
   const documentId = String(options.documentId || '');
   const accessToken = String(options.accessToken || '');
   if (!documentId || !accessToken) return '';
+  const uiLanguage = resolveDocxUiLanguage(options.uiLanguage);
+  const messages = uiLanguage === 'ko'
+    ? {
+        readOnlyPreview: '읽기 전용 미리보기',
+        documentActivity: '문서 활동',
+        editingEnabled: '편집 가능',
+        dismissActivity: '문서 활동 닫기',
+        status: { running: '진행 중', completed: '완료', failed: '실패' },
+      }
+    : {
+        readOnlyPreview: 'Read-only preview',
+        documentActivity: 'Document activity',
+        editingEnabled: 'Editing enabled',
+        dismissActivity: 'Dismiss document activity',
+        status: { running: 'running', completed: 'completed', failed: 'failed' },
+      };
   const activityUrl = `${options.docxServiceRoot || '/docx'}/activity/${encodeURIComponent(documentId)}?access_token=${encodeURIComponent(accessToken)}`;
   const clientConfig = JSON.stringify({
     activityUrl,
     idleMs: 10_000,
     eventLifetimeMs: 7_000,
     readOnly: options.readOnly === true,
+    statusLabels: messages.status,
+    readOnlyLabel: messages.readOnlyPreview,
+    dismissActivityLabel: messages.dismissActivity,
   }).replace(/</g, '\\u003c');
   return `
   <div id="docx-activity-shell" class="${options.readOnly === true ? 'is-read-only' : ''}" aria-live="polite">
-    <button id="docx-readonly-pill" type="button" aria-label="Read-only preview details">
+    <button id="docx-readonly-pill" type="button" aria-label="${messages.readOnlyPreview}">
       <span aria-hidden="true">🔒</span><span>Read-only preview</span>
     </button>
-    <section id="docx-activity-panel" aria-label="Document activity">
+    <section id="docx-activity-panel" aria-label="${messages.documentActivity}">
       <header>
         <div>
-          <strong>Document activity</strong>
-          <span id="docx-activity-mode">${options.readOnly === true ? 'Read-only preview' : 'Editing enabled'}</span>
+          <strong>${messages.documentActivity}</strong>
+          <span id="docx-activity-mode">${options.readOnly === true ? messages.readOnlyPreview : messages.editingEnabled}</span>
         </div>
         <button id="docx-activity-close" type="button" aria-label="Dismiss document activity">×</button>
       </header>
@@ -451,6 +502,9 @@ function renderDocxActivityUi(options = {}) {
       const list = document.getElementById('docx-activity-events');
       const closeButton = document.getElementById('docx-activity-close');
       const readOnlyPill = document.getElementById('docx-readonly-pill');
+      readOnlyPill.setAttribute('aria-label', config.readOnlyLabel);
+      readOnlyPill.querySelector('span:last-child').textContent = config.readOnlyLabel;
+      closeButton.setAttribute('aria-label', config.dismissActivityLabel);
       const rows = new Map();
       const expiryTimers = new Map();
       let currentOperationId = '';
@@ -512,7 +566,7 @@ function renderDocxActivityUi(options = {}) {
         detail.hidden = !event.detail;
         const icon = row.querySelector('.docx-activity-icon');
         icon.textContent = event.status === 'completed' ? '✓' : event.status === 'failed' ? '!' : '';
-        row.setAttribute('aria-label', event.label + ': ' + event.status);
+        row.setAttribute('aria-label', event.label + ': ' + (config.statusLabels[event.status] || event.status));
         clearTimeout(expiryTimers.get(event.id));
         expiryTimers.set(event.id, setTimeout(() => removeRow(event.id), Math.max(0, expiresAt - Date.now())));
       };
@@ -564,6 +618,8 @@ function renderDocxActivityUi(options = {}) {
 }
 
 function renderDocxPage(editorUrl, formParameters = null, activityOptions = null) {
+  const editorLanguage = resolveDocxUiLanguage(new URL(editorUrl, 'http://localhost').searchParams.get('lang'));
+  const documentLanguage = editorLanguage === 'ko' ? 'ko' : 'en';
   const frameBridge = `
   <script>
     (() => {
@@ -592,7 +648,7 @@ function renderDocxPage(editorUrl, formParameters = null, activityOptions = null
       .map(([name, value]) => `    <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}">`)
       .join('\n');
     return `<!doctype html>
-<html lang="en">
+<html lang="${documentLanguage}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -610,7 +666,7 @@ ${inputs}
 </html>`;
   }
   return `<!doctype html>
-<html lang="en">
+<html lang="${documentLanguage}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1041,10 +1097,14 @@ async function readApiSourceBytes(fmt, source = {}) {
   throw new Error(`${fmt.toUpperCase()} API open source is invalid.`);
 }
 
-async function createApiSession(fmt, bytes, options = {}) {
+async function createApiSession(fmt, documentId, bytes, options, config) {
+  if (config.editorSessionRuntime) {
+    return config.editorSessionRuntime.open(documentId, fmt, bytes, options);
+  }
   const adapter = formatAdapters.get(fmt);
   if (!adapter) throw new Error(`unsupported format: ${fmt}`);
-  return adapter.createSession(bytes, options);
+  const session = await adapter.createSession(bytes, options);
+  return { session, json: await session.readJson() };
 }
 
 function apiStore(state) {
@@ -1053,9 +1113,17 @@ function apiStore(state) {
 }
 
 function discardApiSessionState(state, documentId, options = {}) {
-  const deleted = apiStore(state).delete(documentId);
+  const store = apiStore(state);
+  const record = store.get(documentId);
+  const deleted = store.delete(documentId);
+  if (record?.session?.close) {
+    Promise.resolve(record.session.close()).catch(() => undefined);
+  }
   if (options.clearLock !== false) {
-    state.mcpDocumentLocks?.delete(documentId);
+    const activeQueue = state.documentOperations?.get(documentId);
+    if (!activeQueue?.activeOwner) {
+      state.documentOperations?.delete(documentId);
+    }
   }
   return deleted;
 }
@@ -1178,9 +1246,9 @@ function pruneExpiredApiSessions(state, ttlMs) {
   }
 }
 
-function pageCountFromSession(session) {
+async function pageCountFromSession(session) {
   try {
-    return session.readJson().pageCount ?? 1;
+    return (await session.readJson()).pageCount ?? 1;
   } catch {
     return 1;
   }
@@ -1484,8 +1552,8 @@ function normalizeReadQuery(args = {}) {
   };
 }
 
-function boundedDocxReadPage(state, documentId, session, args = {}) {
-  const json = session.readJson();
+async function boundedDocxReadPage(state, documentId, session, args = {}) {
+  const json = await session.readJson();
   const revision = Number(json.revision);
   let query;
   let offset = 0;
@@ -1566,7 +1634,7 @@ function normalizeTargetMapQuery(args = {}) {
   };
 }
 
-function boundedDocxTargetMapPage(state, documentId, session, args = {}) {
+async function boundedDocxTargetMapPage(state, documentId, session, args = {}) {
   const revision = Number(session.revision);
   let query;
   let offset = 0;
@@ -1581,7 +1649,7 @@ function boundedDocxTargetMapPage(state, documentId, session, args = {}) {
     query = normalizeTargetMapQuery(args);
   }
 
-  const targetMap = session.targetMap();
+  const targetMap = await session.targetMap();
   const sourceTargets = query.kind === 'paragraph' ? targetMap.paragraphs ?? [] : targetMap.cells ?? [];
   const filteredTargets = query.tableId
     ? sourceTargets.filter((target) => target.location?.tableId === query.tableId)
@@ -1618,7 +1686,10 @@ function normalizeCommands(body = {}) {
   return body.commands || body.ops || body.commandBatch || [];
 }
 
-function renderHwpxSvgPages(session, pages = []) {
+async function renderHwpxSvgPages(session, pages = []) {
+  if (typeof session.renderHwpxSvgPages === 'function') {
+    return session.renderHwpxSvgPages(pages);
+  }
   if (typeof session.doc?.renderPageSvg !== 'function') {
     return [];
   }
@@ -1670,19 +1741,7 @@ async function renderDocxBytes(config, bytes, pages) {
 }
 
 function countDocxRevisionElements(bytes) {
-  const session = docxAdapter.createRawSession(bytes);
-  const entries = session.entries;
-  let insertions = 0;
-  let deletions = 0;
-  let formatting = 0;
-  for (const [name, value] of entries) {
-    if (!name.startsWith('word/') || !name.endsWith('.xml')) continue;
-    const xml = value.toString('utf8');
-    insertions += (xml.match(/<w:ins(?:\s|>)/g) || []).length;
-    deletions += (xml.match(/<w:del(?:\s|>)/g) || []).length;
-    formatting += (xml.match(/<w:\w+PrChange(?:\s|>)/g) || []).length;
-  }
-  return { insertions, deletions, formatting, total: insertions + deletions + formatting };
+  return docxAdapter.countRevisionElements(bytes);
 }
 
 async function compareDocxBytes(config, candidateBytes, baselineBytes, filename = 'document.docx') {
@@ -1711,7 +1770,9 @@ async function compareDocxBytes(config, candidateBytes, baselineBytes, filename 
   if (trackedBytes.length > config.docxRenderMaxResultBytes) {
     throw new Error('DOCX review comparison exceeded the configured result limit.');
   }
-  const revisionElements = countDocxRevisionElements(trackedBytes);
+  const revisionElements = config.editorSessionRuntime
+    ? await config.editorSessionRuntime.countDocxRevisionElements(`review:${randomUUID()}`, trackedBytes)
+    : countDocxRevisionElements(trackedBytes);
   if (!revisionElements.total) {
     throw new Error('DOCX review comparison produced no revision markup.');
   }
@@ -1753,9 +1814,8 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     sendJson(res, 400, { ok: false, message: error instanceof Error ? error.message : String(error) });
     return true;
   }
-  const session = await createApiSession(fmt, bytes, body);
   const id = `doc_${randomUUID()}`;
-  const json = session.readJson();
+  const { session, json } = await createApiSession(fmt, id, bytes, body, config);
   pruneExpiredApiSessions(state, config.apiSessionTtlMs);
   const now = Date.now();
   const record = {
@@ -1783,7 +1843,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     sessionId: id,
     fmt,
     revision: session.revision,
-    pageCount: json.pageCount ?? pageCountFromSession(session),
+    pageCount: json.pageCount ?? await pageCountFromSession(session),
     ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
     ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
     ...(json.pageCountIsEstimate !== undefined ? { pageCountIsEstimate: Boolean(json.pageCountIsEstimate) } : {}),
@@ -1864,23 +1924,26 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   }
   if (actionPath === 'documents/read-json' || actionPath === 'export' && body.type === 'json') {
     if (body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
-      sendJson(res, 200, boundedDocxReadPage(state, id, session, body));
+      sendJson(res, 200, await boundedDocxReadPage(state, id, session, body));
       return true;
     }
-    sendJson(res, 200, session.readJson());
+    sendJson(res, 200, await session.readJson());
     return true;
   }
   if (actionPath === 'target/map' || actionPath === 'targets/map') {
     if (body.responseMode === MCP_BOUNDED_RESPONSE_MODE) {
-      sendJson(res, 200, boundedDocxTargetMapPage(state, id, session, body));
+      sendJson(res, 200, await boundedDocxTargetMapPage(state, id, session, body));
       return true;
     }
-    sendJson(res, 200, { editableTargets: session.targetMap(), locations: session.targetMap() });
+    const targetMap = await session.targetMap();
+    sendJson(res, 200, { editableTargets: targetMap, locations: targetMap });
     return true;
   }
   if (actionPath === 'target/inspect' || actionPath === 'targets/inspect') {
     const locations = body.locations || (body.location ? [body.location] : []);
-    const targets = locations.map((location) => session.inspectTarget(location));
+    const targets = typeof session.inspectTargets === 'function'
+      ? await session.inspectTargets(locations)
+      : locations.map((location) => session.inspectTarget(location));
     const adapter = formatAdapters.get(fmt);
     const inspectedTargetKeys = targets.map((target) => adapter.stableTargetKey(target.location));
     if (inspectedTargetKeys.some((key) => !key)) {
@@ -1913,11 +1976,11 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 422, { ok: false, message: 'target/find requires query or selector.text.' });
       return true;
     }
-    sendJson(res, 200, { target: session.resolveText(query, body.match || {}), ambiguous: false });
+    sendJson(res, 200, { target: await session.resolveText(query, body.match || {}), ambiguous: false });
     return true;
   }
   if (actionPath === 'object/inventory' || actionPath === 'objects/inventory') {
-    const inventory = session.objectInventory();
+    const inventory = await session.objectInventory();
     recordPreconditions(record).inventoryRevision = session.revision;
     sendJson(res, 200, { revision: session.revision, ...inventory });
     return true;
@@ -2058,7 +2121,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     const requestedPage = Number(body.page ?? body.pageNumber ?? 1);
     const pageNumber = Number.isFinite(requestedPage) && requestedPage > 0 ? requestedPage : 1;
     if (fmt === 'hwpx') {
-      const pages = renderHwpxSvgPages(session, [pageNumber]);
+      const pages = await renderHwpxSvgPages(session, [pageNumber]);
       sendJson(res, 200, { page: pages[0], pages, renderer: 'rhwp-svg' });
       return true;
     }
@@ -2075,13 +2138,13 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'pages/render-all' || actionPath === 'export' && body.type === 'pages-image') {
-    const pageCount = pageCountFromSession(session);
+    const pageCount = await pageCountFromSession(session);
     const pages = renderPageSelection(body, 'all');
     if (fmt === 'hwpx') {
       const hwpxPages = pages === 'all'
         ? Array.from({ length: pageCount }, (_value, index) => index + 1)
         : pages;
-      sendJson(res, 200, { pages: renderHwpxSvgPages(session, hwpxPages), renderer: 'rhwp-svg' });
+      sendJson(res, 200, { pages: await renderHwpxSvgPages(session, hwpxPages), renderer: 'rhwp-svg' });
       return true;
     }
     if (fmt === 'pdf') {
@@ -2128,21 +2191,34 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       });
       return true;
     }
-    const pageCount = pageCountFromSession(session);
+    const pageCount = await pageCountFromSession(session);
     const pages = normalizePageRange(body, pageCount);
-    const baselineSession = hwpxAdapter.createRawSession(record.sourceBytes);
+    const baseline = config.editorSessionRuntime
+      ? await config.editorSessionRuntime.renderHwpxBytes(`${id}:baseline`, record.sourceBytes, pages)
+      : (() => {
+          const baselineSession = hwpxAdapter.createRawSession(record.sourceBytes);
+          return {
+            pageCount: baselineSession.readJson().pageCount ?? 1,
+            pages: baselineSession.doc?.renderPageSvg
+              ? pages.map((page) => {
+                  const svg = baselineSession.doc.renderPageSvg(Math.max(1, Number(page) || 1) - 1);
+                  return { page, format: 'svg', nonBlank: String(svg || '').length > 80, svg };
+                })
+              : [],
+          };
+        })();
     sendJson(res, 200, {
       ok: quality.ok,
       revision: session.revision,
       baseline: {
         revision: 1,
-        pageCount: pageCountFromSession(baselineSession),
-        pages: renderHwpxSvgPages(baselineSession, pages),
+        pageCount: baseline.pageCount,
+        pages: baseline.pages,
       },
       current: {
         revision: session.revision,
         pageCount,
-        pages: renderHwpxSvgPages(session, pages),
+        pages: await renderHwpxSvgPages(session, pages),
       },
       quality,
       visualComparisonRequired: true,
@@ -2199,11 +2275,21 @@ async function handleEditorApi(req, res, config, state, pathname) {
   }
   const documentMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/documents\/([^/]+)\/(.+)$/);
   if (documentMatch) {
-    return handleEditorApiAction(req, res, config, state, documentMatch[1], documentMatch[2], documentMatch[3]);
+    return withDocumentOperation(
+      state,
+      documentMatch[2],
+      () => handleEditorApiAction(req, res, config, state, documentMatch[1], documentMatch[2], documentMatch[3]),
+      getHeader(req, 'x-editor-operation-owner'),
+    );
   }
   const sessionMatch = pathname.match(/^\/v1\/(docx|hwpx|pdf)\/sessions\/([^/]+)\/(.+)$/);
   if (sessionMatch) {
-    return handleEditorApiAction(req, res, config, state, sessionMatch[1], sessionMatch[2], sessionMatch[3]);
+    return withDocumentOperation(
+      state,
+      sessionMatch[2],
+      () => handleEditorApiAction(req, res, config, state, sessionMatch[1], sessionMatch[2], sessionMatch[3]),
+      getHeader(req, 'x-editor-operation-owner'),
+    );
   }
   sendJson(res, 404, { ok: false, message: 'Unknown editor API route.' });
   return true;
@@ -2674,7 +2760,7 @@ async function handleLiveDocxWopi(req, res, config, state, documentId) {
     return true;
   }
   record.lastAccessedAt = Date.now();
-  const saved = record.session.save();
+  const saved = await record.session.save();
   const bytes = saved.bytes;
   const version = String(saved.revision);
 
@@ -3052,6 +3138,10 @@ async function postLocalEditorApi(req, config, pathname, body) {
   if (config.internalBearerToken) {
     headers.Authorization = `Bearer ${config.internalBearerToken}`;
   }
+  const operationOwner = editorOperationContext.getStore()?.owner;
+  if (operationOwner) {
+    headers['X-Editor-Operation-Owner'] = operationOwner;
+  }
   const response = await fetch(`${localEditorApiOrigin(req)}${pathname}`, {
     method: 'POST',
     headers,
@@ -3070,16 +3160,31 @@ async function postLocalEditorApi(req, config, pathname, body) {
   return payload;
 }
 
-async function withMcpDocumentLock(state, documentId, operation) {
-  state.mcpDocumentLocks ??= new Map();
-  const previous = state.mcpDocumentLocks.get(documentId) || Promise.resolve();
-  const current = previous.catch(() => undefined).then(operation);
-  state.mcpDocumentLocks.set(documentId, current);
+async function withDocumentOperation(state, documentId, operation, requestedOwner = '') {
+  state.documentOperations ??= new Map();
+  let queue = state.documentOperations.get(documentId);
+  if (requestedOwner && queue?.activeOwner === requestedOwner) {
+    return operation(requestedOwner);
+  }
+  if (!queue) {
+    queue = { activeOwner: '', tail: Promise.resolve() };
+    state.documentOperations.set(documentId, queue);
+  }
+  const owner = randomUUID();
+  const current = queue.tail.catch(() => undefined).then(async () => {
+    queue.activeOwner = owner;
+    try {
+      return await operation(owner);
+    } finally {
+      if (queue.activeOwner === owner) queue.activeOwner = '';
+    }
+  });
+  queue.tail = current;
   try {
     return await current;
   } finally {
-    if (state.mcpDocumentLocks.get(documentId) === current) {
-      state.mcpDocumentLocks.delete(documentId);
+    if (state.documentOperations.get(documentId) === queue && queue.tail === current && !queue.activeOwner) {
+      state.documentOperations.delete(documentId);
     }
   }
 }
@@ -3208,7 +3313,9 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     throw new Error('documentId is required.');
   }
 
-  return withMcpDocumentLock(state, documentId, async () => {
+  return withDocumentOperation(state, documentId, (operationOwner) => editorOperationContext.run(
+    { owner: operationOwner },
+    async () => {
     if (name === `${toolPrefix}_discard`) {
       const record = findApiRecord(state, fmt, documentId);
       if (!record) {
@@ -3382,8 +3489,9 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         verified: false,
       };
     }
-    throw new Error(`Unsupported editor MCP tool: ${name}`);
-  });
+      throw new Error(`Unsupported editor MCP tool: ${name}`);
+    },
+  ));
 }
 
 async function handleEditorMcp(req, res, config, state) {
@@ -3443,6 +3551,10 @@ function createGatewayServer(config) {
     ...config,
   };
   config.documentLocks ??= new Map();
+  const ownsEditorSessionRuntime = !config.editorSessionRuntime;
+  config.editorSessionRuntime ??= new EditorSessionWorkerPool({
+    size: config.editorSessionWorkerCount || defaultWorkerCount(),
+  });
   config.imageSessionStore ??= new ImageSessionStore({
     maxImageBytes: config.imageSessionMaxBytes,
     maxProjectBytes: config.imageProjectMaxBytes,
@@ -3476,7 +3588,12 @@ function createGatewayServer(config) {
 
       const storedDocumentRoute = editorDocumentApiMatch(pathname);
       if (storedDocumentRoute && config.documentStore) {
-        await handleStoredDocumentApi(req, res, config, storedDocumentRoute);
+        const handleStoredRequest = () => handleStoredDocumentApi(req, res, config, storedDocumentRoute);
+        if (storedDocumentRoute.documentId) {
+          await withDocumentOperation(state, storedDocumentRoute.documentId, handleStoredRequest);
+        } else {
+          await handleStoredRequest();
+        }
         return;
       }
 
@@ -3495,9 +3612,16 @@ function createGatewayServer(config) {
         let formParameters;
         let tokenPayload;
         let readOnly = true;
+        let uiLanguage = DEFAULT_DOCX_UI_LANGUAGE;
         try {
           const params = await readFormBody(req);
           formParameters = validateExternalWopiRequest(documentId, params, config);
+          const requestUrl = new URL(req.url || '/', config.publicOrigin);
+          uiLanguage = resolveDocxUiLanguage(
+            params.get('ui_language') || params.get('lang') ||
+              requestUrl.searchParams.get('ui_language') || requestUrl.searchParams.get('lang'),
+            getHeader(req, 'accept-language'),
+          );
           if (!config.documentStore) {
             throw new Error('Editor document store is unavailable');
           }
@@ -3514,6 +3638,7 @@ function createGatewayServer(config) {
         }
         const editorUrl = new URL(await buildDocxEditorActionUrl(config, config.publicOrigin));
         editorUrl.searchParams.set('WOPISrc', formParameters.WOPISrc);
+        editorUrl.searchParams.set('lang', uiLanguage);
         sendText(res, 200, renderDocxPage(editorUrl.toString(), {
           access_token: formParameters.access_token,
           access_token_ttl: formParameters.access_token_ttl,
@@ -3522,6 +3647,7 @@ function createGatewayServer(config) {
           accessToken: formParameters.access_token,
           docxServiceRoot: config.docxServiceRoot,
           readOnly,
+          uiLanguage,
         }), 'text/html; charset=utf-8', docxWrapperHeaders(config));
         return;
       }
@@ -3550,11 +3676,19 @@ function createGatewayServer(config) {
       if (isDocxWopiPath(pathname, config.docxServiceRoot)) {
         const wopiDocumentId = getDocxWopiDocumentId(pathname, config.docxServiceRoot);
         if (config.documentStore?.isDocumentId(wopiDocumentId)) {
-          await handleStoredDocxWopi(req, res, config, wopiDocumentId);
+          await withDocumentOperation(
+            state,
+            wopiDocumentId,
+            () => handleStoredDocxWopi(req, res, config, wopiDocumentId),
+          );
           return;
         }
         if (findApiRecord(state, 'docx', wopiDocumentId)) {
-          await handleLiveDocxWopi(req, res, config, state, wopiDocumentId);
+          await withDocumentOperation(
+            state,
+            wopiDocumentId,
+            () => handleLiveDocxWopi(req, res, config, state, wopiDocumentId),
+          );
           return;
         }
         if (!config.enableSampleDocx || wopiDocumentId !== DOCX_WOPI_FILE_ID) {
@@ -3572,7 +3706,13 @@ function createGatewayServer(config) {
         }
         const editorUrl = new URL(await buildDocxEditorActionUrl(config, config.publicOrigin));
         const wopiSrc = `${config.wopiBaseUrl}${config.docxServiceRoot}/wopi/files/${DOCX_WOPI_FILE_ID}`;
+        const requestUrl = new URL(req.url || '/', config.publicOrigin);
+        const uiLanguage = resolveDocxUiLanguage(
+          requestUrl.searchParams.get('ui_language') || requestUrl.searchParams.get('lang'),
+          getHeader(req, 'accept-language'),
+        );
         editorUrl.searchParams.set('WOPISrc', wopiSrc);
+        editorUrl.searchParams.set('lang', uiLanguage);
         sendText(res, 200, renderDocxPage(editorUrl.toString(), {
           access_token: DOCX_WOPI_TOKEN,
           access_token_ttl: String(Date.now() + 12 * 60 * 60 * 1000),
@@ -3625,6 +3765,12 @@ function createGatewayServer(config) {
     }
     proxyWebSocket(req, socket, head, targetOrigin, resolveProxyHeaderOptions(req, targetOrigin, config));
   });
+
+  if (ownsEditorSessionRuntime) {
+    server.once('close', () => {
+      Promise.resolve(config.editorSessionRuntime.close()).catch(() => undefined);
+    });
+  }
 
   return server;
 }
@@ -3704,6 +3850,10 @@ function buildConfigFromEnv() {
     mcpAllowBytesRef: readEnv('EDITOR_MCP_ALLOW_BYTES_REF', 'false').toLowerCase() === 'true',
     mcpArtifactTtlMs: parsePositiveInteger(readEnv('EDITOR_MCP_ARTIFACT_TTL_MS', '86400000'), 86_400_000),
     apiSessionTtlMs: parsePositiveInteger(readEnv('EDITOR_API_SESSION_TTL_MS', '3600000'), 3_600_000),
+    editorSessionWorkerCount: parsePositiveInteger(
+      readEnv('EDITOR_SESSION_WORKERS', String(defaultWorkerCount())),
+      defaultWorkerCount(),
+    ),
     unoPythonBin: readEnv('EDITOR_UNO_PYTHON_BIN', process.platform === 'linux' ? '/opt/collaboraoffice/program/python' : 'python'),
     sofficeBin: readEnv('EDITOR_SOFFICE_BIN', process.platform === 'linux' ? '/opt/collaboraoffice/program/soffice' : 'soffice'),
     docxRenderHelperPath: path.resolve(readEnv('EDITOR_DOCX_RENDER_HELPER', path.join(repoRoot, 'editor_docx', 'scripts', 'render-docx-uno.py'))),
@@ -3731,7 +3881,7 @@ function buildConfigFromEnv() {
       DEFAULT_EDITOR_TOKEN_TTL_MS,
     ),
     documentMaxFileSize: parsePositiveInteger(readEnv('EDITOR_DOCUMENT_MAX_FILE_SIZE', String(50 * 1024 * 1024)), 50 * 1024 * 1024),
-    documentMaxCount: parsePositiveInteger(readEnv('EDITOR_DOCUMENT_MAX_COUNT', '1000'), 1000),
+    documentMaxCount: parsePositiveInteger(readEnv('EDITOR_DOCUMENT_MAX_COUNT'), undefined),
   };
 }
 
@@ -3786,9 +3936,11 @@ export {
   isPdfPath,
   normalizeBasePath,
   normalizeServiceRoot,
+  resolveDocxUiLanguage,
   main,
   renderDocxPage,
   resolveDocxActionPath,
   sanitizeEditorHtml,
   resolveStaticPath,
+  withDocumentOperation,
 };

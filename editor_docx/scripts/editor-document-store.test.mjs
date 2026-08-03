@@ -19,6 +19,14 @@ async function createStore() {
   return { root, store };
 }
 
+test('document store has no heuristic document-count cap by default', () => {
+  const store = new EditorDocumentStore({
+    root: path.join(os.tmpdir(), 'academic-editor-unbounded-store'),
+    tokenSecret: 'test-token-secret-with-at-least-32-characters',
+  });
+  assert.equal(store.maxDocuments, Number.POSITIVE_INFINITY);
+});
+
 test('document store creates isolated persistent DOCX files', async () => {
   const { root, store } = await createStore();
   try {

@@ -82,6 +82,23 @@ inventory preconditions, and a quality check before finalization or PDF
 export. Error-severity findings always block. DOCX new or worsened capacity
 warnings also block; HWPX warnings remain visible for review but do not by
 themselves block a structurally valid package.
+
+### Concurrency and response compatibility
+
+The REST and MCP contracts remain request/response APIs. A caller waits for the
+same success or error response as before; no job ID, polling endpoint, socket,
+or callback is required. Internally, document session work is assigned to a
+stable CPU worker lane. Operations for one `documentId` remain ordered, while
+operations for different documents can execute on different lanes at the same
+time. This prevents synchronous package, WASM, and PDF work from blocking the
+gateway event loop globally.
+
+`EDITOR_SESSION_WORKERS` may override the number of worker lanes. Its default
+is the host's available CPU parallelism. It controls server execution resources
+and does not impose a fixed user, connection, or document limit. DOCX browser
+collaboration continues through the separate local Collabora/WOPI runtime and
+does not change this API contract.
+
 Every `tools/call` argument object is validated against the schema returned by
 `tools/list` before the tool executes. In particular, each format's `open`
 requires top-level `filename` plus exactly one of `bytesBase64` or `bytesRef`;

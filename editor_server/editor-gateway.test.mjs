@@ -21,10 +21,12 @@ import {
   isHwpxPath,
   normalizeBasePath,
   normalizeServiceRoot,
+  resolveDocxUiLanguage,
   renderDocxPage,
   resolveDocxActionPath,
   resolveStaticPath,
   sanitizeEditorHtml,
+  withDocumentOperation,
 } from './editor-gateway.mjs';
 import {
   createDocxBytes,
@@ -259,13 +261,33 @@ test('discardApiSessionState releases the isolated session and its lock idempote
   const documentId = 'doc_discard-test';
   const state = {
     apiDocuments: new Map([[documentId, { id: documentId }]]),
-    mcpDocumentLocks: new Map([[documentId, Promise.resolve()]]),
+    documentOperations: new Map([[documentId, { activeOwner: '', tail: Promise.resolve() }]]),
   };
 
   assert.equal(discardApiSessionState(state, documentId), true);
   assert.equal(state.apiDocuments.has(documentId), false);
-  assert.equal(state.mcpDocumentLocks.has(documentId), false);
+  assert.equal(state.documentOperations.has(documentId), false);
   assert.equal(discardApiSessionState(state, documentId), false);
+});
+
+test('document operations serialize one document and overlap across documents', async () => {
+  const state = {};
+  const events = [];
+  const operation = (label, delayMs) => async () => {
+    events.push(`${label}:start`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    events.push(`${label}:end`);
+  };
+
+  await Promise.all([
+    withDocumentOperation(state, 'doc-a', operation('a1', 40)),
+    withDocumentOperation(state, 'doc-a', operation('a2', 1)),
+    withDocumentOperation(state, 'doc-b', operation('b1', 1)),
+  ]);
+
+  assert.ok(events.indexOf('b1:end') < events.indexOf('a1:end'));
+  assert.ok(events.indexOf('a1:end') < events.indexOf('a2:start'));
+  assert.equal(state.documentOperations.size, 0);
 });
 
 test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workflow', async () => {
@@ -842,7 +864,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       name: 'editor_docx_render_pages',
       arguments: { documentId: opened.documentId, baseRevision: 3, pages: [1, 3], includeBaseline: false },
     });
-    assert.equal(renderCall.result.isError, false);
+    assert.equal(renderCall.result.isError, false, JSON.stringify(renderCall.result.structuredContent));
     assert.deepEqual(renderCall.result.structuredContent.selectedPages, [1, 3]);
     assert.match(renderCall.result.structuredContent.pages[0].bytesBase64, /^[A-Za-z0-9+/]+=*$/);
     assert.equal(renderCall.result.content[0].text.includes(renderCall.result.structuredContent.pages[0].bytesBase64), false);
@@ -1264,6 +1286,15 @@ test('gateway resolves DOCX action URL from discovery XML', () => {
   assert.equal(path, '/docx/browser/abc/cool.html');
 });
 
+test('DOCX UI language supports Korean and English with an English fallback', () => {
+  assert.equal(resolveDocxUiLanguage('ko-KR', 'en-US'), 'ko');
+  assert.equal(resolveDocxUiLanguage('en-GB', 'ko-KR'), 'en-US');
+  assert.equal(resolveDocxUiLanguage('', 'fr-FR, ko-KR;q=0.9, en-US;q=0.8'), 'ko');
+  assert.equal(resolveDocxUiLanguage('', 'fr-FR, en-US;q=0.8'), 'en-US');
+  assert.equal(resolveDocxUiLanguage('ja-JP', 'ko-KR'), 'en-US');
+  assert.equal(resolveDocxUiLanguage('', ''), 'en-US');
+});
+
 test('gateway DOCX page embeds the editor URL directly', () => {
   const html = renderDocxPage('http://127.0.0.1:11004/docx/browser/abc/cool.html?WOPISrc=x');
   assert.match(html, /<iframe/);
@@ -1279,6 +1310,12 @@ test('gateway DOCX page embeds the editor URL directly', () => {
   assert.match(html, /event\.source === editorFrame\?\.contentWindow/);
   assert.match(html, /event\.origin !== parentOrigin/);
   assert.match(html, /editorFrame\.contentWindow\.postMessage/);
+});
+
+test('gateway DOCX page declares the normalized Korean UI language', () => {
+  const html = renderDocxPage('http://127.0.0.1:11004/docx/browser/abc/cool.html?WOPISrc=x&lang=ko-KR');
+  assert.match(html, /<html lang="ko">/);
+  assert.match(html, /lang=ko-KR/);
 });
 
 test('gateway signed DOCX wrapper bridges only the trusted parent and nested editor origins', () => {
@@ -1653,7 +1690,10 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
 
     const openFirst = await fetch(firstSession.actionUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8',
+      },
       body: new URLSearchParams(firstSession.formParameters),
     });
     assert.equal(openFirst.status, 200);
@@ -1664,6 +1704,23 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
     const firstHtml = await openFirst.text();
     assert.match(firstHtml, new RegExp(first.documentId));
     assert.doesNotMatch(firstHtml, new RegExp(second.documentId));
+    assert.match(firstHtml, /<html lang="ko">/);
+    assert.match(firstHtml, /&amp;lang=ko/);
+    assert.match(firstHtml, /문서 활동/);
+
+    const explicitEnglish = await fetch(`${firstSession.actionUrl}?lang=en`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept-Language': 'ko-KR,ko;q=0.9',
+      },
+      body: new URLSearchParams(firstSession.formParameters),
+    });
+    assert.equal(explicitEnglish.status, 200);
+    const explicitEnglishHtml = await explicitEnglish.text();
+    assert.match(explicitEnglishHtml, /<html lang="en">/);
+    assert.match(explicitEnglishHtml, /&amp;lang=en-US/);
+    assert.match(explicitEnglishHtml, /Document activity/);
 
     const unsignedGet = await fetch(firstSession.actionUrl);
     assert.equal(unsignedGet.status, 405);
@@ -2100,7 +2157,7 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
       pages: [1],
       includeBaseline: true,
     });
-    assert.equal(renderCall.result.isError, false);
+    assert.equal(renderCall.result.isError, false, JSON.stringify(renderCall.result.structuredContent));
     assert.equal(renderCall.result.structuredContent.baseline.pages[0].nonBlank, true);
     assert.equal(renderCall.result.structuredContent.current.pages[0].nonBlank, true);
 
