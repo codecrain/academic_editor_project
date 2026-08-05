@@ -1082,17 +1082,32 @@ async function handleImageSessionApi(req, res, config, route) {
   }
 }
 
-async function readApiSourceBytes(fmt, source = {}) {
+async function readApiSourceBytes(fmt, source = {}, config = {}) {
   const sourcePath = source.bytesRef || source.path || source.filePath || source.localPath;
-  const sourceCount = Number(Boolean(source.bytesBase64)) + Number(Boolean(sourcePath && !String(sourcePath).startsWith('blob://')));
+  const storedDocumentId = String(source.storedDocumentId || '').trim();
+  const sourceCount = Number(Boolean(source.bytesBase64))
+    + Number(Boolean(sourcePath && !String(sourcePath).startsWith('blob://')))
+    + Number(Boolean(storedDocumentId));
   if (sourceCount !== 1) {
-    throw new Error(`${fmt.toUpperCase()} API open requires exactly one of source.bytesBase64 or a trusted source path.`);
+    const alternatives = fmt === 'docx'
+      ? 'source.bytesBase64, a trusted source path, or source.storedDocumentId'
+      : 'source.bytesBase64 or a trusted source path';
+    throw new Error(`${fmt.toUpperCase()} API open requires exactly one of ${alternatives}.`);
   }
   if (source.bytesBase64) {
     return Buffer.from(String(source.bytesBase64), 'base64');
   }
   if (sourcePath && !String(sourcePath).startsWith('blob://')) {
     return readFile(path.resolve(String(sourcePath)));
+  }
+  if (storedDocumentId) {
+    if (fmt !== 'docx') {
+      throw new Error('storedDocumentId is supported only for DOCX documents.');
+    }
+    if (!config.documentStore) {
+      throw new Error('Academic Editor document storage is unavailable.');
+    }
+    return config.documentStore.read(storedDocumentId);
   }
   throw new Error(`${fmt.toUpperCase()} API open source is invalid.`);
 }
@@ -1809,7 +1824,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
   const body = await readJsonBody(req);
   let bytes;
   try {
-    bytes = await readApiSourceBytes(fmt, body.source || {});
+    bytes = await readApiSourceBytes(fmt, body.source || {}, config);
   } catch (error) {
     sendJson(res, 400, { ok: false, message: error instanceof Error ? error.message : String(error) });
     return true;
@@ -3275,6 +3290,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       source: {
         ...(args.bytesBase64 ? { bytesBase64: args.bytesBase64 } : {}),
         ...(args.bytesRef ? { bytesRef: args.bytesRef } : {}),
+        ...(args.storedDocumentId ? { storedDocumentId: args.storedDocumentId } : {}),
       },
     });
   }

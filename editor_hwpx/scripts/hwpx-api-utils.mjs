@@ -658,13 +658,21 @@ function readStyleGraph(doc) {
 }
 
 function buildEditableTargets(sections, tables) {
+  // A top-level paragraph can be only the anchor for a nested HWPX table.
+  // Replacing that paragraph destroys the table; only its table-cell targets
+  // are valid text-editing targets.
+  const tableHostParagraphs = new Set(
+    tables.map((table) => `${table.section}:${table.para}`),
+  );
   return {
-    paragraphs: sections.flatMap((section) => section.paragraphs.map((paragraph) => ({
+    paragraphs: sections.flatMap((section) => section.paragraphs
+      .filter((paragraph) => !tableHostParagraphs.has(`${paragraph.section}:${paragraph.para}`))
+      .map((paragraph) => ({
       id: paragraph.id,
       location: { paragraph: { section: paragraph.section, number: paragraph.para } },
       textLength: paragraph.text.length,
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
-    }))),
+      }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
       id: cell.id,
       location: cell.location,
@@ -2473,8 +2481,13 @@ export class HwpxApiSession {
     const rawQuery = String(query ?? '');
     assert.ok(rawQuery.length > 0, 'resolveText requires a non-empty query');
     const caseSensitive = options.caseSensitive ?? false;
+    const kind = options.kind == null ? null : String(options.kind);
+    const exact = options.exact === true;
+    assert.ok(kind === null || kind === 'paragraph' || kind === 'cell', 'resolveText kind must be paragraph or cell');
     const hits = parseResult(this.doc.searchAllText(query, caseSensitive, options.includeCells ?? true), 'searchAllText');
-    const matches = Array.isArray(hits) ? hits : hits.matches ?? [];
+    const matches = (Array.isArray(hits) ? hits : hits.matches ?? [])
+      .filter((item) => kind === null || item?.kind === kind)
+      .filter((item) => !exact || String(item?.text ?? '').trim() === rawQuery.trim());
     const occurrence = options.occurrence ?? 1;
     const match = matches[occurrence - 1];
     if (match) {
@@ -2485,16 +2498,18 @@ export class HwpxApiSession {
     const jsonMatches = [];
     const json = this.exportJson();
     for (const block of json.blocks) {
+      if (kind === 'cell') continue;
       const haystack = caseSensitive ? block.text : block.text.toLowerCase();
       const offset = haystack.indexOf(source);
-      if (offset !== -1) {
+      if (exact ? String(block.text ?? '').trim() === rawQuery.trim() : offset !== -1) {
+        const exactOffset = exact ? 0 : offset;
         jsonMatches.push({
           kind: 'paragraph',
           text: block.text,
-          offset,
+          offset: exactOffset,
           range: {
-            start: { nodeId: block.id, offset },
-            end: { nodeId: block.id, offset: offset + String(query).length },
+            start: { nodeId: block.id, offset: exactOffset },
+            end: { nodeId: block.id, offset: exactOffset + String(query).length },
           },
           location: { paragraph: { section: block.native.section ?? 0, number: block.native.paragraph ?? block.native.para ?? 0 } },
           native: block.native,
@@ -2502,17 +2517,19 @@ export class HwpxApiSession {
       }
     }
     for (const table of json.tables) {
+      if (kind === 'paragraph') continue;
       for (const cell of table.cells) {
         const haystack = caseSensitive ? cell.text : cell.text.toLowerCase();
         const offset = haystack.indexOf(source);
-        if (offset !== -1) {
+        if (exact ? String(cell.text ?? '').trim() === rawQuery.trim() : offset !== -1) {
+          const exactOffset = exact ? 0 : offset;
           jsonMatches.push({
             kind: 'cell',
             text: cell.text,
-            offset,
+            offset: exactOffset,
             range: {
-              start: { nodeId: cell.id, offset },
-              end: { nodeId: cell.id, offset: offset + String(query).length },
+              start: { nodeId: cell.id, offset: exactOffset },
+              end: { nodeId: cell.id, offset: exactOffset + String(query).length },
             },
             location: cell.location,
             native: cell.native,

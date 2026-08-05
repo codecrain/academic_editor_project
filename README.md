@@ -103,6 +103,10 @@ revision-bound server session that must be finalized or discarded.
 It implements `initialize`, `ping`, `tools/list`, and `tools/call` for DOCX,
 HWPX, and PDF open/read/target/inspect/apply/quality/render/finalize
 workflows.
+DOCX `open` can receive the persisted `storedDocumentId` returned by
+`/api/documents` instead of downloading that working copy and sending it back as
+Base64. This is an authenticated application-server reference; agents should
+not invent or choose stored document IDs.
 Finalization returns an opaque `artifactId`; an authenticated application
 server retrieves bytes with the matching format-specific `*_artifact_read`
 tool. The calling application owns any user-approval

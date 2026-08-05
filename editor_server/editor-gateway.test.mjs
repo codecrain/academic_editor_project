@@ -1792,6 +1792,51 @@ test('gateway owns persistent document sessions and keeps document IDs isolated'
       assert.equal(response.status, 200);
       return (await response.json()).result.structuredContent;
     };
+    const storedMcpOpened = await callMcp(490, 'editor_docx_open', {
+      filename: second.filename,
+      storedDocumentId: second.documentId,
+    });
+    assert.equal(storedMcpOpened.ok, true);
+    const storedMcpBlocks = await callMcp(491, 'editor_docx_read_json', {
+      documentId: storedMcpOpened.documentId,
+      view: 'blocks',
+      limit: 10,
+      textPreviewChars: 200,
+      cellPreviewLimit: 0,
+    });
+    assert.equal(storedMcpBlocks.items.some((item) => item.textPreview === 'beta'), true);
+    await callMcp(492, 'editor_docx_discard', {
+      documentId: storedMcpOpened.documentId,
+      baseRevision: storedMcpOpened.revision,
+    });
+
+    const storedRestOpenResponse = await fetch(`${gatewayOrigin}/v1/docx/documents/open`, {
+      method: 'POST',
+      headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: second.filename,
+        source: { storedDocumentId: second.documentId },
+      }),
+    });
+    assert.equal(storedRestOpenResponse.status, 200);
+    const storedRestOpened = await storedRestOpenResponse.json();
+    const storedRestReadResponse = await fetch(
+      `${gatewayOrigin}/v1/docx/documents/${storedRestOpened.documentId}/documents/read-json`,
+      { method: 'POST', headers: { ...apiHeaders, 'Content-Type': 'application/json' }, body: '{}' },
+    );
+    assert.equal(storedRestReadResponse.status, 200);
+    const storedRestStructure = await storedRestReadResponse.json();
+    assert.equal(storedRestStructure.blocks.some((block) => block.text === 'beta'), true);
+    const storedRestDiscardResponse = await fetch(
+      `${gatewayOrigin}/v1/docx/documents/${storedRestOpened.documentId}/documents/discard`,
+      {
+        method: 'POST',
+        headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseRevision: storedRestOpened.revision }),
+      },
+    );
+    assert.equal(storedRestDiscardResponse.status, 200);
+
     const liveOpened = await callMcp(500, 'editor_docx_open', {
       filename: 'live-preview.docx',
       bytesBase64: createDocxBytes({ paragraphs: ['live before'] }).toString('base64'),

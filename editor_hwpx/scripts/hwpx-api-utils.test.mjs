@@ -132,6 +132,12 @@ test('HWPX API read/target/layout APIs expose editable cell guidance', async () 
   assert.ok(json.layoutGraph.tables.length >= 1);
   assert.ok(json.editableTargets.cells.length >= table.cells.length);
   assert.ok(session.targetMap().cells.length >= table.cells.length);
+  const tableHostParagraphs = new Set(
+    json.tables.map((item) => `${item.section}:${item.para}`),
+  );
+  assert.ok(json.editableTargets.paragraphs.every((item) =>
+    !tableHostParagraphs.has(`${item.location.paragraph.section}:${item.location.paragraph.number}`),
+  ));
   assert.ok(session.objectInventory().sections.length >= 1);
 
   const target = session.inspectTarget({ tableId: table.id, cell: { number: 1 } });
@@ -143,6 +149,12 @@ test('HWPX API read/target/layout APIs expose editable cell guidance', async () 
   const resolvedCell = session.resolveText(searchableCell.text.trim().slice(0, 5));
   assert.equal(resolvedCell.kind, 'cell');
   assert.equal(resolvedCell.location.tableId, table.id);
+  const resolvedCellWithKind = session.resolveText(searchableCell.text.trim().slice(0, 5), { kind: 'cell' });
+  assert.equal(resolvedCellWithKind.kind, 'cell');
+  assert.equal(resolvedCellWithKind.location.tableId, table.id);
+  const resolvedCellExactly = session.resolveText(searchableCell.text.trim(), { kind: 'cell', exact: true });
+  assert.equal(resolvedCellExactly.kind, 'cell');
+  assert.equal(resolvedCellExactly.text.trim(), searchableCell.text.trim());
 
   const fit = session.fitText(
     { tableId: table.id, cell: { number: 1 } },

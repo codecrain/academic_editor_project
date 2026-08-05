@@ -20,6 +20,7 @@ function createEditorMcpTools({
   if (!['docx', 'hwpx', 'pdf'].includes(normalizedFormat)) {
     throw new Error(`Unsupported editor MCP format: ${format}`);
   }
+  const supportsStoredDocumentId = normalizedFormat === 'docx';
   const label = normalizedFormat.toUpperCase();
   const prefix = `editor_${normalizedFormat}`;
   const documentIdProperty = {
@@ -32,6 +33,22 @@ function createEditorMcpTools({
     minimum: 1,
     description: 'Exact revision returned by the preceding read or write. Stale revisions are rejected.',
   };
+  const openSourceProperties = {
+    bytesBase64: { type: 'string', minLength: 1, description: `Base64 ${label} bytes supplied by trusted application code.` },
+    bytesRef: { type: 'string', minLength: 1, description: 'Server-local path. Allowed only for trusted same-host callers.' },
+    ...(supportsStoredDocumentId ? {
+      storedDocumentId: {
+        type: 'string',
+        pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+        description: 'Persisted Academic Editor document ID. Application code selects it; the server reads its existing DOCX bytes internally.',
+      },
+    } : {}),
+  };
+  const openSourceAlternatives = [
+    { required: ['bytesBase64'] },
+    { required: ['bytesRef'] },
+    ...(supportsStoredDocumentId ? [{ required: ['storedDocumentId'] }] : []),
+  ];
   const tools = [
     {
       name: `${prefix}_open`,
@@ -39,10 +56,9 @@ function createEditorMcpTools({
       inputSchema: {
         ...objectSchema({
           filename: { type: 'string', minLength: 1 },
-          bytesBase64: { type: 'string', minLength: 1, description: `Base64 ${label} bytes supplied by trusted application code.` },
-          bytesRef: { type: 'string', minLength: 1, description: 'Server-local path. Allowed only for trusted same-host callers.' },
+          ...openSourceProperties,
         }, ['filename']),
-        oneOf: [{ required: ['bytesBase64'] }, { required: ['bytesRef'] }],
+        oneOf: openSourceAlternatives,
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
@@ -82,7 +98,7 @@ function createEditorMcpTools({
     },
     {
       name: `${prefix}_target_find`,
-      description: `Resolve visible text to a ${label} target. Inspect the returned location before writing.`,
+      description: `Resolve visible text to a ${label} target. Inspect the returned location before writing. The match object may include kind=paragraph or kind=cell when the same text occurs in multiple target kinds, and exact=true to match a whole paragraph or cell value instead of a substring.`,
       inputSchema: objectSchema({
         documentId: documentIdProperty,
         query: { type: 'string', minLength: 1 },

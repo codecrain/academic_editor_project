@@ -100,10 +100,11 @@ collaboration continues through the separate local Collabora/WOPI runtime and
 does not change this API contract.
 
 Every `tools/call` argument object is validated against the schema returned by
-`tools/list` before the tool executes. In particular, each format's `open`
-requires top-level `filename` plus exactly one of `bytesBase64` or `bytesRef`;
-the nested REST shape `{source:{...}}` is invalid for MCP and never opens a
-sample or fallback document.
+`tools/list` before the tool executes. Each format's `open` requires top-level
+`filename` plus exactly one byte source. DOCX accepts `bytesBase64`, `bytesRef`,
+or the `storedDocumentId` returned by `/api/documents`; HWPX and PDF accept
+`bytesBase64` or `bytesRef`. The nested REST shape `{source:{...}}` is invalid
+for MCP and never opens a sample or fallback document.
 `save_source` returns `artifactId`, package
 SHA-256, and visible-text SHA-256. It never exposes the server-local path.
 If work is cancelled or cannot pass quality checks, call the matching
@@ -243,6 +244,11 @@ qualityCheck(options)
 save()
 ```
 
+`resolveText` accepts `caseSensitive`, `occurrence`, `includeCells`, the
+optional `kind` filter (`paragraph` or `cell`), and `exact: true` to match a
+whole paragraph or cell value instead of a substring. Use `kind: "cell"` when
+the same visible text also occurs in a body paragraph.
+
 ## Non-Negotiable Agent Algorithm
 
 For every edit:
@@ -339,6 +345,22 @@ Alternative local source:
 }
 ```
 
+Persisted Academic Editor DOCX source:
+
+```json
+{
+  "filename": "document.docx",
+  "source": {
+    "storedDocumentId": "12345678-1234-4234-8234-123456789abc"
+  }
+}
+```
+
+`storedDocumentId` is DOCX-only. It reads the existing authenticated
+`/api/documents` working copy inside the gateway, so an application does not
+download that DOCX and upload the same bytes again. The MCP equivalent uses
+top-level `filename` and `storedDocumentId` arguments.
+
 Response:
 
 ```json
@@ -353,7 +375,9 @@ Response:
 }
 ```
 
-Production note: replace local `bytesRef` with storage IDs, upload IDs, or signed internal references. Do not expose server filesystem paths to external clients.
+Production note: prefer a persisted DOCX `storedDocumentId` when the file is
+already in the Academic Editor document store. Otherwise use application-side
+bytes. Do not expose server filesystem paths to external clients.
 
 ## Read JSON
 
