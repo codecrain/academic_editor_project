@@ -99,7 +99,7 @@ fields. The model-visible path has only two steps and no user-approval state:
    produces no successful artifact.
 
 The current typed requirements are `replace_text`, `replace_joined_text`,
-`replace_fragment`, `copy_text_style`, and `copy_cell_style`. Joined replacement
+`replace_fragment`, `select_checkbox`, `copy_text_style`, and `copy_cell_style`. Joined replacement
 constructs newline- or tab-separated text from explicit parts. Fragment replacement requires one
 exact occurrence and preserves the rest of the target. Structural, object, tracked-change, list, and page-layout
 edits remain available to trusted internal callers through the catalogued raw

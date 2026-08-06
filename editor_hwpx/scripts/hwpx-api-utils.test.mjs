@@ -57,6 +57,9 @@ test('HWPX paragraph replacement preserves requested line-break and tab controls
   const saved = session.save();
   const sectionXml = readZip(saved.bytes).get('Contents/section0.xml').toString('utf8');
   assert.match(sectionXml, /점검 대상: 본관<hp:lineBreak\/>점검 시간: 09:00~11:00/);
+  const editedParagraph = sectionXml.slice(sectionXml.indexOf('점검 대상: 본관'));
+  assert.match(editedParagraph, /<hp:lineseg\b[^>]*textpos="0"/);
+  assert.match(editedParagraph, /<hp:lineseg\b[^>]*textpos="10"/);
   assert.match(sectionXml, /담당부서<hp:tab\b[^>]*\/>시설안전팀/);
   const reopened = new HwpxApiSession(saved.bytes);
   assert.equal(reopened.inspectTarget({ paragraph: { section: 0, number: 1 } }).currentText, '점검 대상: 본관\n점검 시간: 09:00~11:00');

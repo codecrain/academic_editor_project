@@ -95,7 +95,7 @@ as one atomic batch, verifies target-level postconditions, checks every
 unmentioned target for accidental changes, runs quality and full-page rendering,
 saves, reopens, and rerenders the saved bytes, and returns one artifact receipt.
 There is no user-approval state or raw-command fallback. The current actions are
-`replace_text`, `replace_joined_text`, `replace_fragment`, `copy_text_style`, and `copy_cell_style`;
+`replace_text`, `replace_joined_text`, `replace_fragment`, `select_checkbox`, `copy_text_style`, and `copy_cell_style`;
 fragment replacement requires one exact occurrence, and no-ops are rejected.
 
 ```json

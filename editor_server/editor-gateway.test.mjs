@@ -2231,9 +2231,9 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
       assert.equal(Number.isInteger(semanticCell.cell?.column), true);
       assert.equal(Number.isInteger(semanticCell.cell?.index), true);
     }
-    const tableSource = await readFile(path.resolve('editor_hwpx/samples/hwpx/ref/ref_table.hwpx'));
+    const tableSource = await readFile(path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/public-form-template.hwpx'));
     const tableOpenedCall = await mcp(22, 'editor_hwpx_open', {
-      filename: 'ref_table.hwpx',
+      filename: 'public-form-template.hwpx',
       bytesBase64: tableSource.toString('base64'),
     });
     const tableContextCall = await mcp(23, 'editor_hwpx_semantic_context', {
@@ -2244,9 +2244,65 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     const adjacentCell = tableContextCall.result.structuredContent.targets.find((target) => target.neighbors?.rightTargetId);
     assert.ok(adjacentCell);
     assert.ok(tableContextCall.result.structuredContent.targets.some((target) => target.targetId === adjacentCell.neighbors.rightTargetId));
+    const managerField = tableContextCall.result.structuredContent.targets.find((target) => target.text === '담당자');
+    assert.equal(managerField.formField?.labelTargetId, 'tbl_1_cell_4');
+    assert.equal(managerField.formField?.valueTargetId, 'tbl_1_cell_5');
+    const checkboxField = tableContextCall.result.structuredContent.targets.find(
+      (target) => target.text.includes('E(환경)/G(지배구조)') && target.text.includes('S(안전)'),
+    );
+    assert.ok(checkboxField);
+    const preparedResponse = await fetch(
+      `${origin}/v1/hwpx/documents/${tableOpenedCall.result.structuredContent.documentId}/semantic/prepare`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseRevision: tableOpenedCall.result.structuredContent.revision,
+          requirements: [
+            {
+              id: 'select-environment-governance',
+              statement: 'E(환경)/G(지배구조) 항목을 선택한다.',
+              action: 'select_checkbox',
+              targetId: checkboxField.targetId,
+              optionText: 'E(환경)/G(지배구조)',
+            },
+            {
+              id: 'select-safety',
+              statement: 'S(안전) 항목을 선택한다.',
+              action: 'select_checkbox',
+              targetId: checkboxField.targetId,
+              optionText: 'S(안전)',
+            },
+          ],
+        }),
+      },
+    );
+    const prepared = await preparedResponse.json();
+    assert.equal(preparedResponse.ok, true, JSON.stringify(prepared));
+    const executedResponse = await fetch(
+      `${origin}/v1/hwpx/documents/${tableOpenedCall.result.structuredContent.documentId}/semantic/execute`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseRevision: prepared.revision, planId: prepared.planId }),
+      },
+    );
+    const checkboxEdit = await executedResponse.json();
+    assert.equal(executedResponse.ok, true, JSON.stringify(checkboxEdit));
+    assert.equal(checkboxEdit.receipt.every((entry) => entry.postcondition.ok), true);
+    const updatedTableContextCall = await mcp(25, 'editor_hwpx_semantic_context', {
+      documentId: tableOpenedCall.result.structuredContent.documentId,
+      kind: 'cell',
+      limit: 20,
+    });
+    const updatedCheckboxField = updatedTableContextCall.result.structuredContent.targets.find(
+      (target) => target.targetId === checkboxField.targetId,
+    );
+    assert.match(updatedCheckboxField.text, /☑ E\(환경\)\/G\(지배구조\)/);
+    assert.match(updatedCheckboxField.text, /☑ S\(안전\)/);
     await mcp(24, 'editor_hwpx_discard', {
       documentId: tableOpenedCall.result.structuredContent.documentId,
-      baseRevision: tableOpenedCall.result.structuredContent.revision,
+      baseRevision: checkboxEdit.revision,
     });
     const initialLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
     assert.equal(initialLiveSource.status, 200);

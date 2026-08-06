@@ -242,6 +242,34 @@ function encodeHwpxInlineText(text, paragraphXml = '') {
     .join('');
 }
 
+function reconcileExplicitLineSegmentsXml(paragraphXml, text) {
+  const source = String(text ?? '');
+  if (!/[\r\n]/.test(source) && !/<hp:lineBreak\/>/.test(paragraphXml)) return paragraphXml;
+  const lines = source.split(/\r\n|\r|\n/);
+  const arrayMatch = paragraphXml.match(/<hp:linesegarray\b[^>]*>([\s\S]*?)<\/hp:linesegarray>/);
+  if (!arrayMatch) return paragraphXml;
+  const sourceSegments = arrayMatch[1].match(/<hp:lineseg\b[^>]*\/>/g) || [];
+  if (!sourceSegments.length) return paragraphXml;
+  const firstVertPos = Number(firstMatch(sourceSegments[0], /\bvertpos="(-?\d+)"/, '0'));
+  const secondVertPos = Number(firstMatch(sourceSegments[1] || '', /\bvertpos="(-?\d+)"/, String(firstVertPos)));
+  const firstVertSize = Number(firstMatch(sourceSegments[0], /\bvertsize="(\d+)"/, '1000'));
+  const firstSpacing = Number(firstMatch(sourceSegments[0], /\bspacing="(\d+)"/, '600'));
+  const verticalStep = secondVertPos > firstVertPos
+    ? secondVertPos - firstVertPos
+    : firstVertSize + firstSpacing;
+  let textPosition = 0;
+  const segments = lines.map((line, index) => {
+    const template = sourceSegments[Math.min(index, sourceSegments.length - 1)];
+    let segment = setXmlAttribute(template, 'textpos', textPosition);
+    if (index >= sourceSegments.length) {
+      segment = setXmlAttribute(segment, 'vertpos', firstVertPos + verticalStep * index);
+    }
+    textPosition += Buffer.byteLength(line, 'utf16le') / 2 + (index < lines.length - 1 ? 1 : 0);
+    return segment;
+  }).join('');
+  return paragraphXml.replace(arrayMatch[0], arrayMatch[0].replace(arrayMatch[1], segments));
+}
+
 function normalizeTextList(value) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item ?? '').trim()).filter(Boolean);
@@ -1413,9 +1441,12 @@ function replaceParagraphTextXml(paragraphXml, text, options = {}) {
   if (/<hp:tbl\b/.test(paragraphXml)) {
     return replaceParagraphTextPreservingControlsXml(paragraphXml, text);
   }
-  return applyParagraphStyleIdsXml(
-    replaceInlineParagraphTextXml(paragraphXml, text),
-    options.styleIds,
+  return reconcileExplicitLineSegmentsXml(
+    applyParagraphStyleIdsXml(
+      replaceInlineParagraphTextXml(paragraphXml, text),
+      options.styleIds,
+    ),
+    text,
   );
 }
 

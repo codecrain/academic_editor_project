@@ -213,6 +213,7 @@ test('MCP advertises HWPX parity tools with the HWPX command enum', async () => 
     .flatMap((variant) => variant.properties.action.enum);
   assert.ok(semanticActions.includes('replace_fragment'));
   assert.ok(semanticActions.includes('replace_joined_text'));
+  assert.ok(semanticActions.includes('select_checkbox'));
 });
 
 test('HWPX MCP schema is owned by the HWPX environment and contains no DOCX contract text', () => {

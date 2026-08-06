@@ -1,4 +1,5 @@
 import EmbedPDF from './vendor/embedpdf/embedpdf.js';
+import { applyTranslations, localizeTool, setLocale, t } from './i18n.js';
 
 const elementIds = [
   'pdfViewer', 'runtimeStatus', 'bootError', 'bootErrorMessage', 'objectEditorButton', 'editPdfButton',
@@ -12,9 +13,10 @@ const elementIds = [
   'reportBody', 'closeReportDialog',
   'canvasOverlay', 'selectionToolbar', 'textQuickControls', 'quickFontFamily', 'quickFontSize',
   'quickFontColor', 'replaceImageButton', 'openPropertiesButton', 'deleteSelectedButton',
-  'quickImageFile', 'panelTitle', 'editHint', 'editHintText', 'savePdfButton',
+  'quickImageFile', 'panelTitle', 'editHint', 'editHintText', 'savePdfButton', 'languageSelect',
 ];
 const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
+applyTranslations();
 
 const state = {
   registry: null,
@@ -41,7 +43,7 @@ const state = {
 
 function failBoot(error) {
   const message = error instanceof Error ? error.message : String(error);
-  elements.runtimeStatus.textContent = 'PDF 편집 엔진 시작 실패';
+  elements.runtimeStatus.textContent = t('status.engineFailed');
   elements.bootErrorMessage.textContent = message;
   elements.bootError.hidden = false;
   console.error('Academic PDF Editor startup failed.', error);
@@ -56,7 +58,7 @@ function markPendingSave(pending = true) {
   state.pendingSave = pending;
   elements.savePdfButton.disabled = !state.sessionId;
   elements.savePdfButton.dataset.dirty = String(pending);
-  elements.savePdfButton.title = pending ? '변경사항을 PDF로 저장' : '현재 PDF 저장';
+  elements.savePdfButton.title = pending ? t('status.savePending') : t('status.saveCurrent');
 }
 
 function showReport(title, summary, content) {
@@ -73,7 +75,7 @@ function issueList(quality) {
     const item = document.createElement('li');
     item.dataset.severity = issue.severity;
     const label = document.createElement('strong');
-    label.textContent = issue.severity === 'error' ? '오류' : issue.severity === 'warning' ? '확인 필요' : '정보';
+    label.textContent = issue.severity === 'error' ? t('quality.error') : issue.severity === 'warning' ? t('quality.warning') : t('quality.info');
     const message = document.createElement('span');
     message.textContent = issue.message;
     item.append(label, message);
@@ -82,7 +84,7 @@ function issueList(quality) {
   if (!list.children.length) {
     const item = document.createElement('li');
     item.dataset.severity = 'success';
-    item.textContent = '저장·재열기, 접근성, 인쇄 전 검사에서 발견된 문제가 없습니다.';
+    item.textContent = t('quality.clean');
     list.append(item);
   }
   return list;
@@ -119,16 +121,16 @@ async function api(path, body) {
   try {
     result = JSON.parse(payload);
   } catch {
-    if (!response.ok) throw new Error(payload || `PDF API 요청 실패 (${response.status})`);
-    throw new Error(`PDF API가 올바르지 않은 응답을 반환했습니다. (${response.status})`);
+    if (!response.ok) throw new Error(payload || t('status.apiRequestFailed', { status: response.status }));
+    throw new Error(t('status.invalidApiResponse', { status: response.status }));
   }
-  if (!response.ok || result.ok === false) throw new Error(result.message || `PDF API 요청 실패 (${response.status})`);
+  if (!response.ok || result.ok === false) throw new Error(result.message || t('status.apiRequestFailed', { status: response.status }));
   return result;
 }
 
 async function currentBuffer() {
   if (state.editedBuffer) return state.editedBuffer.slice(0);
-  if (!state.exporter) throw new Error('열린 PDF가 없습니다.');
+  if (!state.exporter) throw new Error(t('status.noOpenPdf'));
   return taskPromise(state.exporter.saveAsCopy());
 }
 
@@ -137,9 +139,9 @@ async function beginObjectSession() {
   if (state.sessionPromise) return state.sessionPromise;
   const generation = state.documentGeneration;
   state.sessionPromise = (async () => {
-    setPanelStatus('PDF 구조와 객체를 분석하는 중…');
+    setPanelStatus(t('status.analyze'));
     const active = state.documentManager?.getActiveDocument();
-    if (!active) throw new Error('먼저 PDF 파일을 열어주세요.');
+    if (!active) throw new Error(t('status.openPdfFirst'));
     const buffer = await currentBuffer();
     const opened = await api('/pdf/api/documents/open', {
       filename: active.name || 'document.pdf',
@@ -186,7 +188,7 @@ async function activateEditMode(mode = 'text', { announce = true } = {}) {
   reflectEditMode(mode);
   if (!state.sessionId) {
     elements.editPdfButton.classList.add('is-loading');
-    showEditHint('본문을 바로 수정할 수 있도록 준비하는 중…', 'loading');
+    showEditHint(t('hint.loading'), 'loading');
     try {
       await beginObjectSession();
     } finally {
@@ -196,7 +198,7 @@ async function activateEditMode(mode = 'text', { announce = true } = {}) {
   }
   renderCanvasObjects();
   if (announce && mode === 'text') {
-    showEditHint('텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.');
+    showEditHint(t('hint.ready'));
   } else if (mode !== 'text') {
     elements.editHint.hidden = true;
   }
@@ -206,8 +208,8 @@ async function refreshInventory() {
   if (!state.sessionId) return beginObjectSession();
   state.inventory = await api(`/pdf/api/documents/${state.sessionId}/object/inventory`, {});
   state.revision = state.inventory.revision;
-  elements.objectCount.textContent = `객체 ${state.inventory.pageObjectCount}개 · 본문 ${state.inventory.textObjectCount}개`;
-  elements.fontCount.textContent = `오픈 폰트 ${state.inventory.fonts.length}개`;
+  elements.objectCount.textContent = t('objects.count', { pageCount: state.inventory.pageObjectCount, textCount: state.inventory.textObjectCount });
+  elements.fontCount.textContent = t('fonts.count', { count: state.inventory.fonts.length });
   const previousFont = elements.fontFamily.value;
   elements.fontFamily.replaceChildren(...state.inventory.fonts.map((font) => {
     const option = document.createElement('option');
@@ -235,7 +237,7 @@ async function refreshInventory() {
   }
   renderObjectList();
   scheduleCanvasOverlay();
-  setPanelStatus('PDF 편집 도구를 사용할 수 있습니다.', 'success');
+  setPanelStatus(t('status.toolsReady'), 'success');
 }
 
 async function loadCommandCatalog() {
@@ -272,7 +274,7 @@ function renderObjectList() {
   if (!objects.length) {
     const empty = document.createElement('p');
     empty.className = 'list-empty';
-    empty.textContent = '조건에 맞는 객체가 없습니다.';
+    empty.textContent = t('status.noMatchingObjects');
     elements.objectList.append(empty);
     return;
   }
@@ -281,13 +283,13 @@ function renderObjectList() {
     button.type = 'button';
     button.className = `object-card${state.selected?.id === object.id ? ' is-selected' : ''}`;
     const label = object.type === 'text'
-      ? (object.text || '(빈 텍스트)').replace(/\s+/g, ' ').slice(0, 80)
-      : object.type === 'image' ? '이미지 객체' : `${object.type} 객체`;
+      ? (object.text || t('status.emptyText')).replace(/\s+/g, ' ').slice(0, 80)
+      : object.type === 'image' ? t('objects.image') : t('status.objectType', { type: object.type });
     button.innerHTML = '<span class="object-page"></span><strong></strong><small></small>';
-    button.querySelector('.object-page').textContent = `${object.page}쪽 · #${object.objectIndex}`;
+    button.querySelector('.object-page').textContent = t('status.pageObject', { page: object.page, index: object.objectIndex });
     button.querySelector('strong').textContent = label;
     button.querySelector('small').textContent = object.type === 'text'
-      ? `${object.fontFamily || '폰트 미상'} · ${Number(object.fontSize || 0).toFixed(1)}pt`
+      ? `${object.fontFamily || t('status.unknownFont')} · ${Number(object.fontSize || 0).toFixed(1)}pt`
       : `${Math.round(object.editorBounds?.width || 0)} × ${Math.round(object.editorBounds?.height || 0)}`;
     button.addEventListener('click', () => selectObject(object));
     elements.objectList.append(button);
@@ -320,7 +322,7 @@ function selectObject(object) {
     elements.matrixE.value = object.matrix?.e ?? '';
     elements.matrixF.value = object.matrix?.f ?? '';
   } else {
-    elements.genericObjectInfo.textContent = `${object.page}쪽의 ${object.type} 객체 (#${object.objectIndex})`;
+    elements.genericObjectInfo.textContent = t('status.pageTypeObject', { page: object.page, type: object.type, index: object.objectIndex });
   }
   renderCanvasObjects();
   positionSelectionToolbar();
@@ -417,7 +419,7 @@ function beginImageDrag(event, object, hitbox) {
       return;
     }
     try {
-      setPanelStatus('이미지 위치를 변경하는 중…');
+      setPanelStatus(t('status.imageMoving'));
       await applyCommands([{
         op: 'object.transform',
         page: object.page,
@@ -425,7 +427,7 @@ function beginImageDrag(event, object, hitbox) {
         objectId: object.id,
         matrix: { ...startMatrix, e: Number(startMatrix.e) + dx, f: Number(startMatrix.f) - dy },
       }], { inspectObject: true });
-      setPanelStatus('이미지 위치 변경과 재열기 검증이 완료되었습니다.', 'success');
+      setPanelStatus(t('status.imageMoved'), 'success');
     } catch (error) {
       setPanelStatus(error.message, 'error');
     }
@@ -474,7 +476,7 @@ function renderCanvasObjects() {
     hitbox.type = 'button';
     hitbox.className = `object-hitbox${state.selected?.id === object.id ? ' is-selected' : ''}`;
     hitbox.dataset.type = object.type;
-    hitbox.title = object.type === 'text' ? '한 번 클릭하여 이 자리에서 바로 수정' : '클릭하여 선택, 드래그하여 이동';
+    hitbox.title = object.type === 'text' ? t('status.textObjectHint') : t('status.imageObjectHint');
     Object.assign(hitbox.style, {
       left: `${rect.left}px`,
       top: `${rect.top}px`,
@@ -647,7 +649,7 @@ function beginInlineTextEdit(object, pointerEvent) {
   const editor = document.createElement('textarea');
   editor.className = 'inline-text-editor';
   editor.value = editingText;
-  editor.setAttribute('aria-label', '페이지에서 텍스트 직접 편집');
+  editor.setAttribute('aria-label', t('inline.editorAria'));
   Object.assign(editor.style, {
     height: `${Math.max(28, rect.height + 6)}px`,
     fontFamily: `"${object.fontFamily || 'Noto Sans KR'}", sans-serif`,
@@ -657,11 +659,11 @@ function beginInlineTextEdit(object, pointerEvent) {
   const actions = document.createElement('div');
   actions.className = `inline-edit-actions${rect.top < 48 ? ' is-below' : ''}`;
   actions.setAttribute('role', 'toolbar');
-  actions.setAttribute('aria-label', '텍스트 편집 동작');
+  actions.setAttribute('aria-label', t('inline.actionsAria'));
   actions.innerHTML = `
-    <span class="inline-edit-label"><i class="ti ti-text-size" aria-hidden="true"></i> 텍스트 편집 · 자동 줄바꿈</span>
-    <button type="button" class="inline-edit-action inline-edit-cancel" aria-label="편집 취소" title="취소 (Esc)"><i class="ti ti-x" aria-hidden="true"></i></button>
-    <button type="button" class="inline-edit-action is-primary inline-edit-save" aria-label="편집 저장" title="저장 (Ctrl+Enter)"><i class="ti ti-check" aria-hidden="true"></i></button>
+    <span class="inline-edit-label"><i class="ti ti-text-size" aria-hidden="true"></i> ${t('inline.editorLabel')}</span>
+    <button type="button" class="inline-edit-action inline-edit-cancel" aria-label="${t('inline.cancel')}" title="${t('inline.cancelTitle')}"><i class="ti ti-x" aria-hidden="true"></i></button>
+    <button type="button" class="inline-edit-action is-primary inline-edit-save" aria-label="${t('inline.save')}" title="${t('inline.saveTitle')}"><i class="ti ti-check" aria-hidden="true"></i></button>
   `;
   shell.append(editor, actions);
   const resizeEditor = () => {
@@ -688,7 +690,7 @@ function beginInlineTextEdit(object, pointerEvent) {
       return;
     }
     try {
-      setPanelStatus('페이지에서 수정한 본문을 저장하는 중…');
+      setPanelStatus(t('status.inlineSaving'));
       state.textPreviews.set(previewKey, {
         text,
         background,
@@ -734,7 +736,7 @@ function beginInlineTextEdit(object, pointerEvent) {
       } else {
         state.textGroups.delete(previewKey);
       }
-      setPanelStatus('본문을 수정했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
+      setPanelStatus(t('status.inlineSaved'), 'success');
     } catch (error) {
       state.textPreviews.delete(previewKey);
       setPanelStatus(error.message, 'error');
@@ -765,7 +767,7 @@ function beginInlineTextEdit(object, pointerEvent) {
 }
 
 async function inspectSelected() {
-  if (!state.selected) throw new Error('수정할 객체를 선택하세요.');
+  if (!state.selected) throw new Error(t('status.selectObject'));
   return inspectObjects([state.selected]).then((targets) => targets[0]);
 }
 
@@ -804,7 +806,7 @@ async function applyCommands(commands, { inspectObject = false, inspectTargets =
 async function saveEditedPdf({ download = true } = {}) {
   if (!state.sessionId) await beginObjectSession();
   const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
-  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || 'PDF 저장 검사에 실패했습니다.');
+  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || t('status.qualityFailed'));
   const saved = await api(`/pdf/api/documents/${state.sessionId}/documents/save-buffer`, {
     baseRevision: state.revision,
     filename: 'academic-edited.pdf',
@@ -824,7 +826,7 @@ async function saveEditedPdf({ download = true } = {}) {
 
 async function syncEditedPdf() {
   const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
-  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || 'PDF 저장 검사에 실패했습니다.');
+  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || t('status.qualityFailed'));
   const saved = await api(`/pdf/api/documents/${state.sessionId}/documents/save-buffer`, {
     baseRevision: state.revision,
     filename: 'academic-edited.pdf',
@@ -968,8 +970,9 @@ const advancedTools = [
 
 function renderAdvancedTool() {
   const tool = advancedTools.find((candidate) => candidate.op === elements.advancedTool.value) || advancedTools[0];
-  elements.advancedToolHelp.textContent = tool.help;
-  elements.advancedFields.replaceChildren(...tool.fields.map((definition) => {
+  const localizedTool = localizeTool(tool);
+  elements.advancedToolHelp.textContent = localizedTool.help;
+  elements.advancedFields.replaceChildren(...localizedTool.fields.map((definition) => {
     const label = document.createElement('label');
     const caption = document.createElement('span');
     caption.textContent = definition.label;
@@ -982,7 +985,7 @@ function renderAdvancedTool() {
       input.replaceChildren(...definition.options.map((value) => {
         const option = document.createElement('option');
         option.value = value;
-        option.textContent = value;
+         option.textContent = definition.optionLabels?.[value] || value;
         return option;
       }));
     } else {
@@ -1018,15 +1021,15 @@ async function buildAdvancedCommand(tool, formData) {
   for (const [key, value] of Object.entries(values)) {
     if (key === 'sourceFile') command.sourceBytesBase64 = value ? await fileBase64(value) : '';
     else if (key === 'attachmentFile') {
-      if (!value) throw new Error('첨부할 파일을 선택하세요.');
+      if (!value) throw new Error(t('error.chooseAttachment'));
       command.bytesBase64 = await fileBase64(value);
       command.mimeType = value.type || 'application/octet-stream';
       if (!values.name) command.name = value.name;
     } else if (key === 'p12File') {
-      if (!value) throw new Error('P12/PFX 인증서를 선택하세요.');
+      if (!value) throw new Error(t('error.chooseCertificate'));
       command.p12BytesBase64 = await fileBase64(value);
     } else if (key === 'regions' || key === 'boxes' || key === 'segments') {
-      try { command[key] = JSON.parse(value); } catch { throw new Error(`${key} JSON 형식이 올바르지 않습니다.`); }
+      try { command[key] = JSON.parse(value); } catch { throw new Error(t('error.invalidJson', { key })); }
     } else if (key === 'pages') command.pages = parsePages(value);
     else if (key === 'languages') command.languages = value.split(',').map((language) => language.trim().toLowerCase()).filter(Boolean);
     else if (key === 'options') command.options = value.split(/\r?\n/).map((option) => option.trim()).filter(Boolean);
@@ -1041,7 +1044,7 @@ async function buildAdvancedCommand(tool, formData) {
     } else if (value !== '' && value !== undefined) command[key] = value;
   }
   if (tool.op === 'page.replace' || tool.op === 'document.merge') {
-    if (!command.sourceBytesBase64) throw new Error('원본 PDF 파일을 선택하세요.');
+    if (!command.sourceBytesBase64) throw new Error(t('error.chooseSourcePdf'));
   }
   return command;
 }
@@ -1058,6 +1061,18 @@ elements.objectEditorButton.addEventListener('click', () => {
   elements.objectEditor.hidden = !willOpen;
   elements.objectEditorButton.setAttribute('aria-expanded', String(willOpen));
 });
+elements.languageSelect.addEventListener('change', () => {
+  setLocale(elements.languageSelect.value);
+  applyTranslations();
+  renderAdvancedToolOptions();
+  renderAdvancedTool();
+  renderObjectList();
+  if (state.inventory) {
+    elements.objectCount.textContent = t('objects.count', { pageCount: state.inventory.pageObjectCount, textCount: state.inventory.textObjectCount });
+    elements.fontCount.textContent = t('fonts.count', { count: state.inventory.fonts.length });
+    setPanelStatus(t('status.toolsReady'), 'success');
+  }
+});
 elements.closeObjectEditor.addEventListener('click', () => {
   elements.objectEditor.hidden = true;
   elements.objectEditorButton.setAttribute('aria-expanded', 'false');
@@ -1066,7 +1081,7 @@ elements.loadObjectsButton.addEventListener('click', () => beginObjectSession().
 elements.editPdfButton.addEventListener('click', async () => {
   try {
     await activateEditMode('text');
-    setPanelStatus('페이지의 텍스트를 한 번 클릭하면 바로 수정됩니다.', 'success');
+    setPanelStatus(t('status.pageTextHint'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
     openToolPanel('advanced');
@@ -1076,9 +1091,9 @@ elements.closeReportDialog.addEventListener('click', () => elements.reportDialog
 elements.savePdfButton.addEventListener('click', async () => {
   try {
     elements.savePdfButton.disabled = true;
-    setPanelStatus('현재 페이지를 유지하면서 PDF를 저장하는 중…');
+    setPanelStatus(t('status.saving'));
     await saveEditedPdf({ download: true });
-    setPanelStatus('편집한 PDF를 저장했습니다. 현재 페이지에서 계속 수정할 수 있습니다.', 'success');
+    setPanelStatus(t('status.saved'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
   } finally {
@@ -1090,8 +1105,8 @@ elements.qualityAuditButton.addEventListener('click', async () => {
     if (!state.sessionId) await beginObjectSession();
     const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
     showReport(
-      '품질·접근성 검사',
-      `페이지 ${quality.pageCount}개 · ${quality.issues?.length || 0}개 항목`,
+      t('report.quality'),
+      t('report.qualitySummary', { pages: quality.pageCount, issues: quality.issues?.length || 0 }),
       issueList(quality),
     );
   } catch (error) {
@@ -1107,18 +1122,19 @@ elements.compareButton.addEventListener('click', async () => {
     });
     const grid = document.createElement('div');
     grid.className = 'compare-grid';
-    for (const [label, rendered] of [['원본', comparison.baseline], ['현재 편집본', comparison.current]]) {
+    for (const [labelKey, rendered] of [['report.original', comparison.baseline], ['report.current', comparison.current]]) {
+      const label = t(labelKey);
       const figure = document.createElement('figure');
       const caption = document.createElement('figcaption');
-      caption.textContent = `${label} · 1페이지`;
+      caption.textContent = t('report.page', { label });
       const image = document.createElement('img');
       const page = rendered.pages[0];
-      image.alt = `${label} PDF 1페이지 렌더`;
+      image.alt = t('report.pageAlt', { label });
       image.src = `data:${page.mimeType};base64,${page.bytesBase64}`;
       figure.append(caption, image);
       grid.append(figure);
     }
-    showReport('원본 비교', '같은 렌더러·해상도로 만든 1페이지 원본/현재 편집본입니다.', grid);
+    showReport(t('report.compare'), t('report.compareSummary'), grid);
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
@@ -1168,7 +1184,7 @@ async function applyQuickTextStyle() {
   const object = state.selected;
   const previewKey = `${object.page}:${object.objectIndex}`;
   try {
-    setPanelStatus('본문 서식을 적용하는 중…');
+    setPanelStatus(t('status.textStyleApplying'));
     stageTextPreview(object, {
       fontFamily: selectedFontLabel(elements.quickFontFamily, object.fontFamily),
       fontSize: Number(elements.quickFontSize.value),
@@ -1186,7 +1202,7 @@ async function applyQuickTextStyle() {
       color: elements.quickFontColor.value,
       opacity: (object.fillColor?.a ?? 255) / 255,
     }], { inspectObject: true, syncViewer: false });
-    setPanelStatus('본문 서식을 변경했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
+    setPanelStatus(t('status.textStyleApplied'), 'success');
   } catch (error) {
     state.textPreviews.delete(previewKey);
     setPanelStatus(error.message, 'error');
@@ -1205,7 +1221,7 @@ elements.quickImageFile.addEventListener('change', async () => {
   if (!file || state.selected?.type !== 'image') return;
   const object = state.selected;
   try {
-    setPanelStatus('페이지의 이미지를 교체하는 중…');
+    setPanelStatus(t('status.imageReplacing'));
     await applyCommands([{
       op: 'image.replaceObject',
       page: object.page,
@@ -1214,7 +1230,7 @@ elements.quickImageFile.addEventListener('change', async () => {
       mimeType: file.type,
       bytesBase64: await fileBase64(file),
     }], { inspectObject: true });
-    setPanelStatus('이미지 교체와 재열기 검증이 완료되었습니다.', 'success');
+    setPanelStatus(t('status.imageReplaced'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
   } finally {
@@ -1261,7 +1277,7 @@ elements.textEditorForm.addEventListener('submit', async (event) => {
   const object = state.selected;
   const previewKey = `${object.page}:${object.objectIndex}`;
   try {
-    setPanelStatus('본문과 폰트를 PDF에 임베드하는 중…');
+    setPanelStatus(t('status.textEmbedding'));
     stageTextPreview(object, {
       text: elements.textValue.value,
       fontFamily: selectedFontLabel(elements.fontFamily, object.fontFamily),
@@ -1281,7 +1297,7 @@ elements.textEditorForm.addEventListener('submit', async (event) => {
       opacity: Number(elements.fontOpacity.value),
       lineHeight: Number(elements.fontSize.value) * 1.2,
     }], { inspectObject: true, syncViewer: false });
-    setPanelStatus('본문을 수정했습니다. 페이지 위치는 그대로 유지됩니다.', 'success');
+    setPanelStatus(t('status.inlineSaved'), 'success');
   } catch (error) {
     state.textPreviews.delete(previewKey);
     setPanelStatus(error.message, 'error');
@@ -1319,19 +1335,19 @@ elements.imageEditorForm.addEventListener('submit', async (event) => {
         matrix,
       });
     }
-    if (!commands.length) throw new Error('교체 이미지나 변경된 위치·크기를 입력하세요.');
-    setPanelStatus('이미지 객체를 수정하는 중…');
+    if (!commands.length) throw new Error(t('error.imageChange'));
+    setPanelStatus(t('status.imageEditing'));
     await applyCommands(commands, { inspectObject: true });
-    setPanelStatus('이미지 수정과 재열기 검증이 완료되었습니다.', 'success');
+    setPanelStatus(t('status.imageEdited'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
 });
 
 document.querySelectorAll('[data-delete-object]').forEach((button) => button.addEventListener('click', async () => {
-  if (!state.selected || !window.confirm('선택한 PDF 객체를 삭제할까요?')) return;
+  if (!state.selected || !window.confirm(t('confirm.deleteObject'))) return;
   try {
-    setPanelStatus('객체를 삭제하는 중…');
+    setPanelStatus(t('status.objectDeleting'));
     await applyCommands([{
       op: 'object.delete',
       page: state.selected.page,
@@ -1342,30 +1358,38 @@ document.querySelectorAll('[data-delete-object]').forEach((button) => button.add
     elements.textEditorForm.hidden = true;
     elements.imageEditorForm.hidden = true;
     elements.genericEditor.hidden = true;
-    setPanelStatus('객체 삭제와 재열기 검증이 완료되었습니다.', 'success');
+    setPanelStatus(t('status.objectDeleted'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
 }));
 
-elements.advancedTool.replaceChildren(...advancedTools.map((tool) => {
-  const option = document.createElement('option');
-  option.value = tool.op;
-  option.textContent = tool.label;
-  return option;
-}));
+function renderAdvancedToolOptions() {
+  const selectedValue = elements.advancedTool.value || advancedTools[0]?.op;
+  elements.advancedTool.replaceChildren(...advancedTools.map((tool) => {
+    const localizedTool = localizeTool(tool);
+    const option = document.createElement('option');
+    option.value = tool.op;
+    option.textContent = localizedTool.label;
+    return option;
+  }));
+  if (advancedTools.some((tool) => tool.op === selectedValue)) elements.advancedTool.value = selectedValue;
+}
+
+renderAdvancedToolOptions();
 elements.advancedTool.addEventListener('change', renderAdvancedTool);
 renderAdvancedTool();
 
 elements.advancedToolForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const tool = advancedTools.find((candidate) => candidate.op === elements.advancedTool.value);
-  if (tool.danger && !window.confirm(`${tool.label} 작업을 적용할까요? 저장 후 되돌리려면 원본을 다시 열어야 합니다.`)) return;
+  const rawTool = advancedTools.find((candidate) => candidate.op === elements.advancedTool.value);
+  const tool = localizeTool(rawTool);
+  if (tool.danger && !window.confirm(t('confirm.danger', { label: tool.label }))) return;
   try {
-    setPanelStatus(`${tool.label} 작업을 적용하고 검증하는 중…`);
+    setPanelStatus(t('status.toolApplying', { label: tool.label }));
     const command = await buildAdvancedCommand(tool, new FormData(elements.advancedToolForm));
     await applyCommands([command]);
-    setPanelStatus(`${tool.label} 작업과 저장·재열기 검증이 완료되었습니다.`, 'success');
+    setPanelStatus(t('status.toolApplied', { label: tool.label }), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
@@ -1392,10 +1416,10 @@ try {
     state.exporter = registry.getPlugin('export')?.provides();
     state.documentManager?.onDocumentOpened((documentState) => {
       if (state.reopening) {
-        elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 텍스트를 클릭해 바로 수정`;
+        elements.runtimeStatus.textContent = t('status.textClick', { name: documentState.name || 'PDF' });
         return;
       }
-      elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 본문 편집 준비 중…`;
+      elements.runtimeStatus.textContent = t('status.bodyPreparing', { name: documentState.name || 'PDF' });
       state.documentGeneration += 1;
       const previousSessionId = state.sessionId;
       const previousRevision = state.revision;
@@ -1419,12 +1443,12 @@ try {
       reflectEditMode('text');
       queueMicrotask(() => {
         activateEditMode('text').then(() => {
-          elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 텍스트를 클릭해 바로 수정`;
-          setPanelStatus('본문 편집 준비 완료 · 페이지의 텍스트를 한 번 클릭하세요.', 'success');
+          elements.runtimeStatus.textContent = t('status.textClick', { name: documentState.name || 'PDF' });
+          setPanelStatus(t('status.bodyReady'), 'success');
         }).catch((error) => {
           elements.editPdfButton.classList.remove('is-loading');
           elements.editHint.hidden = true;
-          elements.runtimeStatus.textContent = `${documentState.name || 'PDF'} · 편집 준비 실패`;
+          elements.runtimeStatus.textContent = t('status.bodyFailed', { name: documentState.name || 'PDF' });
           setPanelStatus(error.message, 'error');
         });
       });
@@ -1452,13 +1476,13 @@ try {
         elements.editHint.hidden = true;
         elements.editPdfButton.classList.remove('is-active', 'is-loading');
         elements.editPdfButton.setAttribute('aria-pressed', 'false');
-        elements.runtimeStatus.textContent = 'PDFium 편집 준비 완료';
+        elements.runtimeStatus.textContent = t('status.engineReady');
       }
     });
     state.documentManager?.onDocumentError((event) => {
-      elements.runtimeStatus.textContent = `PDF 열기 실패: ${event?.message || '알 수 없는 오류'}`;
+      elements.runtimeStatus.textContent = t('status.openFailed', { message: event?.message || t('status.unknownError') });
     });
-    elements.runtimeStatus.textContent = 'PDFium 편집 준비 완료';
+    elements.runtimeStatus.textContent = t('status.engineReady');
   }).catch(failBoot);
 
   window.academicPdfEditor = Object.freeze({ engine: 'PDFium', version: '2.14.4', viewer, registry: viewer.registry });

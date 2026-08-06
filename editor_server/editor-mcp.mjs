@@ -60,6 +60,9 @@ const HWPX_SEMANTIC_REQUIREMENT_SCHEMA = Object.freeze({
       oldText: { type: 'string', minLength: 1, maxLength: 20000 },
       newText: { type: 'string', maxLength: 20000 },
     }, ['oldText', 'newText']),
+    hwpxRequirementVariant('select_checkbox', {
+      optionText: { type: 'string', minLength: 1, maxLength: 1000 },
+    }, ['optionText']),
     hwpxRequirementVariant('copy_text_style', {
       sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
     }, ['sourceTargetId']),
@@ -75,7 +78,7 @@ const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   commandOps: hwpxAdapter.commandOps,
 }), {
   name: 'editor_hwpx_semantic_context',
-  description: 'Read one revision-bound semantic HWPX target page for planning. Follow nextCursor unchanged until complete; it exposes stable target IDs, visible text, style fingerprints, layout facts, and table-cell row/column plus adjacent-cell target IDs, never raw package coordinates.',
+  description: 'Read one revision-bound semantic HWPX target page for planning. Follow nextCursor unchanged until complete; it exposes stable target IDs, visible text, style fingerprints, layout facts, table-cell adjacency, and inferred formField label/value target pairs, never raw package coordinates.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,

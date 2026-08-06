@@ -1404,7 +1404,7 @@ function normalizeSemanticRequirements(requirements) {
       throw new EditorContractError('invalid_semantic_plan', 'Each requirement needs a unique non-empty id.', 422);
     }
     ids.add(id);
-    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
+    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'select_checkbox', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} has an unsupported action or missing targetId.`, 422);
     }
     if (action === 'replace_text') {
@@ -1430,6 +1430,13 @@ function normalizeSemanticRequirements(requirements) {
       }
       return { id, statement, action, targetId, parts: requirement.parts, separator: requirement.separator };
     }
+    if (action === 'select_checkbox') {
+      const optionText = typeof requirement.optionText === 'string' ? requirement.optionText.trim() : '';
+      if (!optionText) {
+        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires non-empty optionText for select_checkbox.`, 422);
+      }
+      return { id, statement, action, targetId, optionText };
+    }
     if (!sourceTargetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires sourceTargetId for ${action}.`, 422);
     }
@@ -1438,8 +1445,12 @@ function normalizeSemanticRequirements(requirements) {
 }
 
 function compileHwpxSemanticRequirements(requirements, inspectedById) {
+  const stagedCheckboxTextByTarget = new Map();
   return requirements.map((requirement) => {
-    const target = inspectedById.get(requirement.targetId);
+    const inspectedTarget = inspectedById.get(requirement.targetId);
+    const target = stagedCheckboxTextByTarget.has(requirement.targetId)
+      ? { ...inspectedTarget, currentText: stagedCheckboxTextByTarget.get(requirement.targetId) }
+      : inspectedTarget;
     const source = requirement.sourceTargetId ? inspectedById.get(requirement.sourceTargetId) : null;
     if (requirement.action === 'replace_text') {
       if (target.currentText === requirement.text) {
@@ -1495,6 +1506,33 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
         expected: { text },
       };
     }
+    if (requirement.action === 'select_checkbox') {
+      const optionIndex = target.currentText.indexOf(requirement.optionText);
+      const repeatedIndex = optionIndex < 0
+        ? -1
+        : target.currentText.indexOf(requirement.optionText, optionIndex + requirement.optionText.length);
+      let markerIndex = optionIndex - 1;
+      while (markerIndex >= 0 && /\s/.test(target.currentText[markerIndex])) markerIndex -= 1;
+      if (optionIndex < 0 || repeatedIndex >= 0 || markerIndex < 0 || !'□☐☑■'.includes(target.currentText[markerIndex])) {
+        throw new EditorContractError(
+          'semantic_checkbox_ambiguous',
+          `Requirement ${requirement.id} optionText must identify exactly one checkbox option in target ${target.id}.`,
+          422,
+        );
+      }
+      const text = `${target.currentText.slice(0, markerIndex)}☑${target.currentText.slice(markerIndex + 1)}`;
+      if (target.currentText === text) {
+        throw new EditorContractError('semantic_noop_requirement', `Requirement ${requirement.id} does not change checkbox selection.`, 422);
+      }
+      stagedCheckboxTextByTarget.set(requirement.targetId, text);
+      return {
+        requirement,
+        command: target.kind === 'cell'
+          ? { op: 'table.writeCell', target: target.location, text }
+          : { op: 'text.replaceParagraph', location: target.location, text },
+        expected: { checkboxOptionText: requirement.optionText },
+      };
+    }
     const targetStyleHash = target.styleFingerprint?.hash;
     const sourceStyleHash = source.styleFingerprint?.hash;
     if (target.id === source.id || (targetStyleHash && sourceStyleHash && targetStyleHash === sourceStyleHash)) {
@@ -1528,6 +1566,19 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
 }
 
 function semanticPostcondition(entry, before, after) {
+  if (Object.hasOwn(entry.expected, 'checkboxOptionText')) {
+    const optionText = entry.expected.checkboxOptionText;
+    const optionIndex = after.currentText.indexOf(optionText);
+    let markerIndex = optionIndex - 1;
+    while (markerIndex >= 0 && /\s/.test(after.currentText[markerIndex])) markerIndex -= 1;
+    const selected = optionIndex >= 0 && markerIndex >= 0 && '☑■'.includes(after.currentText[markerIndex]);
+    return {
+      ok: before?.text !== after.currentText && selected,
+      expected: `☑ ${optionText}`,
+      actual: selected ? `☑ ${optionText}` : after.currentText,
+      changed: before?.text !== after.currentText,
+    };
+  }
   if (Object.hasOwn(entry.expected, 'text')) {
     const changed = before?.text !== after.currentText;
     return {
@@ -2028,9 +2079,29 @@ async function boundedHwpxSemanticContextPage(state, documentId, session, args =
     ? await session.inspectTargets(pageSourceTargets.map((target) => target.location))
     : pageSourceTargets.map((target) => session.inspectTarget(target.location));
   const cellNeighbors = semanticCellNeighborMap(map.cells || []);
+  const sourceCellById = new Map((map.cells || []).map((cell) => [cell.id, cell]));
   const targets = inspected.map((target) => ({
     ...semanticTargetView(target),
-    ...(target.kind === 'cell' ? { neighbors: cellNeighbors.get(target.id) || {} } : {}),
+    ...(target.kind === 'cell' ? (() => {
+      const neighbors = cellNeighbors.get(target.id) || {};
+      const source = sourceCellById.get(target.id);
+      const right = sourceCellById.get(neighbors.rightTargetId);
+      const labelText = String(source?.currentText || '').trim();
+      const isFormLabel = labelText && right && (
+        !String(right.currentText || '').trim()
+        || source?.styleFingerprint?.hash !== right?.styleFingerprint?.hash
+      );
+      return {
+        neighbors,
+        ...(isFormLabel ? {
+          formField: {
+            labelText,
+            labelTargetId: target.id,
+            valueTargetId: right.id,
+          },
+        } : {}),
+      };
+    })() : {}),
   }));
   const makeCursor = (nextOffset) => encodeMcpCursor(state, {
     documentId,

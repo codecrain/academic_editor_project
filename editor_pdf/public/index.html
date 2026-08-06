@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="PDFium 기반 Academic PDF 편집기">
+  <meta name="description" content="PDFium 기반 Academic PDF 편집기" data-i18n-content="app.description">
   <meta name="application-name" content="Academic PDF Editor">
   <title>Academic PDF Editor</title>
   <link rel="icon" href="data:,">
@@ -17,133 +17,134 @@
       <span class="document-title">Academic PDF</span>
       <span class="engine-badge">PDFium</span>
     </div>
-    <nav class="primary-nav" aria-label="PDF 주요 작업">
-      <button id="editPdfButton" class="nav-tool" type="button" aria-pressed="false"><i class="ti ti-edit"></i><span>편집</span></button>
-      <button class="nav-tool" type="button" data-open-tool="page.extract"><i class="ti ti-files"></i><span>페이지 구성</span></button>
-      <button class="nav-tool" type="button" data-activate-mode="comment"><i class="ti ti-message-circle"></i><span>주석</span></button>
-      <button class="nav-tool" type="button" data-open-tool="form.addTextField"><i class="ti ti-forms"></i><span>양식</span></button>
-      <button class="nav-tool" type="button" data-open-tool="redaction.apply"><i class="ti ti-shield-lock"></i><span>보호</span></button>
-      <button id="objectEditorButton" class="nav-tool" type="button" aria-expanded="false"><i class="ti ti-tools"></i><span>모든 도구</span></button>
+    <nav class="primary-nav" aria-label="PDF 주요 작업" data-i18n-aria-label="nav.primary">
+      <button id="editPdfButton" class="nav-tool" type="button" aria-pressed="false"><i class="ti ti-edit"></i><span data-i18n="nav.edit">편집</span></button>
+      <button class="nav-tool" type="button" data-open-tool="page.extract"><i class="ti ti-files"></i><span data-i18n="nav.pages">페이지 구성</span></button>
+      <button class="nav-tool" type="button" data-activate-mode="comment"><i class="ti ti-message-circle"></i><span data-i18n="nav.comments">주석</span></button>
+      <button class="nav-tool" type="button" data-open-tool="form.addTextField"><i class="ti ti-forms"></i><span data-i18n="nav.forms">양식</span></button>
+      <button class="nav-tool" type="button" data-open-tool="redaction.apply"><i class="ti ti-shield-lock"></i><span data-i18n="nav.protection">보호</span></button>
+      <button id="objectEditorButton" class="nav-tool" type="button" aria-expanded="false"><i class="ti ti-tools"></i><span data-i18n="nav.tools">모든 도구</span></button>
     </nav>
     <div class="global-actions">
       <button id="savePdfButton" class="save-pdf-button" type="button" disabled>
-        <i class="ti ti-download"></i><span>PDF 저장</span>
+        <i class="ti ti-download"></i><span data-i18n="action.savePdf">PDF 저장</span>
       </button>
-      <button id="qualityAuditButton" class="icon-action" type="button" title="품질·접근성 검사" aria-label="품질·접근성 검사"><i class="ti ti-shield-check"></i></button>
-      <button id="compareButton" class="icon-action" type="button" title="원본과 비교" aria-label="원본과 비교"><i class="ti ti-arrows-diff"></i></button>
-      <span id="runtimeStatus" role="status">PDF 편집 엔진을 준비하는 중…</span>
+      <button id="qualityAuditButton" class="icon-action" type="button" title="품질·접근성 검사" aria-label="품질·접근성 검사" data-i18n-title="action.quality" data-i18n-aria-label="action.quality"><i class="ti ti-shield-check"></i></button>
+      <button id="compareButton" class="icon-action" type="button" title="원본과 비교" aria-label="원본과 비교" data-i18n-title="action.compare" data-i18n-aria-label="action.compare"><i class="ti ti-arrows-diff"></i></button>
+      <label class="language-picker"><span class="visually-hidden" data-i18n="language.label">언어</span><select id="languageSelect" aria-label="언어"><option value="ko" data-i18n="language.ko">한국어</option><option value="en" data-i18n="language.en">English</option></select></label>
+      <span id="runtimeStatus" role="status" data-i18n="status.enginePreparing">PDF 편집 엔진을 준비하는 중…</span>
     </div>
   </header>
 
   <div class="workspace">
-    <nav class="tool-rail" aria-label="페이지 위 편집 도구">
-      <button class="rail-tool" type="button" data-edit-mode="select" title="객체 선택"><i class="ti ti-pointer"></i><span>선택</span></button>
-      <button class="rail-tool is-active" type="button" data-edit-mode="text" title="텍스트 바로 수정"><i class="ti ti-text-size"></i><span>텍스트</span></button>
-      <button class="rail-tool" type="button" data-edit-mode="image" title="이미지 편집"><i class="ti ti-photo"></i><span>이미지</span></button>
+    <nav class="tool-rail" aria-label="페이지 위 편집 도구" data-i18n-aria-label="nav.pageTools">
+      <button class="rail-tool" type="button" data-edit-mode="select" title="객체 선택" data-i18n-title="rail.selectTitle"><i class="ti ti-pointer"></i><span data-i18n="rail.select">선택</span></button>
+      <button class="rail-tool is-active" type="button" data-edit-mode="text" title="텍스트 바로 수정" data-i18n-title="rail.textTitle"><i class="ti ti-text-size"></i><span data-i18n="rail.text">텍스트</span></button>
+      <button class="rail-tool" type="button" data-edit-mode="image" title="이미지 편집" data-i18n-title="rail.imageTitle"><i class="ti ti-photo"></i><span data-i18n="rail.image">이미지</span></button>
       <span class="rail-divider"></span>
-      <button class="rail-tool" type="button" data-activate-mode="comment" title="주석"><i class="ti ti-message-circle-plus"></i><span>주석</span></button>
-      <button class="rail-tool" type="button" data-open-tool="redaction.apply" title="영구 마스킹"><i class="ti ti-eraser"></i><span>마스킹</span></button>
+      <button class="rail-tool" type="button" data-activate-mode="comment" title="주석" data-i18n-title="rail.comment"><i class="ti ti-message-circle-plus"></i><span data-i18n="rail.comment">주석</span></button>
+      <button class="rail-tool" type="button" data-open-tool="redaction.apply" title="영구 마스킹" data-i18n-title="rail.maskTitle"><i class="ti ti-eraser"></i><span data-i18n="rail.mask">마스킹</span></button>
     </nav>
 
-    <main id="pdfViewer" aria-label="PDF 편집기">
-      <div id="canvasOverlay" class="canvas-overlay" aria-label="PDF 직접 편집 계층"></div>
+    <main id="pdfViewer" aria-label="PDF 편집기" data-i18n-aria-label="viewer.label">
+      <div id="canvasOverlay" class="canvas-overlay" aria-label="PDF 직접 편집 계층" data-i18n-aria-label="viewer.overlay"></div>
       <div id="editHint" class="edit-hint" role="status" hidden>
         <i class="ti ti-text-size"></i>
-        <span id="editHintText">텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.</span>
+        <span id="editHintText" data-i18n="hint.ready">텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.</span>
       </div>
       <div id="selectionToolbar" class="selection-toolbar" hidden>
         <div id="textQuickControls" class="quick-controls">
-          <select id="quickFontFamily" aria-label="폰트"></select>
-          <input id="quickFontSize" type="number" min="2" max="500" step="0.5" aria-label="글자 크기">
-          <label class="color-control" title="글자 색"><i class="ti ti-palette"></i><input id="quickFontColor" type="color" value="#172033" aria-label="글자 색"></label>
+          <select id="quickFontFamily" aria-label="폰트" data-i18n-aria-label="quick.font"></select>
+          <input id="quickFontSize" type="number" min="2" max="500" step="0.5" aria-label="글자 크기" data-i18n-aria-label="quick.size">
+          <label class="color-control" title="글자 색" data-i18n-title="quick.color"><i class="ti ti-palette"></i><input id="quickFontColor" type="color" value="#172033" aria-label="글자 색" data-i18n-aria-label="quick.color"></label>
         </div>
-        <button id="replaceImageButton" class="toolbar-action" type="button" hidden title="이미지 교체"><i class="ti ti-photo-scan"></i></button>
-        <button id="openPropertiesButton" class="toolbar-action" type="button" title="고급 속성"><i class="ti ti-adjustments-horizontal"></i></button>
-        <button id="deleteSelectedButton" class="toolbar-action is-danger" type="button" title="삭제"><i class="ti ti-trash"></i></button>
+        <button id="replaceImageButton" class="toolbar-action" type="button" hidden title="이미지 교체" data-i18n-title="quick.replaceImage"><i class="ti ti-photo-scan"></i></button>
+        <button id="openPropertiesButton" class="toolbar-action" type="button" title="고급 속성" data-i18n-title="quick.properties"><i class="ti ti-adjustments-horizontal"></i></button>
+        <button id="deleteSelectedButton" class="toolbar-action is-danger" type="button" title="삭제" data-i18n-title="action.delete"><i class="ti ti-trash"></i></button>
       </div>
       <input id="quickImageFile" type="file" accept="image/png,image/jpeg" hidden>
     </main>
 
-    <aside id="objectEditor" class="object-editor" aria-label="PDF 모든 도구" hidden>
+    <aside id="objectEditor" class="object-editor" aria-label="PDF 모든 도구" data-i18n-aria-label="panel.label" hidden>
       <header class="panel-header">
         <div>
-          <strong id="panelTitle">모든 도구</strong>
-          <p>필요한 작업을 검색하거나 범주에서 선택하세요.</p>
+          <strong id="panelTitle" data-i18n="panel.title">모든 도구</strong>
+          <p data-i18n="panel.description">필요한 작업을 검색하거나 범주에서 선택하세요.</p>
         </div>
-        <button id="closeObjectEditor" class="icon-button" type="button" aria-label="도구 패널 닫기"><i class="ti ti-x"></i></button>
+        <button id="closeObjectEditor" class="icon-button" type="button" aria-label="도구 패널 닫기" data-i18n-aria-label="panel.close"><i class="ti ti-x"></i></button>
       </header>
 
       <div id="editorEmpty" class="panel-empty">
-        PDF를 연 뒤 <strong>편집 시작</strong>을 누르면 모든 문서 도구를 사용할 수 있습니다.
-        <button id="loadObjectsButton" class="action-button" type="button"><i class="ti ti-edit"></i> 편집 시작</button>
+        <span data-i18n="panel.emptyBefore">PDF를 연 뒤 </span><strong data-i18n="panel.emptyAction">편집 시작</strong><span data-i18n="panel.emptyAfter">을 누르면 모든 문서 도구를 사용할 수 있습니다.</span>
+        <button id="loadObjectsButton" class="action-button" type="button"><i class="ti ti-edit"></i> <span data-i18n="panel.emptyAction">편집 시작</span></button>
       </div>
 
       <div id="editorBody" hidden>
         <div class="editor-mode-tabs" role="tablist">
-          <button class="editor-mode-tab is-active" type="button" data-editor-mode="advanced" role="tab" aria-selected="true">도구</button>
-          <button class="editor-mode-tab" type="button" data-editor-mode="objects" role="tab" aria-selected="false">선택 항목</button>
+          <button class="editor-mode-tab is-active" type="button" data-editor-mode="advanced" role="tab" aria-selected="true" data-i18n="tab.tools">도구</button>
+          <button class="editor-mode-tab" type="button" data-editor-mode="objects" role="tab" aria-selected="false" data-i18n="tab.objects">선택 항목</button>
         </div>
 
         <section id="advancedMode" class="advanced-mode">
           <form id="advancedToolForm" class="properties">
             <label class="tool-picker">
-              <span>도구 선택</span>
+              <span data-i18n="tool.select">도구 선택</span>
               <select id="advancedTool"></select>
             </label>
             <p id="advancedToolHelp" class="tool-help"></p>
             <div id="advancedFields" class="advanced-fields"></div>
-            <button id="runAdvancedTool" class="action-button" type="submit"><i class="ti ti-player-play"></i> 적용</button>
+            <button id="runAdvancedTool" class="action-button" type="submit"><i class="ti ti-player-play"></i> <span data-i18n="action.apply">적용</span></button>
           </form>
           <details class="capability-list">
-            <summary>현재 지원 기능 46개 보기</summary>
+            <summary data-i18n="capabilities.summary">현재 지원 기능 46개 보기</summary>
             <div id="commandCatalog"></div>
           </details>
         </section>
 
         <section id="objectMode" hidden>
-          <div class="selection-help"><i class="ti ti-pointer"></i><span>페이지의 텍스트를 한 번 클릭하면 그 자리에서 바로 수정됩니다. 이미지는 선택 후 드래그할 수 있습니다.</span></div>
-          <div class="panel-summary">
+          <div class="selection-help"><i class="ti ti-pointer"></i><span data-i18n="selection.help">페이지의 텍스트를 한 번 클릭하면 그 자리에서 바로 수정됩니다. 이미지는 선택 후 드래그할 수 있습니다.</span></div>
+          <div class="panel-summary" aria-live="polite">
             <span id="objectCount">객체 0개</span>
             <span id="fontCount">오픈 폰트 0개</span>
-            <button id="refreshObjectsButton" class="text-button" type="button">새로고침</button>
+            <button id="refreshObjectsButton" class="text-button" type="button" data-i18n="action.refresh">새로고침</button>
           </div>
           <details class="object-inspector">
-            <summary>객체 목록으로 찾기</summary>
-            <label class="search-field"><span>객체 검색</span><input id="objectSearch" type="search" placeholder="본문 내용 또는 페이지"></label>
+            <summary data-i18n="objects.find">객체 목록으로 찾기</summary>
+            <label class="search-field"><span data-i18n="objects.search">객체 검색</span><input id="objectSearch" type="search" placeholder="본문 내용 또는 페이지" data-i18n-placeholder="objects.placeholder"></label>
             <div class="object-tabs" role="tablist">
-              <button class="object-tab is-active" type="button" data-object-type="text" role="tab" aria-selected="true">본문</button>
-              <button class="object-tab" type="button" data-object-type="image" role="tab" aria-selected="false">이미지</button>
-              <button class="object-tab" type="button" data-object-type="all" role="tab" aria-selected="false">전체 객체</button>
+              <button class="object-tab is-active" type="button" data-object-type="text" role="tab" aria-selected="true" data-i18n="objects.text">본문</button>
+              <button class="object-tab" type="button" data-object-type="image" role="tab" aria-selected="false" data-i18n="objects.image">이미지</button>
+              <button class="object-tab" type="button" data-object-type="all" role="tab" aria-selected="false" data-i18n="objects.all">전체 객체</button>
             </div>
-            <div id="objectList" class="object-list" aria-label="PDF 객체 목록"></div>
+            <div id="objectList" class="object-list" aria-label="PDF 객체 목록" data-i18n-aria-label="objects.listLabel"></div>
           </details>
 
           <form id="textEditorForm" class="properties" hidden>
-            <h2>선택한 텍스트 고급 속성</h2>
-            <label><span>텍스트</span><textarea id="textValue" rows="4"></textarea></label>
+            <h2 data-i18n="text.properties">선택한 텍스트 고급 속성</h2>
+            <label><span data-i18n="field.text">텍스트</span><textarea id="textValue" rows="4"></textarea></label>
             <div class="field-grid">
-              <label><span>폰트</span><select id="fontFamily"></select></label>
-              <label><span>크기</span><input id="fontSize" type="number" min="2" max="500" step="0.5"></label>
-              <label><span>색상</span><input id="fontColor" type="color" value="#172033"></label>
-              <label><span>불투명도</span><input id="fontOpacity" type="number" min="0" max="1" step="0.05" value="1"></label>
+              <label><span data-i18n="field.font">폰트</span><select id="fontFamily"></select></label>
+              <label><span data-i18n="field.size">크기</span><input id="fontSize" type="number" min="2" max="500" step="0.5"></label>
+              <label><span data-i18n="field.color">색상</span><input id="fontColor" type="color" value="#172033"></label>
+              <label><span data-i18n="field.opacity">불투명도</span><input id="fontOpacity" type="number" min="0" max="1" step="0.05" value="1"></label>
             </div>
-            <div class="button-row"><button class="action-button" type="submit">적용</button><button class="danger-button" type="button" data-delete-object>삭제</button></div>
+            <div class="button-row"><button class="action-button" type="submit" data-i18n="action.apply">적용</button><button class="danger-button" type="button" data-delete-object data-i18n="action.delete">삭제</button></div>
           </form>
 
           <form id="imageEditorForm" class="properties" hidden>
-            <h2>선택한 이미지 고급 속성</h2>
-            <label><span>PNG 또는 JPEG로 교체</span><input id="imageFile" type="file" accept="image/png,image/jpeg"></label>
+            <h2 data-i18n="image.properties">선택한 이미지 고급 속성</h2>
+            <label><span data-i18n="image.replace">PNG 또는 JPEG로 교체</span><input id="imageFile" type="file" accept="image/png,image/jpeg"></label>
             <div class="field-grid">
-              <label><span>가로 크기</span><input id="matrixA" type="number" step="0.1"></label>
-              <label><span>세로 크기</span><input id="matrixD" type="number" step="0.1"></label>
-              <label><span>X 위치</span><input id="matrixE" type="number" step="0.1"></label>
-              <label><span>Y 위치</span><input id="matrixF" type="number" step="0.1"></label>
+              <label><span data-i18n="field.width">가로 크기</span><input id="matrixA" type="number" step="0.1"></label>
+              <label><span data-i18n="field.height">세로 크기</span><input id="matrixD" type="number" step="0.1"></label>
+              <label><span data-i18n="field.x">X 위치</span><input id="matrixE" type="number" step="0.1"></label>
+              <label><span data-i18n="field.y">Y 위치</span><input id="matrixF" type="number" step="0.1"></label>
             </div>
-            <div class="button-row"><button class="action-button" type="submit">적용</button><button class="danger-button" type="button" data-delete-object>삭제</button></div>
+            <div class="button-row"><button class="action-button" type="submit" data-i18n="action.apply">적용</button><button class="danger-button" type="button" data-delete-object data-i18n="action.delete">삭제</button></div>
           </form>
 
           <section id="genericEditor" class="properties" hidden>
-            <h2>선택한 객체</h2><p id="genericObjectInfo"></p><button class="danger-button" type="button" data-delete-object>삭제</button>
+            <h2 data-i18n="object.selected">선택한 객체</h2><p id="genericObjectInfo"></p><button class="danger-button" type="button" data-delete-object data-i18n="action.delete">삭제</button>
           </section>
         </section>
       </div>
@@ -151,9 +152,9 @@
     </aside>
   </div>
 
-  <section id="bootError" class="boot-error" hidden><strong>PDF 편집기를 시작하지 못했습니다.</strong><span id="bootErrorMessage"></span></section>
+  <section id="bootError" class="boot-error" hidden><strong data-i18n="boot.error">PDF 편집기를 시작하지 못했습니다.</strong><span id="bootErrorMessage"></span></section>
   <dialog id="reportDialog" class="report-dialog">
-    <header><div><strong id="reportTitle">PDF 검사 결과</strong><p id="reportSummary"></p></div><button id="closeReportDialog" class="icon-button" type="button" aria-label="검사 결과 닫기"><i class="ti ti-x"></i></button></header>
+    <header><div><strong id="reportTitle" data-i18n="report.title">PDF 검사 결과</strong><p id="reportSummary"></p></div><button id="closeReportDialog" class="icon-button" type="button" aria-label="검사 결과 닫기" data-i18n-aria-label="report.close"><i class="ti ti-x"></i></button></header>
     <div id="reportBody" class="report-body"></div>
   </dialog>
   <script type="module" src="./app.js"></script>
