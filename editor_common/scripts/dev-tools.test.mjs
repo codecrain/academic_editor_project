@@ -185,6 +185,8 @@ test('local dev starts DOCX and HWPX on stable subpaths', () => {
   assert.match(localDev, /EDITOR_SERVICE_ROOT/);
   assert.match(localDev, /editor-gateway\.mjs/);
   assert.match(localDev, /EDITOR_GATEWAY_HWPX_STATIC_ROOT/);
+  assert.match(localDev, /run\(npmCommand\(\), \['run', 'build:studio'\]/);
+  assert.doesNotMatch(localDev, /run\(npmCommand\(\), \['run', 'build'\]/);
   assert.doesNotMatch(localDev, /RHWP_STUDIO_INTERNAL_PORT/);
   assert.match(localDev, /\/docx\//);
   assert.match(localDev, /\/hwpx\//);

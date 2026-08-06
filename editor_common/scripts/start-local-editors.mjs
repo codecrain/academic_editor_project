@@ -244,7 +244,11 @@ async function prepareRhwpStudioStaticBuild() {
       windowsHide: true,
     });
   }
-  run(npmCommand(), ['run', 'build'], {
+  // The validated source-built WASM core is materialized by build:studio's
+  // ensure step. Re-running the full build here needlessly invokes Rust and
+  // wasm-opt on every local startup, which can take several minutes on
+  // Windows/Docker. Use build:core explicitly when the native core changed.
+  run(npmCommand(), ['run', 'build:studio'], {
     cwd: rhwpRoot,
     env: {
       ...process.env,
