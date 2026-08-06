@@ -2,15 +2,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('/pdf UI boots the pinned PDFium editor with advanced editing categories', async () => {
+test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   const [html, source] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
   ]);
   for (const expected of [
-    'id="pdfViewer"', 'Academic PDF', 'PDFium', 'id="runtimeStatus"', 'id="objectEditorButton"',
+    'id="pdfViewer"', 'tlooto PDF', 'id="runtimeStatus"', 'id="objectEditorButton"', 'id="settingsButton"', 'id="settingsMenu"',
     '모든 도구', '품질·접근성 검사', '원본과 비교', '페이지 위 편집 도구', '텍스트를 한 번 클릭',
-    'assets/tabler/tabler-icons.min.css', 'id="canvasOverlay"', 'id="selectionToolbar"',
+    'assets/tabler/tabler-icons.min.css', 'id="canvasOverlay"', 'id="selectionToolbar"', 'id="commentComposer"', 'id="advancedConfirm"',
+    'id="imageChooseButton"',
+    'data-edit-mode="comment"', 'data-edit-mode="redaction"',
     'id="fontFamily"', 'id="advancedTool"', 'id="savePdfButton"',
   ]) {
     assert.match(html, new RegExp(expected));
@@ -34,9 +36,27 @@ test('/pdf UI boots the pinned PDFium editor with advanced editing categories', 
   assert.match(source, /activateEditMode\('text'\)/);
   assert.match(source, /queueMicrotask/);
   assert.match(source, /objectScreenRect/);
+  assert.match(source, /pagePointAtClient/);
+  assert.match(source, /saveDirectComment/);
+  assert.match(source, /handleRedactionPointerDown/);
+  assert.match(source, /clearSelection/);
+  assert.match(source, /event\.key === 'Escape'/);
   assert.match(source, /beginImageDrag/);
+  assert.match(source, /autoScrollDuringDrag/);
+  assert.match(source, /viewerScroller/);
+  assert.match(source, /modeActivation/);
+  assert.match(source, /cancelDirectInteraction/);
+  assert.match(source, /copySelectedObject/);
+  assert.match(source, /pasteCopiedObject/);
+  assert.match(source, /nudgeSelectedImage/);
+  assert.match(source, /event\.key === 'Delete' \|\| event\.key === 'Backspace'/);
+  assert.match(source, /event\.key\.toLowerCase\(\) === 's'/);
   assert.match(source, /image\.replaceObject/);
+  assert.match(source, /image\.add/);
+  assert.match(source, /placePendingImage/);
   assert.match(source, /redaction\.apply/);
+  assert.match(source, /showAdvancedConfirmation/);
+  assert.doesNotMatch(source, /window\.confirm/);
   assert.match(source, /ocr\.recognize/);
   assert.match(source, /watermark\.add/);
   assert.match(source, /bates\.add/);

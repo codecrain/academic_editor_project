@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title desc">
+  <title id="title">tlooto PDF</title>
+  <desc id="desc">A flat coral document mark for tlooto PDF</desc>
+  <rect width="32" height="32" rx="9" fill="#ef5b55"/>
+  <path d="M9 7h9.1L23 11.9V25H9z" fill="#fff"/>
+  <path d="M18 7v5h5" fill="none" stroke="#ef5b55" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+  <path d="M12.4 16.2h7.1M12.4 19.5h7.1M12.4 22.8h4.8" fill="none" stroke="#19304a" stroke-linecap="round" stroke-width="1.7"/>
+  <path d="M12.4 13.1h3.9" fill="none" stroke="#19304a" stroke-linecap="round" stroke-width="1.7"/>
+</svg>

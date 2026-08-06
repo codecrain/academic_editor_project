@@ -40,7 +40,7 @@ test('gateway serves the PDF editor and only its pinned vendor entrypoints on /p
     assert.equal(canonical.headers.get('location'), '/pdf/');
     const html = await fetch(`${origin}/pdf/`);
     assert.equal(html.status, 200);
-    assert.match(await html.text(), /Academic PDF Editor/);
+    assert.match(await html.text(), /tlooto PDF/);
     const browserCookie = html.headers.get('set-cookie');
     assert.match(browserCookie, /academic_pdf_session=/);
     assert.match(browserCookie, /HttpOnly/);

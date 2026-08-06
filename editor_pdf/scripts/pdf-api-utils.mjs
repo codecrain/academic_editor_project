@@ -933,6 +933,7 @@ class PdfApiSession {
         code: 'preflight_active_content',
         severity: 'warning',
         message: `The PDF contains active-content markers: ${activeContentMarkers.join(', ')}.`,
+        markers: activeContentMarkers,
       });
     }
     return {

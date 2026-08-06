@@ -9,11 +9,15 @@ const elementIds = [
   'imageEditorForm', 'imageFile', 'matrixA', 'matrixD', 'matrixE', 'matrixF',
   'genericEditor', 'genericObjectInfo', 'panelStatus', 'objectMode', 'advancedMode',
   'advancedToolForm', 'advancedTool', 'advancedToolHelp', 'advancedFields', 'commandCatalog',
+  'quickToolGrid',
   'qualityAuditButton', 'compareButton', 'reportDialog', 'reportTitle', 'reportSummary',
   'reportBody', 'closeReportDialog',
-  'canvasOverlay', 'selectionToolbar', 'textQuickControls', 'quickFontFamily', 'quickFontSize',
+  'advancedConfirm', 'advancedConfirmTitle', 'advancedConfirmMessage', 'advancedConfirmCancel', 'advancedConfirmCancelButton', 'advancedConfirmApply',
+  'settingsButton', 'settingsMenu', 'closeSettingsButton', 'canvasOverlay', 'selectionToolbar', 'textQuickControls', 'quickFontFamily', 'quickFontSize',
   'quickFontColor', 'replaceImageButton', 'openPropertiesButton', 'deleteSelectedButton',
-  'quickImageFile', 'panelTitle', 'editHint', 'editHintText', 'savePdfButton', 'languageSelect',
+  'quickImageFile', 'commentComposer', 'commentText', 'commentSave', 'commentCancel', 'commentCancelButton',
+  'redactionConfirm', 'redactionConfirmCancel', 'redactionConfirmCancelButton', 'redactionConfirmApply',
+  'panelTitle', 'editHint', 'editHintText', 'imageChooseButton', 'topModeLabel', 'savePdfButton', 'languageSelect',
 ];
 const elements = Object.fromEntries(elementIds.map((id) => [id, document.getElementById(id)]));
 applyTranslations();
@@ -39,6 +43,16 @@ const state = {
   textPreviews: new Map(),
   pendingSave: false,
   textGroups: new Map(),
+  pendingComment: null,
+  pendingImage: null,
+  imageFilePurpose: null,
+  redactionDrag: null,
+  pendingRedaction: null,
+  pendingAdvancedTool: null,
+  pendingConfirmationAction: null,
+  modeActivation: 0,
+  objectDrag: null,
+  clipboard: null,
 };
 
 function failBoot(error) {
@@ -46,7 +60,7 @@ function failBoot(error) {
   elements.runtimeStatus.textContent = t('status.engineFailed');
   elements.bootErrorMessage.textContent = message;
   elements.bootError.hidden = false;
-  console.error('Academic PDF Editor startup failed.', error);
+  console.error('tlooto PDF startup failed.', error);
 }
 
 function setPanelStatus(message, kind = '') {
@@ -61,11 +75,37 @@ function markPendingSave(pending = true) {
   elements.savePdfButton.title = pending ? t('status.savePending') : t('status.saveCurrent');
 }
 
+function localizedIssueMessage(issue) {
+  const message = t(`issue.${issue.code}`, {
+    message: issue.message,
+    pages: (issue.pages || []).join(', '),
+    count: issue.objects?.length || 0,
+    markers: (issue.markers || []).join(', '),
+  });
+  return message.startsWith('issue.') ? issue.message : message;
+}
+
 function showReport(title, summary, content) {
   elements.reportTitle.textContent = title;
   elements.reportSummary.textContent = summary;
   elements.reportBody.replaceChildren(content);
   elements.reportDialog.showModal();
+}
+
+function closeAdvancedConfirmation() {
+  state.pendingAdvancedTool = null;
+  state.pendingConfirmationAction = null;
+  if (elements.advancedConfirm.open) elements.advancedConfirm.close();
+}
+
+function showAdvancedConfirmation({ tool = null, message, action }) {
+  const localizedTool = tool ? localizeTool(tool) : null;
+  state.pendingAdvancedTool = tool?.op || null;
+  state.pendingConfirmationAction = action;
+  elements.advancedConfirmTitle.textContent = t('advancedConfirm.title');
+  elements.advancedConfirmMessage.textContent = message || t('advancedConfirm.message', { label: localizedTool.label });
+  if (!elements.advancedConfirm.open) elements.advancedConfirm.showModal();
+  elements.advancedConfirmApply.focus({ preventScroll: true });
 }
 
 function issueList(quality) {
@@ -77,7 +117,7 @@ function issueList(quality) {
     const label = document.createElement('strong');
     label.textContent = issue.severity === 'error' ? t('quality.error') : issue.severity === 'warning' ? t('quality.warning') : t('quality.info');
     const message = document.createElement('span');
-    message.textContent = issue.message;
+    message.textContent = localizedIssueMessage(issue);
     item.append(label, message);
     list.append(item);
   }
@@ -168,6 +208,11 @@ async function beginObjectSession() {
 
 function reflectEditMode(mode) {
   state.editMode = mode;
+  document.querySelector('.tool-rail')?.setAttribute('data-mode', mode);
+  elements.canvasOverlay?.setAttribute('data-mode', mode);
+  if (elements.imageChooseButton) elements.imageChooseButton.hidden = mode !== 'image' || Boolean(state.pendingImage);
+  elements.canvasOverlay?.setAttribute('data-image-placement', String(Boolean(state.pendingImage && mode === 'image')));
+  if (elements.topModeLabel) elements.topModeLabel.textContent = t(`mode.${mode}`);
   document.querySelectorAll('[data-edit-mode]').forEach((candidate) => {
     const active = candidate.dataset.editMode === mode;
     candidate.classList.toggle('is-active', active);
@@ -184,7 +229,38 @@ function showEditHint(message, stateName = 'ready') {
   elements.editHint.hidden = false;
 }
 
+function hideEditHint() {
+  elements.editHint.hidden = true;
+}
+
+function cancelImagePlacement() {
+  state.pendingImage = null;
+  state.imageFilePurpose = null;
+  elements.quickImageFile.value = '';
+  elements.canvasOverlay.dataset.imagePlacement = 'false';
+}
+
+function cancelDirectInteraction({ clearSelection: shouldClearSelection = false } = {}) {
+  closeCommentComposer();
+  clearRedactionRegion();
+  cancelImagePlacement();
+  if (shouldClearSelection) clearSelection({ render: false });
+}
+
+function modeHintKey(mode) {
+  return {
+    select: 'hint.select',
+    text: 'hint.ready',
+    image: 'hint.image',
+    comment: 'hint.comment',
+    redaction: 'hint.redaction',
+  }[mode] || 'hint.ready';
+}
+
 async function activateEditMode(mode = 'text', { announce = true } = {}) {
+  const activation = ++state.modeActivation;
+  clearSelection({ render: false });
+  cancelDirectInteraction();
   reflectEditMode(mode);
   if (!state.sessionId) {
     elements.editPdfButton.classList.add('is-loading');
@@ -194,14 +270,43 @@ async function activateEditMode(mode = 'text', { announce = true } = {}) {
     } finally {
       elements.editPdfButton.classList.remove('is-loading');
     }
+    if (activation !== state.modeActivation) return;
     reflectEditMode(mode);
   }
+  if (activation !== state.modeActivation) return;
   renderCanvasObjects();
-  if (announce && mode === 'text') {
-    showEditHint(t('hint.ready'));
-  } else if (mode !== 'text') {
-    elements.editHint.hidden = true;
+  if (!announce) return;
+  if (mode === 'select') hideEditHint();
+  else showEditHint(t(modeHintKey(mode)));
+}
+
+const quickFontFamilyNames = [
+  'Noto Sans KR', 'Noto Serif KR', 'Nanum Myeongjo', 'Pretendard',
+  'Carlito', 'Caladea', 'Liberation Sans', 'Liberation Serif',
+  'Liberation Mono', 'DejaVu Sans',
+];
+
+function renderQuickFontFamilyOptions(preserveValues = []) {
+  const options = [...elements.fontFamily.options];
+  const preserve = new Set(preserveValues.filter(Boolean));
+  const preferredValues = new Set();
+
+  for (const family of quickFontFamilyNames) {
+    const familyOptions = options.filter((option) => option.dataset.family === family);
+    const preferred = familyOptions.find((option) => /\bRegular\b/.test(option.textContent))
+      || familyOptions.find((option) => /\bVariable\b/.test(option.textContent))
+      || familyOptions[0];
+    if (preferred) preferredValues.add(preferred.value);
   }
+
+  const quickOptions = options.filter((option) => (
+    preferredValues.has(option.value) || preserve.has(option.value)
+  ));
+  elements.quickFontFamily.replaceChildren(...quickOptions.map((option) => option.cloneNode(true)));
+  const selectedValue = [...preserve].find((value) => (
+    [...elements.quickFontFamily.options].some((option) => option.value === value)
+  ));
+  if (selectedValue) elements.quickFontFamily.value = selectedValue;
 }
 
 async function refreshInventory() {
@@ -222,10 +327,7 @@ async function refreshInventory() {
     elements.fontFamily.value = previousFont;
   }
   const previousQuickFont = elements.quickFontFamily.value;
-  elements.quickFontFamily.replaceChildren(...[...elements.fontFamily.options].map((source) => source.cloneNode(true)));
-  if ([...elements.quickFontFamily.options].some((option) => option.value === previousQuickFont)) {
-    elements.quickFontFamily.value = previousQuickFont;
-  }
+  renderQuickFontFamilyOptions([previousQuickFont]);
   if (state.selected) {
     const refreshedSelection = state.inventory.pageObjects.find((object) => (
       object.page === state.selected.page
@@ -250,7 +352,7 @@ async function loadCommandCatalog() {
   elements.commandCatalog.replaceChildren(...[...groups.entries()].map(([category, commands]) => {
     const section = document.createElement('section');
     const heading = document.createElement('strong');
-    heading.textContent = category;
+    heading.textContent = t(`category.${category}`);
     const body = document.createElement('p');
     body.textContent = commands.join(' · ');
     section.append(heading, body);
@@ -312,6 +414,7 @@ function selectObject(object) {
     elements.fontSize.value = object.fontSize || 12;
     elements.fontColor.value = object.fillColor?.hex || '#172033';
     elements.fontOpacity.value = ((object.fillColor?.a ?? 255) / 255).toFixed(2);
+    renderQuickFontFamilyOptions([elements.fontFamily.value]);
     elements.quickFontFamily.value = elements.fontFamily.value;
     elements.quickFontSize.value = object.fontSize || 12;
     elements.quickFontColor.value = object.fillColor?.hex || '#172033';
@@ -326,6 +429,15 @@ function selectObject(object) {
   }
   renderCanvasObjects();
   positionSelectionToolbar();
+}
+
+function clearSelection({ render = true } = {}) {
+  state.selected = null;
+  elements.selectionToolbar.hidden = true;
+  elements.textEditorForm.hidden = true;
+  elements.imageEditorForm.hidden = true;
+  elements.genericEditor.hidden = true;
+  if (render) renderCanvasObjects();
 }
 
 function renderedPages() {
@@ -371,6 +483,235 @@ function objectScreenRect(object) {
   };
 }
 
+function pagePointAtClient(clientX, clientY) {
+  const viewerRect = elements.pdfViewer.getBoundingClientRect();
+  const pointX = clientX - viewerRect.left;
+  const pointY = clientY - viewerRect.top;
+  const rendered = renderedPages().find((page) => (
+    pointX >= page.left && pointX <= page.left + page.width
+      && pointY >= page.top && pointY <= page.top + page.height
+  ));
+  const source = state.inventory?.pages?.find((page) => page.page === rendered?.page);
+  if (!rendered || !source) return null;
+  const screenX = Math.max(0, Math.min(rendered.width, pointX - rendered.left));
+  const screenY = Math.max(0, Math.min(rendered.height, pointY - rendered.top));
+  return {
+    page: rendered.page,
+    x: (screenX / rendered.width) * source.width,
+    y: (screenY / rendered.height) * source.height,
+    screenX: rendered.left + screenX,
+    screenY: rendered.top + screenY,
+    pageLeft: rendered.left,
+    pageTop: rendered.top,
+    scaleX: rendered.width / source.width,
+    scaleY: rendered.height / source.height,
+  };
+}
+
+function imageDimensions(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error(t('error.invalidImage')));
+    };
+    image.src = url;
+  });
+}
+
+async function placePendingImage(point) {
+  const file = state.pendingImage;
+  const source = state.inventory?.pages?.find((page) => page.page === point.page);
+  if (!file || !source) return;
+  try {
+    setPanelStatus(t('status.imagePreparing'));
+    const natural = await imageDimensions(file);
+    const maxWidth = Math.min(180, source.width * 0.35);
+    const maxHeight = source.height * 0.35;
+    const scale = Math.min(maxWidth / natural.width, maxHeight / natural.height);
+    const width = Math.max(24, natural.width * scale);
+    const height = Math.max(24, natural.height * scale);
+    const x = Math.max(0, Math.min(source.width - width, point.x - width / 2));
+    const y = Math.max(0, Math.min(source.height - height, point.y - height / 2));
+    await applyCommands([{
+      op: 'image.add',
+      page: point.page,
+      x,
+      y,
+      width,
+      height,
+      mimeType: file.type || 'image/png',
+      bytesBase64: await fileBase64(file),
+    }]);
+    state.pendingImage = null;
+    elements.canvasOverlay.dataset.imagePlacement = 'false';
+    reflectEditMode('select');
+    hideEditHint();
+    setPanelStatus(t('status.imageAdded'), 'success');
+  } catch (error) {
+    setPanelStatus(error.message, 'error');
+  }
+}
+
+function closeCommentComposer() {
+  state.pendingComment = null;
+  elements.commentComposer.hidden = true;
+  elements.commentText.value = '';
+}
+
+function showCommentComposer(point) {
+  state.pendingComment = point;
+  elements.selectionToolbar.hidden = true;
+  elements.commentComposer.hidden = false;
+  const composerWidth = Math.min(300, Math.max(240, elements.pdfViewer.clientWidth - 24));
+  elements.commentComposer.style.width = `${composerWidth}px`;
+  const left = Math.max(10, Math.min(point.screenX + 12, elements.pdfViewer.clientWidth - composerWidth - 10));
+  const top = Math.max(10, Math.min(point.screenY + 12, elements.pdfViewer.clientHeight - 190));
+  elements.commentComposer.style.left = `${left}px`;
+  elements.commentComposer.style.top = `${top}px`;
+  elements.commentText.focus({ preventScroll: true });
+}
+
+async function saveDirectComment() {
+  const point = state.pendingComment;
+  const text = elements.commentText.value.trim();
+  if (!point || !text) {
+    elements.commentText.focus({ preventScroll: true });
+    return;
+  }
+  try {
+    setPanelStatus(t('status.commentSaving'));
+    closeCommentComposer();
+    await applyCommands([{
+      op: 'comment.add',
+      page: point.page,
+      x: point.x,
+      y: point.y,
+      width: 24,
+      height: 24,
+      text,
+      author: 'Reviewer',
+      icon: 'Comment',
+      color: '#ffd166',
+      open: false,
+    }]);
+    reflectEditMode('select');
+    hideEditHint();
+    setPanelStatus(t('status.commentSaved'), 'success');
+  } catch (error) {
+    setPanelStatus(error.message, 'error');
+  }
+}
+
+function clearRedactionRegion() {
+  state.redactionDrag = null;
+  state.pendingRedaction = null;
+  elements.canvasOverlay.querySelector('.direct-region')?.remove();
+  elements.redactionConfirm.hidden = true;
+}
+
+function showRedactionConfirmation(screenRegion) {
+  const viewerRect = elements.pdfViewer.getBoundingClientRect();
+  const panelWidth = 286;
+  const left = Math.max(8, Math.min(screenRegion.left, elements.pdfViewer.clientWidth - panelWidth - 8));
+  const top = Math.max(8, Math.min(screenRegion.top + screenRegion.height + 10, elements.pdfViewer.clientHeight - 142));
+  elements.redactionConfirm.style.left = `${left}px`;
+  elements.redactionConfirm.style.top = `${top}px`;
+  elements.redactionConfirm.hidden = false;
+  elements.redactionConfirmApply.focus({ preventScroll: true });
+}
+
+function drawRedactionRegion(start, end) {
+  const left = Math.min(start.screenX, end.screenX);
+  const top = Math.min(start.screenY, end.screenY);
+  const width = Math.abs(end.screenX - start.screenX);
+  const height = Math.abs(end.screenY - start.screenY);
+  let region = elements.canvasOverlay.querySelector('.direct-region');
+  if (!region) {
+    region = document.createElement('div');
+    region.className = 'direct-region';
+    elements.canvasOverlay.append(region);
+  }
+  Object.assign(region.style, {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${width}px`,
+    height: `${height}px`,
+  });
+  return { left, top, width, height };
+}
+
+async function applyDirectRedaction() {
+  const pending = state.pendingRedaction;
+  if (!pending) return;
+  try {
+    setPanelStatus(t('status.redactionApplying'));
+    clearRedactionRegion();
+    await applyCommands([{
+      op: 'redaction.apply',
+      page: pending.page,
+      regions: [pending.region],
+      color: '#000000',
+      overlayText: t('directRedaction.overlayText'),
+    }]);
+    reflectEditMode('select');
+    hideEditHint();
+    setPanelStatus(t('status.redactionApplied'), 'success');
+  } catch (error) {
+    clearRedactionRegion();
+    setPanelStatus(error.message, 'error');
+  }
+}
+
+function handleRedactionPointerDown(event) {
+  if (state.editMode !== 'redaction' || event.button !== 0) return;
+  const point = pagePointAtClient(event.clientX, event.clientY);
+  if (!point) return;
+  event.preventDefault();
+  state.pendingRedaction = null;
+  state.redactionDrag = { pointerId: event.pointerId, start: point, current: point };
+  elements.canvasOverlay.setPointerCapture?.(event.pointerId);
+  drawRedactionRegion(point, point);
+}
+
+function handleRedactionPointerMove(event) {
+  if (!state.redactionDrag || state.redactionDrag.pointerId !== event.pointerId) return;
+  const point = pagePointAtClient(event.clientX, event.clientY);
+  if (!point || point.page !== state.redactionDrag.start.page) return;
+  state.redactionDrag.current = point;
+  drawRedactionRegion(state.redactionDrag.start, point);
+}
+
+async function handleRedactionPointerUp(event) {
+  if (!state.redactionDrag || state.redactionDrag.pointerId !== event.pointerId) return;
+  const drag = state.redactionDrag;
+  const point = pagePointAtClient(event.clientX, event.clientY) || drag.current;
+  state.redactionDrag = null;
+  elements.canvasOverlay.releasePointerCapture?.(event.pointerId);
+  if (!point || point.page !== drag.start.page) {
+    clearRedactionRegion();
+    return;
+  }
+  const screenRegion = drawRedactionRegion(drag.start, point);
+  if (screenRegion.width < 8 || screenRegion.height < 8) {
+    clearRedactionRegion();
+    return;
+  }
+  const region = {
+    x: Math.min(drag.start.x, point.x),
+    y: Math.min(drag.start.y, point.y),
+    width: Math.abs(point.x - drag.start.x),
+    height: Math.abs(point.y - drag.start.y),
+  };
+  state.pendingRedaction = { page: drag.start.page, region };
+  showRedactionConfirmation(screenRegion);
+}
+
 function positionSelectionToolbar() {
   if (!state.selected) {
     elements.selectionToolbar.hidden = true;
@@ -389,12 +730,33 @@ function positionSelectionToolbar() {
   elements.selectionToolbar.style.top = `${Math.max(8, rect.top - 48)}px`;
 }
 
+function viewerScroller() {
+  const host = elements.pdfViewer.querySelector('embedpdf-container');
+  const root = host?.shadowRoot;
+  const candidates = [elements.pdfViewer, ...[...(root?.querySelectorAll('*') || [])]];
+  return candidates.find((candidate) => {
+    const style = getComputedStyle(candidate);
+    return candidate.scrollHeight > candidate.clientHeight + 2 && /(auto|scroll)/.test(style.overflowY);
+  }) || elements.pdfViewer;
+}
+
+function autoScrollDuringDrag(clientY) {
+  const scroller = viewerScroller();
+  const rect = elements.pdfViewer.getBoundingClientRect();
+  const edge = 56;
+  const distanceTop = clientY - rect.top;
+  const distanceBottom = rect.bottom - clientY;
+  let delta = 0;
+  if (distanceTop < edge) delta = -Math.ceil((edge - Math.max(0, distanceTop)) * 0.34);
+  if (distanceBottom < edge) delta = Math.ceil((edge - Math.max(0, distanceBottom)) * 0.34);
+  if (!delta) return 0;
+  const previous = scroller.scrollTop;
+  scroller.scrollTop += delta;
+  return scroller.scrollTop - previous;
+}
+
 function beginImageDrag(event, object, hitbox) {
-  if (event.button !== 0 || object.type !== 'image') return;
-  if (state.selected?.id !== object.id) {
-    selectObject(object);
-    return;
-  }
+  if (!['select', 'image'].includes(state.editMode) || event.button !== 0 || object.type !== 'image') return;
   event.preventDefault();
   event.stopPropagation();
   selectObject(object);
@@ -402,18 +764,25 @@ function beginImageDrag(event, object, hitbox) {
   const startY = event.clientY;
   const screen = objectScreenRect(object);
   const startMatrix = { ...object.matrix };
+  state.objectDrag = { pointerId: event.pointerId, hitbox, startX, startY, autoScrollY: 0 };
   hitbox.setPointerCapture(event.pointerId);
   const move = (moveEvent) => {
-    hitbox.style.transform = `translate(${moveEvent.clientX - startX}px, ${moveEvent.clientY - startY}px)`;
+    const autoScrollY = autoScrollDuringDrag(moveEvent.clientY);
+    state.objectDrag.autoScrollY += autoScrollY;
+    hitbox.style.transform = `translate(${moveEvent.clientX - startX}px, ${moveEvent.clientY - startY + state.objectDrag.autoScrollY}px)`;
     elements.selectionToolbar.hidden = true;
   };
   const finish = async (upEvent) => {
     hitbox.removeEventListener('pointermove', move);
     hitbox.removeEventListener('pointerup', finish);
+    hitbox.removeEventListener('pointercancel', cancel);
+    hitbox.removeEventListener('lostpointercapture', cancel);
     hitbox.style.transform = '';
+    const drag = state.objectDrag;
+    state.objectDrag = null;
     if (!screen) return;
     const dx = (upEvent.clientX - startX) / screen.scaleX;
-    const dy = (upEvent.clientY - startY) / screen.scaleY;
+    const dy = (upEvent.clientY - startY + (drag?.autoScrollY || 0)) / screen.scaleY;
     if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
       positionSelectionToolbar();
       return;
@@ -432,17 +801,30 @@ function beginImageDrag(event, object, hitbox) {
       setPanelStatus(error.message, 'error');
     }
   };
+  const cancel = () => {
+    hitbox.removeEventListener('pointermove', move);
+    hitbox.removeEventListener('pointerup', finish);
+    hitbox.removeEventListener('pointercancel', cancel);
+    hitbox.removeEventListener('lostpointercapture', cancel);
+    hitbox.style.transform = '';
+    state.objectDrag = null;
+    positionSelectionToolbar();
+  };
   hitbox.addEventListener('pointermove', move);
   hitbox.addEventListener('pointerup', finish);
+  hitbox.addEventListener('pointercancel', cancel);
+  hitbox.addEventListener('lostpointercapture', cancel);
 }
 
 function renderCanvasObjects() {
-  if (state.inlineEditing) return;
+  if (state.inlineEditing || state.objectDrag) return;
   state.overlayGeometry = renderedPages().map((page) => (
     `${page.page}:${page.left.toFixed(1)}:${page.top.toFixed(1)}:${page.width.toFixed(1)}:${page.height.toFixed(1)}`
   )).join('|');
   elements.canvasOverlay.replaceChildren();
   if (!state.inventory) return;
+  if (['comment', 'redaction'].includes(state.editMode)) return;
+  if (state.editMode === 'image' && state.pendingImage) return;
   for (const object of state.inventory.pageObjects || []) {
     if (!['text', 'image'].includes(object.type)) continue;
     if (state.editMode === 'text' && object.type !== 'text') continue;
@@ -1056,17 +1438,197 @@ function openToolPanel(mode = 'advanced') {
   tab?.click();
 }
 
+const quickToolDefinitions = [
+  ['ocr.recognize', 'ti-scan'],
+  ['text.replaceAll', 'ti-replace'],
+  ['watermark.add', 'ti-watermark'],
+  ['page.extract', 'ti-files'],
+  ['page.resize', 'ti-resize'],
+  ['form.addTextField', 'ti-forms'],
+  ['metadata.set', 'ti-file-description'],
+  ['document.sanitize', 'ti-shield-check'],
+];
+
+function renderQuickTools() {
+  elements.quickToolGrid.replaceChildren(...quickToolDefinitions.map(([op, icon]) => {
+    const tool = advancedTools.find((candidate) => candidate.op === op);
+    const localizedTool = localizeTool(tool);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'quick-tool-card';
+    button.dataset.tool = op;
+    button.setAttribute('aria-label', localizedTool.label);
+    button.innerHTML = `<i class="ti ${icon}" aria-hidden="true"></i><strong></strong>`;
+    button.querySelector('strong').textContent = localizedTool.label;
+    button.addEventListener('click', () => {
+      const picker = document.querySelector('.advanced-tool-picker');
+      if (picker) picker.open = true;
+      elements.advancedTool.value = op;
+      renderAdvancedTool();
+      elements.advancedFields.querySelector('input, textarea, select')?.focus({ preventScroll: true });
+    });
+    return button;
+  }));
+}
+
+function setSettingsOpen(open) {
+  if (!open && elements.settingsMenu.contains(document.activeElement)) elements.settingsButton.focus({ preventScroll: true });
+  elements.settingsMenu.hidden = !open;
+  elements.settingsButton.setAttribute('aria-expanded', String(open));
+  if (open) elements.languageSelect.focus({ preventScroll: true });
+}
+
+function isEditableTarget(target) {
+  return target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+}
+
+async function imageClipboardPayload(object) {
+  const rendered = renderedPages().find((page) => page.page === object.page);
+  const source = state.inventory?.pages?.find((page) => page.page === object.page);
+  const bounds = object.editorBounds;
+  if (!rendered?.image || !source || !bounds) throw new Error(t('error.copyImageUnavailable'));
+  const scaleX = rendered.image.naturalWidth / source.width;
+  const scaleY = rendered.image.naturalHeight / source.height;
+  const width = Math.max(1, Math.round(bounds.width * scaleX));
+  const height = Math.max(1, Math.round(bounds.height * scaleY));
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  context.drawImage(rendered.image, Math.round(bounds.x * scaleX), Math.round(bounds.y * scaleY), width, height, 0, 0, width, height);
+  const blob = await new Promise((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error(t('error.copyImageUnavailable'))), 'image/png'));
+  return { blob, width: bounds.width, height: bounds.height };
+}
+
+async function copySelectedObject() {
+  const object = state.selected;
+  if (!object) return;
+  if (object.type === 'text') {
+    state.clipboard = { type: 'text', text: object.text || '', page: object.page, bounds: object.editorBounds, fontFamily: object.fontFamily, fontSize: object.fontSize, color: object.fillColor?.hex };
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(object.text || '').catch(() => {});
+  } else if (object.type === 'image') {
+    const image = await imageClipboardPayload(object);
+    state.clipboard = { type: 'image', page: object.page, bounds: object.editorBounds, ...image };
+  } else {
+    throw new Error(t('error.copyObjectUnavailable'));
+  }
+  setPanelStatus(t('status.objectCopied'), 'success');
+}
+
+async function pasteCopiedObject() {
+  const clipboard = state.clipboard;
+  if (!clipboard) return;
+  const page = state.selected?.page || clipboard.page;
+  const pageInfo = state.inventory?.pages?.find((candidate) => candidate.page === page);
+  if (!pageInfo) return;
+  const bounds = clipboard.bounds || { x: 48, y: 96, width: 144, height: 24 };
+  const x = Math.max(0, Math.min(pageInfo.width - bounds.width, bounds.x + 14));
+  const y = Math.max(0, Math.min(pageInfo.height - bounds.height, bounds.y + 14));
+  if (clipboard.type === 'text') {
+    await applyCommands([{
+      op: 'text.add', page, x, y, text: clipboard.text,
+      fontFamily: clipboard.fontFamily || 'Noto Sans KR', fontSize: clipboard.fontSize || 12, color: clipboard.color || '#172033',
+    }]);
+  } else if (clipboard.type === 'image') {
+    await applyCommands([{
+      op: 'image.add', page, x, y, width: bounds.width, height: bounds.height,
+      mimeType: 'image/png', bytesBase64: await fileBase64(clipboard.blob),
+    }]);
+  }
+  setPanelStatus(t('status.objectPasted'), 'success');
+}
+
+async function nudgeSelectedImage(deltaX, deltaY) {
+  const object = state.selected;
+  if (object?.type !== 'image') return;
+  await applyCommands([{
+    op: 'object.transform', page: object.page, objectIndex: object.objectIndex, objectId: object.id,
+    matrix: { ...object.matrix, e: Number(object.matrix.e) + deltaX, f: Number(object.matrix.f) - deltaY },
+  }], { inspectObject: true });
+  setPanelStatus(t('status.imageMoved'), 'success');
+}
+
 elements.objectEditorButton.addEventListener('click', () => {
+  setSettingsOpen(false);
   const willOpen = elements.objectEditor.hidden;
   elements.objectEditor.hidden = !willOpen;
   elements.objectEditorButton.setAttribute('aria-expanded', String(willOpen));
+});
+elements.settingsButton.addEventListener('click', () => setSettingsOpen(elements.settingsMenu.hidden));
+elements.closeSettingsButton.addEventListener('click', () => setSettingsOpen(false));
+document.addEventListener('click', (event) => {
+  if (elements.settingsMenu.hidden) return;
+  if (!elements.settingsMenu.contains(event.target) && !elements.settingsButton.contains(event.target)) setSettingsOpen(false);
+});
+document.addEventListener('keydown', (event) => {
+  const editing = isEditableTarget(event.target);
+  const modifier = event.ctrlKey || event.metaKey;
+  if (event.key === 'Escape') {
+    state.modeActivation += 1;
+    let handled = false;
+    if (!elements.settingsMenu.hidden) {
+      setSettingsOpen(false);
+      handled = true;
+    }
+    if (!elements.commentComposer.hidden || state.pendingImage || state.pendingRedaction || state.redactionDrag || elements.canvasOverlay.querySelector('.direct-region')) {
+      cancelDirectInteraction({ clearSelection: true });
+      reflectEditMode('select');
+      renderCanvasObjects();
+      handled = true;
+    }
+    if (state.selected) {
+      clearSelection();
+      handled = true;
+    }
+    if (handled) {
+      hideEditHint();
+      event.preventDefault();
+    }
+    return;
+  }
+  if (editing) return;
+  if (modifier && event.key.toLowerCase() === 's') {
+    event.preventDefault();
+    if (!elements.savePdfButton.disabled) elements.savePdfButton.click();
+    return;
+  }
+  if (modifier && event.key.toLowerCase() === 'c' && state.selected) {
+    event.preventDefault();
+    void copySelectedObject().catch((error) => setPanelStatus(error.message, 'error'));
+    return;
+  }
+  if (modifier && event.key.toLowerCase() === 'x' && state.selected) {
+    event.preventDefault();
+    const selected = state.selected;
+    void copySelectedObject().then(() => deleteSelectedObject(selected)).catch((error) => setPanelStatus(error.message, 'error'));
+    return;
+  }
+  if (modifier && event.key.toLowerCase() === 'v' && state.clipboard) {
+    event.preventDefault();
+    void pasteCopiedObject().catch((error) => setPanelStatus(error.message, 'error'));
+    return;
+  }
+  if ((event.key === 'Delete' || event.key === 'Backspace') && state.selected) {
+    event.preventDefault();
+    void deleteSelectedObject(state.selected);
+    return;
+  }
+  const nudge = event.shiftKey ? 10 : 1;
+  const offsets = { ArrowLeft: [-nudge, 0], ArrowRight: [nudge, 0], ArrowUp: [0, -nudge], ArrowDown: [0, nudge] };
+  if (offsets[event.key] && state.selected?.type === 'image') {
+    event.preventDefault();
+    void nudgeSelectedImage(...offsets[event.key]).catch((error) => setPanelStatus(error.message, 'error'));
+  }
 });
 elements.languageSelect.addEventListener('change', () => {
   setLocale(elements.languageSelect.value);
   applyTranslations();
   renderAdvancedToolOptions();
+  renderQuickTools();
   renderAdvancedTool();
   renderObjectList();
+  reflectEditMode(state.editMode);
+  if (state.sessionId && !elements.editHint.hidden) showEditHint(t(modeHintKey(state.editMode)), elements.editHint.dataset.state || 'ready');
   if (state.inventory) {
     elements.objectCount.textContent = t('objects.count', { pageCount: state.inventory.pageObjectCount, textCount: state.inventory.textObjectCount });
     elements.fontCount.textContent = t('fonts.count', { count: state.inventory.fonts.length });
@@ -1084,6 +1646,7 @@ elements.editPdfButton.addEventListener('click', async () => {
     setPanelStatus(t('status.pageTextHint'), 'success');
   } catch (error) {
     setPanelStatus(error.message, 'error');
+    showEditHint(error.message, 'error');
     openToolPanel('advanced');
   }
 });
@@ -1101,6 +1664,7 @@ elements.savePdfButton.addEventListener('click', async () => {
   }
 });
 elements.qualityAuditButton.addEventListener('click', async () => {
+  setSettingsOpen(false);
   try {
     if (!state.sessionId) await beginObjectSession();
     const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
@@ -1114,6 +1678,7 @@ elements.qualityAuditButton.addEventListener('click', async () => {
   }
 });
 elements.compareButton.addEventListener('click', async () => {
+  setSettingsOpen(false);
   try {
     if (!state.sessionId) await beginObjectSession();
     const comparison = await api(`/pdf/api/documents/${state.sessionId}/quality/render-compare`, {
@@ -1147,6 +1712,7 @@ document.querySelectorAll('[data-edit-mode]').forEach((button) => button.addEven
     await activateEditMode(button.dataset.editMode);
   } catch (error) {
     setPanelStatus(error.message, 'error');
+    showEditHint(error.message, 'error');
   }
 }));
 
@@ -1161,23 +1727,48 @@ document.querySelectorAll('[data-open-tool]').forEach((button) => button.addEven
   }
 }));
 
-document.querySelectorAll('[data-activate-mode="comment"]').forEach((button) => button.addEventListener('click', async () => {
-  try {
-    if (!state.sessionId) await beginObjectSession();
-    openToolPanel('advanced');
-    elements.advancedTool.value = 'comment.add';
-    renderAdvancedTool();
-  } catch (error) {
-    setPanelStatus(error.message, 'error');
+elements.commentSave.addEventListener('click', () => saveDirectComment());
+elements.commentCancel.addEventListener('click', closeCommentComposer);
+elements.commentCancelButton.addEventListener('click', closeCommentComposer);
+elements.commentText.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+    event.preventDefault();
+    saveDirectComment();
   }
-}));
-
-elements.canvasOverlay.addEventListener('click', (event) => {
-  if (event.target !== elements.canvasOverlay) return;
-  state.selected = null;
-  elements.selectionToolbar.hidden = true;
-  renderCanvasObjects();
 });
+elements.redactionConfirmApply.addEventListener('click', () => { void applyDirectRedaction(); });
+elements.redactionConfirmCancel.addEventListener('click', clearRedactionRegion);
+elements.redactionConfirmCancelButton.addEventListener('click', clearRedactionRegion);
+
+elements.canvasOverlay.addEventListener('pointerdown', handleRedactionPointerDown);
+elements.canvasOverlay.addEventListener('pointermove', handleRedactionPointerMove);
+elements.canvasOverlay.addEventListener('pointerup', (event) => handleRedactionPointerUp(event));
+elements.canvasOverlay.addEventListener('click', (event) => {
+  if (state.editMode === 'image' && state.pendingImage && event.target === elements.canvasOverlay) {
+    const point = pagePointAtClient(event.clientX, event.clientY);
+    if (point) {
+      event.preventDefault();
+      void placePendingImage(point);
+    }
+    return;
+  }
+  if (state.editMode === 'comment' && event.target === elements.canvasOverlay) {
+    const point = pagePointAtClient(event.clientX, event.clientY);
+    if (point) {
+      event.preventDefault();
+      showCommentComposer(point);
+    }
+    return;
+  }
+  if (event.target === elements.canvasOverlay && state.editMode !== 'redaction') clearSelection();
+});
+
+elements.pdfViewer.addEventListener('pointerdown', (event) => {
+  if (['comment', 'redaction'].includes(state.editMode)) return;
+  const path = event.composedPath();
+  if (path.includes(elements.canvasOverlay) || path.includes(elements.selectionToolbar) || path.includes(elements.commentComposer)) return;
+  clearSelection();
+}, true);
 
 async function applyQuickTextStyle() {
   if (state.selected?.type !== 'text') return;
@@ -1215,10 +1806,32 @@ elements.quickFontSize.addEventListener('change', applyQuickTextStyle);
 elements.quickFontColor.addEventListener('change', applyQuickTextStyle);
 elements.openPropertiesButton.addEventListener('click', () => openToolPanel('objects'));
 elements.deleteSelectedButton.addEventListener('click', () => document.querySelector('[data-delete-object]')?.click());
-elements.replaceImageButton.addEventListener('click', () => elements.quickImageFile.click());
+elements.imageChooseButton.addEventListener('click', () => {
+  state.imageFilePurpose = 'insert';
+  elements.quickImageFile.click();
+});
+elements.replaceImageButton.addEventListener('click', () => {
+  state.imageFilePurpose = 'replace';
+  elements.quickImageFile.click();
+});
 elements.quickImageFile.addEventListener('change', async () => {
   const file = elements.quickImageFile.files[0];
-  if (!file || state.selected?.type !== 'image') return;
+  const purpose = state.imageFilePurpose;
+  state.imageFilePurpose = null;
+  if (!file) return;
+  if (purpose === 'insert') {
+    state.pendingImage = file;
+    elements.canvasOverlay.dataset.imagePlacement = 'true';
+    renderCanvasObjects();
+    showEditHint(t('directImage.placeHint'));
+    setPanelStatus(t('status.imagePreparing'));
+    elements.quickImageFile.value = '';
+    return;
+  }
+  if (purpose !== 'replace' || state.selected?.type !== 'image') {
+    elements.quickImageFile.value = '';
+    return;
+  }
   const object = state.selected;
   try {
     setPanelStatus(t('status.imageReplacing'));
@@ -1344,15 +1957,14 @@ elements.imageEditorForm.addEventListener('submit', async (event) => {
   }
 });
 
-document.querySelectorAll('[data-delete-object]').forEach((button) => button.addEventListener('click', async () => {
-  if (!state.selected || !window.confirm(t('confirm.deleteObject'))) return;
+async function deleteSelectedObject(selected) {
   try {
     setPanelStatus(t('status.objectDeleting'));
     await applyCommands([{
       op: 'object.delete',
-      page: state.selected.page,
-      objectIndex: state.selected.objectIndex,
-      objectId: state.selected.id,
+      page: selected.page,
+      objectIndex: selected.objectIndex,
+      objectId: selected.id,
     }], { inspectObject: true });
     state.selected = null;
     elements.textEditorForm.hidden = true;
@@ -1362,7 +1974,15 @@ document.querySelectorAll('[data-delete-object]').forEach((button) => button.add
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
-}));
+}
+
+function requestDeleteSelectedObject() {
+  const selected = state.selected;
+  if (!selected) return;
+  showAdvancedConfirmation({ message: t('confirm.deleteObject'), action: () => deleteSelectedObject(selected) });
+}
+
+document.querySelectorAll('[data-delete-object]').forEach((button) => button.addEventListener('click', requestDeleteSelectedObject));
 
 function renderAdvancedToolOptions() {
   const selectedValue = elements.advancedTool.value || advancedTools[0]?.op;
@@ -1377,14 +1997,12 @@ function renderAdvancedToolOptions() {
 }
 
 renderAdvancedToolOptions();
+renderQuickTools();
 elements.advancedTool.addEventListener('change', renderAdvancedTool);
 renderAdvancedTool();
 
-elements.advancedToolForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const rawTool = advancedTools.find((candidate) => candidate.op === elements.advancedTool.value);
+async function applyAdvancedTool(rawTool) {
   const tool = localizeTool(rawTool);
-  if (tool.danger && !window.confirm(t('confirm.danger', { label: tool.label }))) return;
   try {
     setPanelStatus(t('status.toolApplying', { label: tool.label }));
     const command = await buildAdvancedCommand(tool, new FormData(elements.advancedToolForm));
@@ -1393,6 +2011,29 @@ elements.advancedToolForm.addEventListener('submit', async (event) => {
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
+}
+
+elements.advancedToolForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const rawTool = advancedTools.find((candidate) => candidate.op === elements.advancedTool.value);
+  if (!rawTool) return;
+  if (rawTool.danger) {
+    showAdvancedConfirmation({ tool: rawTool, action: () => applyAdvancedTool(rawTool) });
+    return;
+  }
+  void applyAdvancedTool(rawTool);
+});
+
+elements.advancedConfirmApply.addEventListener('click', () => {
+  const action = state.pendingConfirmationAction;
+  closeAdvancedConfirmation();
+  if (action) void action();
+});
+elements.advancedConfirmCancel.addEventListener('click', closeAdvancedConfirmation);
+elements.advancedConfirmCancelButton.addEventListener('click', closeAdvancedConfirmation);
+elements.advancedConfirm.addEventListener('close', () => {
+  state.pendingAdvancedTool = null;
+  state.pendingConfirmationAction = null;
 });
 
 try {
@@ -1401,7 +2042,7 @@ try {
     target: elements.pdfViewer,
     worker: true,
     tabBar: 'always',
-    annotations: { annotationAuthor: 'Academic Editor', selectAfterCreate: true },
+    annotations: { annotationAuthor: 'tlooto PDF', selectAfterCreate: true },
     export: { defaultFileName: 'academic-edited.pdf' },
     permissions: { enforceDocumentPermissions: true },
     theme: {
@@ -1421,6 +2062,7 @@ try {
       }
       elements.runtimeStatus.textContent = t('status.bodyPreparing', { name: documentState.name || 'PDF' });
       state.documentGeneration += 1;
+      state.modeActivation += 1;
       const previousSessionId = state.sessionId;
       const previousRevision = state.revision;
       if (previousSessionId && previousRevision) {
@@ -1434,7 +2076,15 @@ try {
         selected: null,
         editedBuffer: null,
         sessionPromise: null,
+        pendingComment: null,
+        pendingImage: null,
+        imageFilePurpose: null,
+        pendingRedaction: null,
+        redactionDrag: null,
+        objectDrag: null,
+        clipboard: null,
       });
+      cancelDirectInteraction();
       state.textPreviews.clear();
       state.textGroups.clear();
       markPendingSave(false);
@@ -1456,6 +2106,7 @@ try {
     state.documentManager?.onDocumentClosed(() => {
       if (!state.reopening) {
         state.documentGeneration += 1;
+        state.modeActivation += 1;
         const closedSessionId = state.sessionId;
         const closedRevision = state.revision;
         if (closedSessionId && closedRevision) {
@@ -1468,12 +2119,20 @@ try {
         state.catalog = null;
         state.selected = null;
         state.editedBuffer = null;
+        state.pendingComment = null;
+        state.pendingImage = null;
+        state.imageFilePurpose = null;
+        state.pendingRedaction = null;
+        state.redactionDrag = null;
+        state.objectDrag = null;
+        state.clipboard = null;
         state.textPreviews.clear();
         state.textGroups.clear();
         markPendingSave(false);
         elements.canvasOverlay.replaceChildren();
         elements.selectionToolbar.hidden = true;
-        elements.editHint.hidden = true;
+        cancelDirectInteraction();
+        hideEditHint();
         elements.editPdfButton.classList.remove('is-active', 'is-loading');
         elements.editPdfButton.setAttribute('aria-pressed', 'false');
         elements.runtimeStatus.textContent = t('status.engineReady');

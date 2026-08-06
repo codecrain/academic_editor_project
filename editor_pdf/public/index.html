@@ -3,36 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="PDFium 기반 Academic PDF 편집기" data-i18n-content="app.description">
-  <meta name="application-name" content="Academic PDF Editor">
-  <title>Academic PDF Editor</title>
-  <link rel="icon" href="data:,">
+  <meta name="description" content="tlooto PDF 문서 편집기" data-i18n-content="app.description">
+  <meta name="application-name" content="tlooto PDF">
+  <title data-i18n="brand.name">tlooto PDF</title>
+  <link rel="icon" href="./assets/tlooto-pdf-mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./assets/tabler/tabler-icons.min.css">
   <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
   <header class="global-bar">
-    <div class="brand" aria-label="Academic PDF Editor">
-      <span class="brand-mark">A</span>
-      <span class="document-title">Academic PDF</span>
-      <span class="engine-badge">PDFium</span>
+    <div class="brand" aria-label="tlooto PDF">
+      <img class="brand-mark" src="./assets/tlooto-pdf-mark.svg" alt="">
+      <span class="brand-name" data-i18n="brand.name">tlooto PDF</span>
     </div>
     <nav class="primary-nav" aria-label="PDF 주요 작업" data-i18n-aria-label="nav.primary">
-      <button id="editPdfButton" class="nav-tool" type="button" aria-pressed="false"><i class="ti ti-edit"></i><span data-i18n="nav.edit">편집</span></button>
-      <button class="nav-tool" type="button" data-open-tool="page.extract"><i class="ti ti-files"></i><span data-i18n="nav.pages">페이지 구성</span></button>
-      <button class="nav-tool" type="button" data-activate-mode="comment"><i class="ti ti-message-circle"></i><span data-i18n="nav.comments">주석</span></button>
-      <button class="nav-tool" type="button" data-open-tool="form.addTextField"><i class="ti ti-forms"></i><span data-i18n="nav.forms">양식</span></button>
-      <button class="nav-tool" type="button" data-open-tool="redaction.apply"><i class="ti ti-shield-lock"></i><span data-i18n="nav.protection">보호</span></button>
-      <button id="objectEditorButton" class="nav-tool" type="button" aria-expanded="false"><i class="ti ti-tools"></i><span data-i18n="nav.tools">모든 도구</span></button>
+      <span id="topModeLabel" class="top-mode-label" aria-live="polite" data-i18n="nav.context">페이지에서 바로 편집</span>
+      <button id="editPdfButton" class="visually-hidden" type="button" aria-pressed="false"><span data-i18n="nav.edit">편집</span></button>
     </nav>
     <div class="global-actions">
       <button id="savePdfButton" class="save-pdf-button" type="button" disabled>
         <i class="ti ti-download"></i><span data-i18n="action.savePdf">PDF 저장</span>
       </button>
-      <button id="qualityAuditButton" class="icon-action" type="button" title="품질·접근성 검사" aria-label="품질·접근성 검사" data-i18n-title="action.quality" data-i18n-aria-label="action.quality"><i class="ti ti-shield-check"></i></button>
-      <button id="compareButton" class="icon-action" type="button" title="원본과 비교" aria-label="원본과 비교" data-i18n-title="action.compare" data-i18n-aria-label="action.compare"><i class="ti ti-arrows-diff"></i></button>
-      <label class="language-picker"><span class="visually-hidden" data-i18n="language.label">언어</span><select id="languageSelect" aria-label="언어"><option value="ko" data-i18n="language.ko">한국어</option><option value="en" data-i18n="language.en">English</option></select></label>
-      <span id="runtimeStatus" role="status" data-i18n="status.enginePreparing">PDF 편집 엔진을 준비하는 중…</span>
+      <span id="runtimeStatus" class="visually-hidden" role="status" data-i18n="status.enginePreparing">편집을 준비하는 중…</span>
     </div>
   </header>
 
@@ -42,15 +34,42 @@
       <button class="rail-tool is-active" type="button" data-edit-mode="text" title="텍스트 바로 수정" data-i18n-title="rail.textTitle"><i class="ti ti-text-size"></i><span data-i18n="rail.text">텍스트</span></button>
       <button class="rail-tool" type="button" data-edit-mode="image" title="이미지 편집" data-i18n-title="rail.imageTitle"><i class="ti ti-photo"></i><span data-i18n="rail.image">이미지</span></button>
       <span class="rail-divider"></span>
-      <button class="rail-tool" type="button" data-activate-mode="comment" title="주석" data-i18n-title="rail.comment"><i class="ti ti-message-circle-plus"></i><span data-i18n="rail.comment">주석</span></button>
-      <button class="rail-tool" type="button" data-open-tool="redaction.apply" title="영구 마스킹" data-i18n-title="rail.maskTitle"><i class="ti ti-eraser"></i><span data-i18n="rail.mask">마스킹</span></button>
+      <button class="rail-tool" type="button" data-edit-mode="comment" title="주석" data-i18n-title="rail.comment"><i class="ti ti-message-circle-plus"></i><span data-i18n="rail.comment">주석</span></button>
+      <button class="rail-tool" type="button" data-edit-mode="redaction" title="영구 마스킹" data-i18n-title="rail.maskTitle"><i class="ti ti-eraser"></i><span data-i18n="rail.mask">마스킹</span></button>
+      <span class="rail-spacer" aria-hidden="true"></span>
+      <div class="rail-footer">
+        <button id="settingsButton" class="rail-tool rail-settings" type="button" aria-expanded="false" aria-controls="settingsMenu" aria-haspopup="dialog" title="설정" data-i18n-title="settings.button"><i class="ti ti-settings"></i><span data-i18n="settings.button">설정</span></button>
+      </div>
     </nav>
+
+    <aside id="settingsMenu" class="settings-menu" role="dialog" aria-label="설정" data-i18n-aria-label="settings.title" hidden>
+      <header class="settings-menu-header">
+        <div>
+          <strong data-i18n="settings.title">설정</strong>
+          <p data-i18n="settings.description">언어와 자주 쓰지 않는 기능을 관리합니다.</p>
+        </div>
+        <button id="closeSettingsButton" class="icon-button" type="button" aria-label="설정 닫기" data-i18n-aria-label="settings.close"><i class="ti ti-x"></i></button>
+      </header>
+      <div class="settings-menu-body">
+        <label class="settings-row language-picker">
+          <span><strong data-i18n="settings.language">언어</strong><small data-i18n="settings.languageHelp">화면에 표시할 언어를 선택합니다.</small></span>
+          <select id="languageSelect" aria-label="언어"><option value="ko" data-i18n="language.ko">한국어</option><option value="en" data-i18n="language.en">English</option></select>
+        </label>
+        <div class="settings-divider" aria-hidden="true"></div>
+        <button id="objectEditorButton" class="settings-action" type="button" aria-expanded="false"><i class="ti ti-tool"></i><span data-i18n="settings.moreTools">고급 도구</span></button>
+        <button id="qualityAuditButton" class="settings-action" type="button"><i class="ti ti-shield-check"></i><span data-i18n="settings.quality">품질·접근성 검사</span></button>
+        <button id="compareButton" class="settings-action" type="button"><i class="ti ti-arrows-diff"></i><span data-i18n="settings.compare">원본과 비교</span></button>
+      </div>
+    </aside>
 
     <main id="pdfViewer" aria-label="PDF 편집기" data-i18n-aria-label="viewer.label">
       <div id="canvasOverlay" class="canvas-overlay" aria-label="PDF 직접 편집 계층" data-i18n-aria-label="viewer.overlay"></div>
       <div id="editHint" class="edit-hint" role="status" hidden>
         <i class="ti ti-text-size"></i>
         <span id="editHintText" data-i18n="hint.ready">텍스트를 한 번 클릭하면 이 화면에서 바로 수정됩니다.</span>
+        <button id="imageChooseButton" class="hint-action" type="button" hidden>
+          <i class="ti ti-upload"></i><span data-i18n="directImage.choose">이미지 넣기</span>
+        </button>
       </div>
       <div id="selectionToolbar" class="selection-toolbar" hidden>
         <div id="textQuickControls" class="quick-controls">
@@ -58,9 +77,31 @@
           <input id="quickFontSize" type="number" min="2" max="500" step="0.5" aria-label="글자 크기" data-i18n-aria-label="quick.size">
           <label class="color-control" title="글자 색" data-i18n-title="quick.color"><i class="ti ti-palette"></i><input id="quickFontColor" type="color" value="#172033" aria-label="글자 색" data-i18n-aria-label="quick.color"></label>
         </div>
-        <button id="replaceImageButton" class="toolbar-action" type="button" hidden title="이미지 교체" data-i18n-title="quick.replaceImage"><i class="ti ti-photo-scan"></i></button>
-        <button id="openPropertiesButton" class="toolbar-action" type="button" title="고급 속성" data-i18n-title="quick.properties"><i class="ti ti-adjustments-horizontal"></i></button>
-        <button id="deleteSelectedButton" class="toolbar-action is-danger" type="button" title="삭제" data-i18n-title="action.delete"><i class="ti ti-trash"></i></button>
+        <button id="replaceImageButton" class="toolbar-action" type="button" hidden title="이미지 교체" aria-label="이미지 교체" data-i18n-title="quick.replaceImage" data-i18n-aria-label="quick.replaceImage"><i class="ti ti-photo-scan" aria-hidden="true"></i></button>
+        <button id="openPropertiesButton" class="toolbar-action" type="button" title="고급 속성" aria-label="고급 속성" data-i18n-title="quick.properties" data-i18n-aria-label="quick.properties"><i class="ti ti-adjustments-horizontal" aria-hidden="true"></i></button>
+        <button id="deleteSelectedButton" class="toolbar-action is-danger" type="button" title="삭제" aria-label="삭제" data-i18n-title="action.delete" data-i18n-aria-label="action.delete"><i class="ti ti-trash" aria-hidden="true"></i></button>
+      </div>
+      <div id="commentComposer" class="placement-composer" role="dialog" aria-labelledby="commentComposerTitle" hidden>
+        <header>
+          <strong id="commentComposerTitle" data-i18n="directComment.title">메모 주석</strong>
+          <button id="commentCancel" class="icon-button" type="button" aria-label="주석 취소" data-i18n-aria-label="directComment.cancel"><i class="ti ti-x"></i></button>
+        </header>
+        <textarea id="commentText" rows="4" aria-label="메모 내용" data-i18n-aria-label="directComment.input" placeholder="메모를 입력하세요" data-i18n-placeholder="directComment.placeholder"></textarea>
+        <div class="placement-actions">
+          <button id="commentCancelButton" class="text-button" type="button" data-i18n="action.cancel">취소</button>
+          <button id="commentSave" class="action-button" type="button"><i class="ti ti-check"></i><span data-i18n="directComment.save">주석 저장</span></button>
+        </div>
+      </div>
+      <div id="redactionConfirm" class="placement-composer redaction-confirm" role="dialog" aria-labelledby="redactionConfirmTitle" aria-describedby="redactionConfirmMessage" hidden>
+        <header>
+          <strong id="redactionConfirmTitle" data-i18n="directRedaction.title">영구 마스킹 확인</strong>
+          <button id="redactionConfirmCancel" class="icon-button" type="button" aria-label="마스킹 취소" data-i18n-aria-label="directRedaction.cancel"><i class="ti ti-x" aria-hidden="true"></i></button>
+        </header>
+        <p id="redactionConfirmMessage" data-i18n="directRedaction.message">선택한 영역을 영구적으로 가립니다. 적용 후에는 원본 PDF를 다시 열어야 되돌릴 수 있습니다.</p>
+        <div class="placement-actions">
+          <button id="redactionConfirmCancelButton" class="text-button" type="button" data-i18n="action.cancel">취소</button>
+          <button id="redactionConfirmApply" class="action-button danger-button" type="button"><i class="ti ti-eraser" aria-hidden="true"></i><span data-i18n="directRedaction.apply">마스킹 적용</span></button>
+        </div>
       </div>
       <input id="quickImageFile" type="file" accept="image/png,image/jpeg" hidden>
     </main>
@@ -86,15 +127,23 @@
         </div>
 
         <section id="advancedMode" class="advanced-mode">
-          <form id="advancedToolForm" class="properties">
-            <label class="tool-picker">
-              <span data-i18n="tool.select">도구 선택</span>
-              <select id="advancedTool"></select>
-            </label>
-            <p id="advancedToolHelp" class="tool-help"></p>
-            <div id="advancedFields" class="advanced-fields"></div>
-            <button id="runAdvancedTool" class="action-button" type="submit"><i class="ti ti-player-play"></i> <span data-i18n="action.apply">적용</span></button>
-          </form>
+          <div class="advanced-intro">
+            <strong data-i18n="advanced.commonTitle">자주 쓰는 작업</strong>
+            <p data-i18n="advanced.commonHelp">작업을 고른 뒤 페이지나 문서에 필요한 값만 입력하세요.</p>
+          </div>
+          <div id="quickToolGrid" class="quick-tool-grid" aria-label="자주 쓰는 PDF 작업" data-i18n-aria-label="advanced.commonTitle"></div>
+          <details class="advanced-tool-picker">
+            <summary data-i18n="advanced.moreTools">전체 고급 도구 보기</summary>
+            <form id="advancedToolForm" class="properties">
+              <label class="tool-picker">
+                <span data-i18n="tool.select">도구 선택</span>
+                <select id="advancedTool"></select>
+              </label>
+              <p id="advancedToolHelp" class="tool-help"></p>
+              <div id="advancedFields" class="advanced-fields"></div>
+              <button id="runAdvancedTool" class="action-button" type="submit"><i class="ti ti-player-play"></i> <span data-i18n="action.apply">적용</span></button>
+            </form>
+          </details>
           <details class="capability-list">
             <summary data-i18n="capabilities.summary">현재 지원 기능 46개 보기</summary>
             <div id="commandCatalog"></div>
@@ -104,8 +153,8 @@
         <section id="objectMode" hidden>
           <div class="selection-help"><i class="ti ti-pointer"></i><span data-i18n="selection.help">페이지의 텍스트를 한 번 클릭하면 그 자리에서 바로 수정됩니다. 이미지는 선택 후 드래그할 수 있습니다.</span></div>
           <div class="panel-summary" aria-live="polite">
-            <span id="objectCount">객체 0개</span>
-            <span id="fontCount">오픈 폰트 0개</span>
+            <span id="objectCount" data-i18n="objects.initialCount">객체 0개</span>
+            <span id="fontCount" data-i18n="fonts.initialCount">오픈 폰트 0개</span>
             <button id="refreshObjectsButton" class="text-button" type="button" data-i18n="action.refresh">새로고침</button>
           </div>
           <details class="object-inspector">
@@ -156,6 +205,13 @@
   <dialog id="reportDialog" class="report-dialog">
     <header><div><strong id="reportTitle" data-i18n="report.title">PDF 검사 결과</strong><p id="reportSummary"></p></div><button id="closeReportDialog" class="icon-button" type="button" aria-label="검사 결과 닫기" data-i18n-aria-label="report.close"><i class="ti ti-x"></i></button></header>
     <div id="reportBody" class="report-body"></div>
+  </dialog>
+  <dialog id="advancedConfirm" class="report-dialog advanced-confirm-dialog" aria-labelledby="advancedConfirmTitle" aria-describedby="advancedConfirmMessage">
+    <header><div><strong id="advancedConfirmTitle" data-i18n="advancedConfirm.title">되돌리기 어려운 작업입니다</strong><p id="advancedConfirmMessage"></p></div><button id="advancedConfirmCancel" class="icon-button" type="button" aria-label="작업 취소" data-i18n-aria-label="advancedConfirm.cancel"><i class="ti ti-x" aria-hidden="true"></i></button></header>
+    <div class="advanced-confirm-actions">
+      <button id="advancedConfirmCancelButton" class="text-button" type="button" data-i18n="advancedConfirm.cancel">작업 취소</button>
+      <button id="advancedConfirmApply" class="action-button danger-button" type="button"><i class="ti ti-alert-triangle" aria-hidden="true"></i><span data-i18n="advancedConfirm.apply">계속 적용</span></button>
+    </div>
   </dialog>
   <script type="module" src="./app.js"></script>
 </body>
