@@ -55,6 +55,11 @@ const state = {
   clipboard: null,
 };
 
+let markEditorBridgeReady;
+const editorBridgeReady = new Promise((resolve) => {
+  markEditorBridgeReady = resolve;
+});
+
 function failBoot(error) {
   const message = error instanceof Error ? error.message : String(error);
   elements.runtimeStatus.textContent = t('status.engineFailed');
@@ -203,6 +208,62 @@ async function beginObjectSession() {
     await state.sessionPromise;
   } finally {
     state.sessionPromise = null;
+  }
+}
+
+function replyToEditorHost(event, id, result, error) {
+  if (!event.source || !event.origin || event.origin === 'null') return;
+  event.source.postMessage({ type: 'rhwp-response', id, result, error }, event.origin);
+}
+
+function suppressLocalPdfOpenUi() {
+  const roots = [document];
+  for (const element of document.querySelectorAll('*')) {
+    if (element.shadowRoot) roots.push(element.shadowRoot);
+  }
+  for (const root of roots) {
+    for (const button of root.querySelectorAll('button')) {
+      if (button.textContent?.trim() !== 'Open Document') continue;
+      const panel = button.parentElement;
+      if (panel) panel.hidden = true;
+    }
+  }
+}
+
+// EmbedPDF renders its empty-document panel after initialization. This editor is
+// embedded, so only the host application is allowed to select a document.
+new MutationObserver(suppressLocalPdfOpenUi).observe(document.body, { childList: true, subtree: true });
+setInterval(suppressLocalPdfOpenUi, 250);
+document.addEventListener('keydown', (event) => {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'o') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+}, true);
+
+async function loadDocumentFromHost(params = {}) {
+  const rawBytes = params.data;
+  const buffer = rawBytes instanceof ArrayBuffer
+    ? rawBytes
+    : ArrayBuffer.isView(rawBytes)
+      ? rawBytes.buffer.slice(rawBytes.byteOffset, rawBytes.byteOffset + rawBytes.byteLength)
+      : Array.isArray(rawBytes)
+        ? new Uint8Array(rawBytes).buffer
+        : null;
+  if (!buffer) throw new Error('A PDF ArrayBuffer is required.');
+  if (!state.documentManager) throw new Error('PDF editor is not ready.');
+  const activeId = state.documentManager.getActiveDocumentId();
+  state.reopening = true;
+  try {
+    if (activeId) await taskPromise(state.documentManager.closeDocument(activeId));
+    const opened = await taskPromise(state.documentManager.openDocumentBuffer({
+      buffer,
+      name: String(params.fileName || 'document.pdf'),
+      autoActivate: true,
+    }));
+    if (opened?.task) await taskPromise(opened.task);
+  } finally {
+    state.reopening = false;
   }
 }
 
@@ -2041,7 +2102,10 @@ try {
     type: 'container',
     target: elements.pdfViewer,
     worker: true,
-    tabBar: 'always',
+    // This editor is embedded by a host application. The host supplies documents
+    // through the generic postMessage bridge, so EmbedPDF's local "Open document"
+    // tab is intentionally not exposed.
+    tabBar: 'never',
     annotations: { annotationAuthor: 'tlooto PDF', selectAfterCreate: true },
     export: { defaultFileName: 'academic-edited.pdf' },
     permissions: { enforceDocumentPermissions: true },
@@ -2055,6 +2119,7 @@ try {
     state.registry = registry;
     state.documentManager = registry.getPlugin('document-manager')?.provides();
     state.exporter = registry.getPlugin('export')?.provides();
+    markEditorBridgeReady();
     state.documentManager?.onDocumentOpened((documentState) => {
       if (state.reopening) {
         elements.runtimeStatus.textContent = t('status.textClick', { name: documentState.name || 'PDF' });
@@ -2148,3 +2213,30 @@ try {
 } catch (error) {
   failBoot(error);
 }
+
+// Public embedding contract. A host can inject a file as bytes and retrieve the
+// current PDF without this editor knowing anything about that host's API or storage.
+window.addEventListener('message', async (event) => {
+  const message = event.data;
+  if (!message || typeof message !== 'object' || message.type !== 'rhwp-request' || !message.method) return;
+  try {
+    await editorBridgeReady;
+    if (message.method === 'ready') {
+      replyToEditorHost(event, message.id, true);
+      return;
+    }
+    if (message.method === 'loadFile') {
+      await loadDocumentFromHost(message.params);
+      replyToEditorHost(event, message.id, true);
+      return;
+    }
+    if (message.method === 'exportPdf') {
+      const buffer = state.sessionId ? (await saveEditedPdf({ download: false }), await currentBuffer()) : await currentBuffer();
+      replyToEditorHost(event, message.id, Array.from(new Uint8Array(buffer)));
+      return;
+    }
+    replyToEditorHost(event, message.id, undefined, `Unknown method: ${message.method}`);
+  } catch (error) {
+    replyToEditorHost(event, message.id, undefined, error instanceof Error ? error.message : String(error));
+  }
+});

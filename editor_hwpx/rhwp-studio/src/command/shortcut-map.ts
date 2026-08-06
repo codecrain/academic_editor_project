@@ -22,10 +22,6 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   [{ key: 'ㄷ', ctrl: true }, 'edit:delete'],
 
   // 파일
-  [{ key: 'n', alt: true }, 'file:new-doc'],
-  [{ key: 'ㅜ', alt: true }, 'file:new-doc'],
-  [{ key: 'o', ctrl: true }, 'file:open'],
-  [{ key: 'ㅐ', ctrl: true }, 'file:open'],
   [{ key: 's', ctrl: true }, 'file:save'],
   // [Task #833] Ctrl+Shift+S → 다른 이름으로 저장 (한글 IME 'ㄴ' 도 함께).
   [{ key: 's', ctrl: true, shift: true }, 'file:save-as'],

@@ -234,7 +234,6 @@ async function initialize(): Promise<void> {
       });
     }
 
-    setupFileInput();
     setupZoomControls();
     setupEventListeners();
     setupGlobalShortcuts();
@@ -255,37 +254,8 @@ async function initialize(): Promise<void> {
   }
 }
 
-/**
- * 전역 단축키 핸들러 — InputHandler.active 여부와 무관하게 동작해야 하는 단축키.
- * 예: 문서 미로드 상태에서도 Alt+N(새 문서), Ctrl+O(열기) 등.
- */
 function setupGlobalShortcuts(): void {
-  document.addEventListener('keydown', (e) => {
-    // input/textarea 등 편집 가능 요소 내부에서는 무시
-    const target = e.target as HTMLElement;
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
-    // InputHandler가 활성 상태이면 자체 처리에 맡김
-    if (inputHandler?.isActive()) return;
-
-    const ctrlOrMeta = e.ctrlKey || e.metaKey;
-
-    // Alt+N / Alt+ㅜ → 새 문서 (문서 미로드 상태에서도 동작)
-    if (e.altKey && !ctrlOrMeta && !e.shiftKey) {
-      if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:new-doc');
-        return;
-      }
-    }
-    // Ctrl/Cmd+O → 열기 (문서 미로드 상태에서도 동작)
-    if (ctrlOrMeta && !e.altKey && !e.shiftKey) {
-      if (e.key === 'o' || e.key === 'O' || e.key === 'ㅐ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:open');
-        return;
-      }
-    }
-  }, false);
+  // New/Open are deliberately host-owned for the embedded editor.
 }
 
 function setupFileInput(): void {
@@ -861,14 +831,14 @@ window.addEventListener('message', async (e) => {
     try {
       await initPromise;
       if (!await canReplaceCurrentDocument(Boolean(msg.skipUnsavedGuard))) {
-        e.source?.postMessage({ type: 'rhwp-response', id: msg.id, error: '문서 열기가 취소되었습니다.' }, { targetOrigin: '*' });
+        if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id: msg.id, error: '문서 열기가 취소되었습니다.' }, { targetOrigin: e.origin });
         return;
       }
       const bytes = new Uint8Array(msg.data);
       await loadBytes(bytes, msg.fileName || 'document.hwp', null);
-      e.source?.postMessage({ type: 'rhwp-response', id: msg.id, result: { pageCount: wasm.pageCount } }, { targetOrigin: '*' });
+      if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id: msg.id, result: { pageCount: wasm.pageCount } }, { targetOrigin: e.origin });
     } catch (err: any) {
-      e.source?.postMessage({ type: 'rhwp-response', id: msg.id, error: err.message || String(err) }, { targetOrigin: '*' });
+      if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id: msg.id, error: err.message || String(err) }, { targetOrigin: e.origin });
     }
     return;
   }
@@ -877,7 +847,7 @@ window.addEventListener('message', async (e) => {
   if (msg.type !== 'rhwp-request' || !msg.method) return;
   const { id, method, params } = msg;
   const reply = (result?: any, error?: string) => {
-    e.source?.postMessage({ type: 'rhwp-response', id, result, error }, { targetOrigin: '*' });
+    if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id, result, error }, { targetOrigin: e.origin });
   };
 
   try {
