@@ -372,6 +372,10 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_save_checkpoint',
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
+      'editor_hwpx_semantic_context',
+      'editor_hwpx_prepare_plan',
+      'editor_hwpx_execute_plan',
+      'editor_hwpx_verify_plan',
       'editor_pdf_open',
       'editor_pdf_discard',
       'editor_pdf_read_json',
@@ -1998,6 +2002,35 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(opened.ok, true);
     assert.equal(opened.fmt, 'hwpx');
 
+    const semanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
+      kind: 'paragraph',
+      limit: 20,
+    });
+    const semanticTarget = semanticContext.targets.find((target) => target.text.trim().length > 0);
+    assert.ok(semanticTarget);
+    assert.equal(semanticTarget.styleFingerprint?.basis?.kind, 'paragraph');
+    const semanticPrepared = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
+      baseRevision: semanticContext.revision,
+      requirements: [{
+        id: 'replace-title',
+        action: 'replace_text',
+        targetId: semanticTarget.targetId,
+        text: `${semanticTarget.text} semantic plan`,
+      }],
+    });
+    const semanticExecuted = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/execute`, {
+      baseRevision: semanticPrepared.revision,
+      planId: semanticPrepared.planId,
+    });
+    assert.equal(semanticExecuted.ok, true, JSON.stringify(semanticExecuted));
+    assert.equal(semanticExecuted.receipt[0].postcondition.ok, true);
+    const semanticVerified = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/verify`, {
+      baseRevision: semanticExecuted.revision,
+      planId: semanticPrepared.planId,
+    });
+    assert.equal(semanticVerified.ok, true, JSON.stringify(semanticVerified));
+    assert.equal(semanticVerified.visual.allPagesNonBlank, true);
+
     const docxOpened = await post('/v1/docx/documents/open', {
       source: { bytesBase64: createDocxBytes({ paragraphs: ['DOCX isolation fixture'] }).toString('base64') },
       filename: 'isolation.docx',
@@ -2038,22 +2071,26 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     const uninspectedApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...commandPayload, baseRevision: opened.revision }),
+      body: JSON.stringify({ ...commandPayload, baseRevision: semanticExecuted.revision }),
     });
     assert.equal(uninspectedApply.status, 409);
     assert.equal((await uninspectedApply.json()).code, 'inspection_required');
 
-    for (const [fmt, documentId, prematurePath] of [
-      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx')],
-      ['docx', docxOpened.documentId, path.join(tempRoot, 'premature.docx')],
+    for (const [fmt, documentId, prematurePath, baseRevision] of [
+      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx'), semanticExecuted.revision],
+      ['docx', docxOpened.documentId, path.join(tempRoot, 'premature.docx'), 1],
     ]) {
       const prematureSave = await fetch(`${origin}/v1/${fmt}/documents/${documentId}/documents/save-source`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseRevision: 1, outputPath: prematurePath }),
+        body: JSON.stringify({ baseRevision, outputPath: prematurePath }),
       });
-      assert.equal(prematureSave.status, 409);
-      assert.equal((await prematureSave.json()).code, 'quality_check_required');
+      if (fmt === 'hwpx') {
+        assert.equal(prematureSave.status, 200, 'semantic verification must satisfy the final quality gate');
+      } else {
+        assert.equal(prematureSave.status, 409);
+        assert.equal((await prematureSave.json()).code, 'quality_check_required');
+      }
     }
 
     const inspected = await post(`/v1/hwpx/documents/${opened.documentId}/target/inspect`, { locations: [location] });
@@ -2061,9 +2098,9 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
 
     const command = await post(`/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
       ...commandPayload,
-      baseRevision: opened.revision,
+      baseRevision: semanticExecuted.revision,
     });
-    assert.equal(command.revision, 2);
+    assert.equal(command.revision, semanticExecuted.revision + 1);
 
     const quality = await post(`/v1/hwpx/documents/${opened.documentId}/quality/check`, { baseRevision: command.revision });
     assert.equal(quality.ok, true);
@@ -2152,6 +2189,14 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     assert.equal(openedCall.result.isError, false, JSON.stringify(openedCall.result.structuredContent));
     const opened = openedCall.result.structuredContent;
     assert.equal(opened.liveEditorSession.documentId, opened.documentId);
+    const semanticContextCall = await mcp(21, 'editor_hwpx_semantic_context', {
+      documentId: opened.documentId,
+      kind: 'paragraph',
+      limit: 20,
+    });
+    assert.equal(semanticContextCall.result.isError, false, JSON.stringify(semanticContextCall.result.structuredContent));
+    assert.ok(semanticContextCall.result.structuredContent.targets.every((target) => !Object.hasOwn(target, 'location')));
+    assert.ok(semanticContextCall.result.structuredContent.targets.some((target) => target.styleFingerprint?.basis?.kind === 'paragraph'));
     const initialLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
     assert.equal(initialLiveSource.status, 200);
     assert.match(initialLiveSource.headers.get('content-type'), /application\/vnd\.hancom\.hwpx/);

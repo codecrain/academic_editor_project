@@ -2410,12 +2410,18 @@ export class HwpxApiSession {
     const { section, paragraph } = normalizeParagraphLocation(location);
     assert.ok(paragraph !== undefined, `paragraph location is incomplete: ${JSON.stringify(location)}`);
     const text = readBodyParagraphText(this.doc, section, paragraph);
+    const style = this.paragraphStyleIds({ paragraph: { section, number: paragraph } });
     return {
       kind: 'paragraph',
       id: `s${section}_p${paragraph}`,
       location: { paragraph: { section, number: paragraph } },
       currentText: text,
       textLength: text.length,
+      style,
+      styleFingerprint: {
+        hash: hashString(stableStringify({ kind: 'paragraph', style })),
+        basis: { kind: 'paragraph', style },
+      },
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
       native: { section, paragraph },
     };
@@ -2432,7 +2438,7 @@ export class HwpxApiSession {
   styleFingerprint(location) {
     const target = this.inspectTarget(location);
     if (target.kind !== 'cell') {
-      return { hash: hashString(target.currentText), basis: { kind: 'paragraph', textLength: target.currentText.length } };
+      return target.styleFingerprint;
     }
     return target.styleFingerprint ?? styleFingerprint(target.style);
   }

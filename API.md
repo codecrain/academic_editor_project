@@ -48,6 +48,10 @@ HWPX MCP tools:
 - `editor_hwpx_export_pdf`
 - `editor_hwpx_artifact_read`
 - `editor_hwpx_artifact_delete`
+- `editor_hwpx_semantic_context`
+- `editor_hwpx_prepare_plan`
+- `editor_hwpx_execute_plan`
+- `editor_hwpx_verify_plan`
 
 PDF MCP tools:
 
@@ -76,6 +80,34 @@ HWPX command entries report
 are rejected before mutation. Agents should query the applicable
 catalog by category or operation before the first apply. The broker validates
 every apply against that catalog before the document session can mutate.
+
+### HWPX semantic edit plans
+
+Agents that edit ordinary text, paragraph style, or cell style should prefer the
+HWPX semantic-plan path instead of composing raw HWPX locations and command
+fields. The path is deliberately stateful and fail-closed:
+
+1. `editor_hwpx_semantic_context` returns bounded target IDs, visible text,
+   current style fingerprints, and layout facts. It does not expose raw command
+   coordinates.
+2. `editor_hwpx_prepare_plan` accepts typed requirements at the returned
+   revision. The gateway resolves target IDs, inspects both target and style
+   source itself, validates the operation, compiles the raw commands, and
+   returns an opaque `planId`.
+3. `editor_hwpx_execute_plan` executes exactly that prepared batch only at the
+   same revision. Its receipt contains target-level before/after evidence and
+   explicit semantic postcondition results.
+4. `editor_hwpx_verify_plan` independently re-inspects every changed target,
+   runs HWPX quality checks, and renders every current page. It returns the
+   semantic, structural, and nonblank-page gates separately. It is not an
+   artifact handoff; callers still save the quality-checked revision and verify
+   the returned artifact hash.
+
+The current typed requirements are `replace_text`, `copy_text_style`, and
+`copy_cell_style`. Structural, object, tracked-change, list, and page-layout
+edits remain available through the catalogued raw command contract until their
+own target-specific receipt semantics are implemented. Unsupported typed work
+must fail explicitly rather than silently fall back to raw commands.
 
 The broker enforces exact revisions, command-specific inspection or object
 inventory preconditions, and a quality check before finalization or PDF

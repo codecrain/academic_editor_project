@@ -32,11 +32,83 @@ const DOCX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   },
 }]);
 
-const HWPX_MCP_TOOLS = createEditorMcpTools({
+const HWPX_SEMANTIC_REQUIREMENT_SCHEMA = Object.freeze({
+  type: 'object',
+  additionalProperties: false,
+  required: ['id', 'action', 'targetId'],
+  properties: {
+    id: { type: 'string', minLength: 1, maxLength: 128 },
+    action: {
+      type: 'string',
+      enum: ['replace_text', 'copy_text_style', 'copy_cell_style'],
+    },
+    targetId: { type: 'string', minLength: 1, maxLength: 256 },
+    sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
+    text: { type: 'string', maxLength: 20000 },
+  },
+});
+
+const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   format: 'hwpx',
   commandCategories: hwpxAdapter.commandCategories,
   commandOps: hwpxAdapter.commandOps,
-});
+}), {
+  name: 'editor_hwpx_semantic_context',
+  description: 'Read a bounded semantic HWPX target view for planning. It exposes stable target IDs, visible text, style fingerprints, and layout facts, never raw command coordinates.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      kind: { type: ['string', 'null'], enum: ['paragraph', 'cell', null] },
+      limit: { type: 'integer', minimum: 1, maximum: 120 },
+    },
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, {
+  name: 'editor_hwpx_prepare_plan',
+  description: 'Validate and compile a typed HWPX edit plan against the exact current revision. Requirements refer only to target IDs from semantic_context; raw HWPX commands and locations are server-owned.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'baseRevision', 'requirements'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      baseRevision: { type: 'integer', minimum: 1 },
+      requirements: { type: 'array', minItems: 1, maxItems: 40, items: HWPX_SEMANTIC_REQUIREMENT_SCHEMA },
+    },
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+}, {
+  name: 'editor_hwpx_execute_plan',
+  description: 'Atomically execute a previously prepared HWPX semantic plan at its exact revision and return per-requirement before/after evidence. It rejects stale or unknown plan tokens.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'baseRevision', 'planId'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      baseRevision: { type: 'integer', minimum: 1 },
+      planId: { type: 'string', minLength: 1, maxLength: 128 },
+    },
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+}, {
+  name: 'editor_hwpx_verify_plan',
+  description: 'Independently verify the semantic postconditions of an executed HWPX plan, run structural quality checks, and render every current page. This is evidence for completion, not artifact delivery.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'baseRevision', 'planId'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      baseRevision: { type: 'integer', minimum: 1 },
+      planId: { type: 'string', minLength: 1, maxLength: 128 },
+    },
+  },
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}]);
 
 const PDF_MCP_TOOLS = createEditorMcpTools({
   format: 'pdf',

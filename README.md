@@ -103,6 +103,11 @@ revision-bound server session that must be finalized or discarded.
 It implements `initialize`, `ping`, `tools/list`, and `tools/call` for DOCX,
 HWPX, and PDF open/read/target/inspect/apply/quality/render/finalize
 workflows.
+For common HWPX text and style work, prefer the semantic-plan MCP sequence
+`semantic_context` → `prepare_plan` → `execute_plan` → `verify_plan`: the
+gateway owns raw command construction and returns target-level execution
+receipts plus all-page rendering evidence. See `API.md` for the typed actions
+and the remaining advanced-command boundary.
 DOCX `open` can receive the persisted `storedDocumentId` returned by
 `/api/documents` instead of downloading that working copy and sending it back as
 Base64. This is an authenticated application-server reference; agents should

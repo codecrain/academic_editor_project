@@ -90,7 +90,6 @@ async function awaitOwnedProcess(started, timeoutMs) {
         reject(new Error(`HWPX native PDF renderer timed out after ${timeoutMs} ms.`));
       }
     }, timeoutMs);
-    timer.unref?.();
     Promise.resolve(completion).then(
       (result) => {
         clearTimeout(timer);

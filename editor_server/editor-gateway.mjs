@@ -1252,6 +1252,123 @@ function assertMutationPreconditions(record, action, body, commands = []) {
   return { baseRevision, commandEntries };
 }
 
+function semanticPlanStore(record) {
+  record.semanticPlans ??= new Map();
+  return record.semanticPlans;
+}
+
+function flattenEditableTargets(targetMap = {}) {
+  return [
+    ...(Array.isArray(targetMap.paragraphs) ? targetMap.paragraphs : []),
+    ...(Array.isArray(targetMap.cells) ? targetMap.cells : []),
+  ];
+}
+
+function semanticTargetView(target) {
+  return {
+    targetId: target.id,
+    kind: target.kind,
+    text: target.currentText,
+    textLength: target.textLength,
+    styleFingerprint: target.styleFingerprint ?? null,
+    layout: target.layout ?? null,
+    ...(target.table ? { table: { id: target.table.id, dims: target.table.dims } } : {}),
+  };
+}
+
+async function inspectSemanticTargetIds(session, targetIds) {
+  const targetById = new Map(flattenEditableTargets(await session.targetMap()).map((target) => [target.id, target]));
+  const missing = [...new Set(targetIds)].filter((targetId) => !targetById.has(targetId));
+  if (missing.length) {
+    throw new EditorContractError(
+      'unknown_semantic_target',
+      `Target IDs are not editable at the current revision: ${missing.join(', ')}. Re-read semantic context.`,
+      422,
+      { missingTargetIds: missing },
+    );
+  }
+  const locations = [...new Set(targetIds)].map((targetId) => targetById.get(targetId).location);
+  const inspected = typeof session.inspectTargets === 'function'
+    ? await session.inspectTargets(locations)
+    : locations.map((location) => session.inspectTarget(location));
+  return new Map(inspected.map((target) => [target.id, target]));
+}
+
+function normalizeSemanticRequirements(requirements) {
+  if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 40) {
+    throw new EditorContractError('invalid_semantic_plan', 'requirements must contain 1-40 typed edit requirements.', 422);
+  }
+  const ids = new Set();
+  return requirements.map((requirement) => {
+    const id = String(requirement?.id || '').trim();
+    const action = String(requirement?.action || '').trim();
+    const targetId = String(requirement?.targetId || '').trim();
+    const sourceTargetId = requirement?.sourceTargetId === undefined ? '' : String(requirement.sourceTargetId).trim();
+    if (!id || ids.has(id)) {
+      throw new EditorContractError('invalid_semantic_plan', 'Each requirement needs a unique non-empty id.', 422);
+    }
+    ids.add(id);
+    if (!['replace_text', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
+      throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} has an unsupported action or missing targetId.`, 422);
+    }
+    if (action === 'replace_text') {
+      if (typeof requirement.text !== 'string') {
+        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires text for replace_text.`, 422);
+      }
+      return { id, action, targetId, text: requirement.text };
+    }
+    if (!sourceTargetId) {
+      throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires sourceTargetId for ${action}.`, 422);
+    }
+    return { id, action, targetId, sourceTargetId };
+  });
+}
+
+function compileHwpxSemanticRequirements(requirements, inspectedById) {
+  return requirements.map((requirement) => {
+    const target = inspectedById.get(requirement.targetId);
+    const source = requirement.sourceTargetId ? inspectedById.get(requirement.sourceTargetId) : null;
+    if (requirement.action === 'replace_text') {
+      return {
+        requirement,
+        command: target.kind === 'cell'
+          ? { op: 'table.writeCell', target: target.location, text: requirement.text }
+          : { op: 'text.replaceParagraph', location: target.location, text: requirement.text },
+        expected: { text: requirement.text },
+      };
+    }
+    if (requirement.action === 'copy_text_style') {
+      return {
+        requirement,
+        command: { op: 'paragraph.applyStyle', target: target.location, styleSource: source.location },
+        expected: { styleFingerprint: source.styleFingerprint ?? null },
+      };
+    }
+    if (target.kind !== 'cell' || source.kind !== 'cell') {
+      throw new EditorContractError(
+        'semantic_target_kind_mismatch',
+        `Requirement ${requirement.id} copy_cell_style requires cell targets.`,
+        422,
+        { targetId: target.id, sourceTargetId: source.id },
+      );
+    }
+    return {
+      requirement,
+      command: { op: 'table.applyCellStyle', target: target.location, styleSource: source.location },
+      expected: { styleFingerprint: source.styleFingerprint ?? null },
+    };
+  });
+}
+
+function semanticPostcondition(entry, after) {
+  if (Object.hasOwn(entry.expected, 'text')) {
+    return { ok: after.currentText === entry.expected.text, expected: entry.expected.text, actual: after.currentText };
+  }
+  const expectedHash = entry.expected.styleFingerprint?.hash ?? null;
+  const actualHash = after.styleFingerprint?.hash ?? null;
+  return { ok: expectedHash !== null && expectedHash === actualHash, expected: expectedHash, actual: actualHash };
+}
+
 function pruneExpiredApiSessions(state, ttlMs) {
   const cutoff = Date.now() - Math.max(60_000, Number(ttlMs || 60 * 60 * 1000));
   for (const [id, record] of apiStore(state)) {
@@ -1875,6 +1992,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
       'renderAll',
       'renderCompare',
       'exportPdf',
+      ...(fmt === 'hwpx' ? ['semanticContext', 'semanticPlan', 'semanticReceipt'] : []),
     ],
     ...(issued ? {
       liveEditorSession: {
@@ -2003,6 +2121,146 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   if (actionPath === 'commands/catalog') {
     const catalog = formatAdapters.get(fmt).commandCatalog({ category: body.category, op: body.op });
     sendJson(res, 200, catalog);
+    return true;
+  }
+  if (fmt === 'hwpx' && actionPath === 'semantic/context') {
+    const kind = body.kind == null ? null : String(body.kind);
+    if (kind !== null && kind !== 'paragraph' && kind !== 'cell') {
+      throw new EditorContractError('invalid_semantic_context', 'kind must be paragraph, cell, or null.', 422);
+    }
+    const limit = boundedInteger(body.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit');
+    const map = await session.targetMap();
+    const sourceTargets = kind === 'paragraph'
+      ? (map.paragraphs || [])
+      : kind === 'cell'
+        ? (map.cells || [])
+        : flattenEditableTargets(map);
+    const targets = sourceTargets.slice(0, limit);
+    const inspected = typeof session.inspectTargets === 'function'
+      ? await session.inspectTargets(targets.map((target) => target.location))
+      : targets.map((target) => session.inspectTarget(target.location));
+    sendJson(res, 200, {
+      ok: true,
+      revision: session.revision,
+      targets: inspected.map(semanticTargetView),
+      returnedTargetCount: inspected.length,
+      totalTargetCount: sourceTargets.length,
+      truncated: inspected.length < sourceTargets.length,
+    });
+    return true;
+  }
+  if (fmt === 'hwpx' && actionPath === 'semantic/prepare') {
+    const baseRevision = requireBaseRevision(record, body);
+    const requirements = normalizeSemanticRequirements(body.requirements);
+    const targetIds = requirements.flatMap((requirement) => [requirement.targetId, requirement.sourceTargetId].filter(Boolean));
+    const inspectedById = await inspectSemanticTargetIds(session, targetIds);
+    const entries = compileHwpxSemanticRequirements(requirements, inspectedById);
+    try {
+      hwpxAdapter.validateCommands(entries.map((entry) => entry.command));
+    } catch (error) {
+      throw new EditorContractError('semantic_compile_failed', error instanceof Error ? error.message : String(error), 422);
+    }
+    const planId = `hp_${randomUUID()}`;
+    semanticPlanStore(record).set(planId, {
+      id: planId,
+      preparedRevision: baseRevision,
+      entries,
+      before: new Map([...inspectedById].map(([id, target]) => [id, semanticTargetView(target)])),
+      status: 'prepared',
+      createdAt: Date.now(),
+    });
+    sendJson(res, 200, {
+      ok: true,
+      documentId: id,
+      planId,
+      revision: baseRevision,
+      requirementCount: entries.length,
+      requirements: entries.map((entry) => ({ id: entry.requirement.id, action: entry.requirement.action, targetId: entry.requirement.targetId })),
+    });
+    return true;
+  }
+  if (fmt === 'hwpx' && actionPath === 'semantic/execute') {
+    const baseRevision = requireBaseRevision(record, body);
+    const planId = String(body.planId || '').trim();
+    const plan = semanticPlanStore(record).get(planId);
+    if (!plan || plan.status !== 'prepared') {
+      throw new EditorContractError('semantic_plan_unavailable', 'Plan was not found or is no longer executable. Prepare a new plan.', 409);
+    }
+    if (plan.preparedRevision !== baseRevision) {
+      throw new EditorContractError('semantic_plan_stale', `Plan ${planId} was prepared for revision ${plan.preparedRevision}, current revision is ${baseRevision}.`, 409);
+    }
+    const result = await session.apply(plan.entries.map((entry) => entry.command));
+    const targetIds = plan.entries.map((entry) => entry.requirement.targetId);
+    const inspectedAfter = await inspectSemanticTargetIds(session, targetIds);
+    const receipt = plan.entries.map((entry) => {
+      const targetId = entry.requirement.targetId;
+      const after = inspectedAfter.get(targetId);
+      return {
+        requirementId: entry.requirement.id,
+        action: entry.requirement.action,
+        targetId,
+        before: plan.before.get(targetId),
+        after: semanticTargetView(after),
+        postcondition: semanticPostcondition(entry, after),
+      };
+    });
+    plan.status = 'executed';
+    plan.executedRevision = session.revision;
+    plan.receipt = receipt;
+    clearRecordPreconditions(record);
+    sendJson(res, 200, {
+      ok: receipt.every((entry) => entry.postcondition.ok),
+      documentId: id,
+      planId,
+      revision: session.revision,
+      commandResults: result.results,
+      receipt,
+    });
+    return true;
+  }
+  if (fmt === 'hwpx' && actionPath === 'semantic/verify') {
+    const baseRevision = requireBaseRevision(record, body);
+    const planId = String(body.planId || '').trim();
+    const plan = semanticPlanStore(record).get(planId);
+    if (!plan || plan.status !== 'executed' || plan.executedRevision !== baseRevision) {
+      throw new EditorContractError('semantic_verification_unavailable', 'Plan has not been executed at this revision. Execute a current prepared plan first.', 409);
+    }
+    const targetIds = plan.entries.map((entry) => entry.requirement.targetId);
+    const inspected = await inspectSemanticTargetIds(session, targetIds);
+    const receipt = plan.entries.map((entry) => {
+      const after = inspected.get(entry.requirement.targetId);
+      return {
+        requirementId: entry.requirement.id,
+        targetId: entry.requirement.targetId,
+        postcondition: semanticPostcondition(entry, after),
+        after: semanticTargetView(after),
+      };
+    });
+    const quality = await session.qualityCheck({
+      baselineJson: record.baselineJson,
+      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
+    });
+    const pages = Array.from({ length: await pageCountFromSession(session) }, (_value, index) => index + 1);
+    const renderedPages = await renderHwpxSvgPages(session, pages);
+    const visual = {
+      pageCount: pages.length,
+      renderedPageCount: renderedPages.length,
+      allPagesNonBlank: renderedPages.length === pages.length && renderedPages.every((page) => page.nonBlank === true),
+    };
+    const semanticOk = receipt.every((entry) => entry.postcondition.ok);
+    const qualityOk = qualityAllowsFinalization(quality, 'hwpx');
+    recordPreconditions(record).qualityRevision = qualityOk ? baseRevision : null;
+    plan.status = 'verified';
+    plan.verification = { receipt, quality, visual };
+    sendJson(res, 200, {
+      ok: semanticOk && qualityOk && visual.allPagesNonBlank,
+      documentId: id,
+      planId,
+      revision: baseRevision,
+      semantic: { ok: semanticOk, receipt },
+      quality: { ok: qualityOk, report: quality },
+      visual,
+    });
     return true;
   }
   if (actionPath === 'commands/apply' || actionPath === 'commands/batch') {
@@ -3383,6 +3641,12 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (name === `${toolPrefix}_target_inspect`) {
       return postLocalEditorApi(req, config, `${prefix}/target/inspect`, { locations: args.locations });
     }
+    if (name === 'editor_hwpx_semantic_context') {
+      return postLocalEditorApi(req, config, `${prefix}/semantic/context`, {
+        ...(args.kind !== undefined ? { kind: args.kind } : {}),
+        ...(args.limit !== undefined ? { limit: args.limit } : {}),
+      });
+    }
 
     const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
       responseMode: MCP_BOUNDED_RESPONSE_MODE,
@@ -3395,6 +3659,24 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       return postLocalEditorApi(req, config, `${prefix}/commands/apply`, {
         baseRevision,
         commands: args.commands,
+      });
+    }
+    if (name === 'editor_hwpx_prepare_plan') {
+      return postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
+        baseRevision,
+        requirements: args.requirements,
+      });
+    }
+    if (name === 'editor_hwpx_execute_plan') {
+      return postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
+        baseRevision,
+        planId: args.planId,
+      });
+    }
+    if (name === 'editor_hwpx_verify_plan') {
+      return postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
+        baseRevision,
+        planId: args.planId,
       });
     }
     if (name === `${toolPrefix}_render_pages`) {
