@@ -39,6 +39,30 @@ test('HWPX paragraph template replacement preserves matching leading tab control
   assert.equal(replaceLeadingTabTemplateTextXml(paragraph, '\t 연구책임자 : 신해용 (인)'), null);
 });
 
+test('HWPX paragraph replacement preserves requested line-break and tab controls after reopen', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/ref/ref_mixed.hwpx'));
+  session.apply([
+    {
+      op: 'text.replaceParagraph',
+      location: { paragraph: { section: 0, number: 1 } },
+      text: '점검 대상: 본관\n점검 시간: 09:00~11:00',
+    },
+    {
+      op: 'text.replaceParagraph',
+      location: { paragraph: { section: 0, number: 2 } },
+      text: '담당부서\t시설안전팀',
+    },
+  ]);
+  const saved = session.save();
+  const sectionXml = readZip(saved.bytes).get('Contents/section0.xml').toString('utf8');
+  assert.match(sectionXml, /점검 대상: 본관<hp:lineBreak\/>점검 시간: 09:00~11:00/);
+  assert.match(sectionXml, /담당부서<hp:tab\b[^>]*\/>시설안전팀/);
+  const reopened = new HwpxApiSession(saved.bytes);
+  assert.equal(reopened.inspectTarget({ paragraph: { section: 0, number: 1 } }).currentText, '점검 대상: 본관\n점검 시간: 09:00~11:00');
+  assert.equal(reopened.inspectTarget({ paragraph: { section: 0, number: 2 } }).currentText, '담당부서\t시설안전팀');
+});
+
 test('HWPX API reports encrypted public-sector packages with an actionable error code', async () => {
   await initHwpxRuntime();
   const input = readFileSync('evaluation/hwpx-agent-final-20-v1/attachments/source/moe-2025-work-plan.hwpx');
@@ -132,6 +156,15 @@ test('HWPX API read/target/layout APIs expose editable cell guidance', async () 
   assert.ok(json.layoutGraph.tables.length >= 1);
   assert.ok(json.editableTargets.cells.length >= table.cells.length);
   assert.ok(session.targetMap().cells.length >= table.cells.length);
+  const mappedCell = session.targetMap().cells[0];
+  assert.equal(mappedCell.kind, 'cell');
+  assert.equal(typeof mappedCell.currentText, 'string');
+  assert.equal(Number.isInteger(mappedCell.cell.row), true);
+  assert.equal(Number.isInteger(mappedCell.cell.col), true);
+  assert.equal(Number.isInteger(mappedCell.cell.rowSpan), true);
+  assert.equal(Number.isInteger(mappedCell.cell.colSpan), true);
+  assert.ok(mappedCell.styleFingerprint?.hash);
+  assert.equal(typeof mappedCell.table.id, 'string');
   const tableHostParagraphs = new Set(
     json.tables.map((item) => `${item.section}:${item.para}`),
   );
@@ -142,6 +175,7 @@ test('HWPX API read/target/layout APIs expose editable cell guidance', async () 
 
   const target = session.inspectTarget({ tableId: table.id, cell: { number: 1 } });
   assert.equal(target.kind, 'cell');
+  assert.ok(target.styleFingerprint?.hash);
   assert.equal(target.location.cell.number, 1);
   assert.ok(target.style.cell);
   assert.ok(target.layout.capacity);

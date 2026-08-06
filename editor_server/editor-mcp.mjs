@@ -32,20 +32,41 @@ const DOCX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   },
 }]);
 
-const HWPX_SEMANTIC_REQUIREMENT_SCHEMA = Object.freeze({
-  type: 'object',
-  additionalProperties: false,
-  required: ['id', 'action', 'targetId'],
-  properties: {
-    id: { type: 'string', minLength: 1, maxLength: 128 },
-    action: {
-      type: 'string',
-      enum: ['replace_text', 'copy_text_style', 'copy_cell_style'],
+function hwpxRequirementVariant(action, properties, required) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['id', 'statement', 'action', 'targetId', ...required],
+    properties: {
+      id: { type: 'string', minLength: 1, maxLength: 128 },
+      statement: { type: 'string', minLength: 1, maxLength: 1000 },
+      action: { type: 'string', enum: [action] },
+      targetId: { type: 'string', minLength: 1, maxLength: 256 },
+      ...properties,
     },
-    targetId: { type: 'string', minLength: 1, maxLength: 256 },
-    sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
-    text: { type: 'string', maxLength: 20000 },
-  },
+  };
+}
+
+const HWPX_SEMANTIC_REQUIREMENT_SCHEMA = Object.freeze({
+  oneOf: [
+    hwpxRequirementVariant('replace_text', {
+      text: { type: 'string', maxLength: 20000 },
+    }, ['text']),
+    hwpxRequirementVariant('replace_joined_text', {
+      parts: { type: 'array', minItems: 1, maxItems: 100, items: { type: 'string', maxLength: 20000 } },
+      separator: { type: 'string', enum: ['newline', 'tab'] },
+    }, ['parts', 'separator']),
+    hwpxRequirementVariant('replace_fragment', {
+      oldText: { type: 'string', minLength: 1, maxLength: 20000 },
+      newText: { type: 'string', maxLength: 20000 },
+    }, ['oldText', 'newText']),
+    hwpxRequirementVariant('copy_text_style', {
+      sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
+    }, ['sourceTargetId']),
+    hwpxRequirementVariant('copy_cell_style', {
+      sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
+    }, ['sourceTargetId']),
+  ],
 });
 
 const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
@@ -54,7 +75,7 @@ const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
   commandOps: hwpxAdapter.commandOps,
 }), {
   name: 'editor_hwpx_semantic_context',
-  description: 'Read a bounded semantic HWPX target view for planning. It exposes stable target IDs, visible text, style fingerprints, and layout facts, never raw command coordinates.',
+  description: 'Read one revision-bound semantic HWPX target page for planning. Follow nextCursor unchanged until complete; it exposes stable target IDs, visible text, style fingerprints, layout facts, and table-cell row/column plus adjacent-cell target IDs, never raw package coordinates.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -63,51 +84,26 @@ const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
       documentId: { type: 'string', minLength: 1 },
       kind: { type: ['string', 'null'], enum: ['paragraph', 'cell', null] },
       limit: { type: 'integer', minimum: 1, maximum: 120 },
+      cursor: { type: ['string', 'null'], minLength: 1, maxLength: 2048 },
     },
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }, {
-  name: 'editor_hwpx_prepare_plan',
-  description: 'Validate and compile a typed HWPX edit plan against the exact current revision. Requirements refer only to target IDs from semantic_context; raw HWPX commands and locations are server-owned.',
+  name: 'editor_hwpx_commit_plan',
+  description: 'Validate, atomically execute, preserve-check, quality-check, render, and finalize one complete typed HWPX plan. Every user requirement must be represented once. Any failure discards the isolated session and produces no artifact.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
-    required: ['documentId', 'baseRevision', 'requirements'],
+    required: ['documentId', 'baseRevision', 'requirements', 'filename'],
     properties: {
       documentId: { type: 'string', minLength: 1 },
       baseRevision: { type: 'integer', minimum: 1 },
       requirements: { type: 'array', minItems: 1, maxItems: 40, items: HWPX_SEMANTIC_REQUIREMENT_SCHEMA },
+      filename: { type: 'string', minLength: 1, maxLength: 255 },
+      preserveUnmentioned: { type: 'boolean' },
     },
   },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-}, {
-  name: 'editor_hwpx_execute_plan',
-  description: 'Atomically execute a previously prepared HWPX semantic plan at its exact revision and return per-requirement before/after evidence. It rejects stale or unknown plan tokens.',
-  inputSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['documentId', 'baseRevision', 'planId'],
-    properties: {
-      documentId: { type: 'string', minLength: 1 },
-      baseRevision: { type: 'integer', minimum: 1 },
-      planId: { type: 'string', minLength: 1, maxLength: 128 },
-    },
-  },
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-}, {
-  name: 'editor_hwpx_verify_plan',
-  description: 'Independently verify the semantic postconditions of an executed HWPX plan, run structural quality checks, and render every current page. This is evidence for completion, not artifact delivery.',
-  inputSchema: {
-    type: 'object',
-    additionalProperties: false,
-    required: ['documentId', 'baseRevision', 'planId'],
-    properties: {
-      documentId: { type: 'string', minLength: 1 },
-      baseRevision: { type: 'integer', minimum: 1 },
-      planId: { type: 'string', minLength: 1, maxLength: 128 },
-    },
-  },
-  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 }]);
 
 const PDF_MCP_TOOLS = createEditorMcpTools({
@@ -311,7 +307,12 @@ async function handleSingleEditorMcpRequest(message, options) {
       return jsonRpcResult(id, toolResult(result, false));
     } catch (error) {
       const messageText = error instanceof Error ? error.message : String(error);
-      return jsonRpcResult(id, toolResult({ ok: false, code: 'tool_execution_failed', message: messageText }, true));
+      return jsonRpcResult(id, toolResult({
+        ok: false,
+        code: typeof error?.code === 'string' ? error.code : 'tool_execution_failed',
+        message: messageText,
+        ...(error?.details === undefined ? {} : { details: error.details }),
+      }, true));
     }
   }
 

@@ -24,9 +24,7 @@ editor_hwpx_save_checkpoint
 editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 editor_hwpx_semantic_context
-editor_hwpx_prepare_plan
-editor_hwpx_execute_plan
-editor_hwpx_verify_plan
+editor_hwpx_commit_plan
 ```
 
 Call `tools/list` for the exact JSON Schema. The schema is generated from the
@@ -86,25 +84,30 @@ Inspect the target before mutation. The `apply` call uses `baseRevision`, not
 The complete batch succeeds or fails as one revision. A failed batch produces
 no partial mutation.
 
-## Semantic plan and receipt
+## Semantic context and atomic commit
 
 For ordinary text, paragraph-style, and cell-style editing, use the semantic
-sequence rather than constructing raw locations: `semantic_context` returns
-stable target IDs and current evidence; `prepare_plan` compiles typed
-requirements at one revision; `execute_plan` returns target-level before/after
-receipts; and `verify_plan` re-inspects the requirements, runs quality, and
-renders every current page. The current typed actions are `replace_text`,
-`copy_text_style`, and `copy_cell_style`. A plan token is valid only for its
-prepared revision and cannot fall back to a raw command if validation fails.
+path rather than constructing raw locations: `semantic_context` returns
+one revision-bound target page, including row/column coordinates for table cells,
+and an opaque `nextCursor` when more targets remain. `commit_plan` then validates
+and executes the complete requirement list
+as one atomic batch, verifies target-level postconditions, checks every
+unmentioned target for accidental changes, runs quality and full-page rendering,
+saves, reopens, and rerenders the saved bytes, and returns one artifact receipt.
+There is no user-approval state or raw-command fallback. The current actions are
+`replace_text`, `replace_joined_text`, `replace_fragment`, `copy_text_style`, and `copy_cell_style`;
+fragment replacement requires one exact occurrence, and no-ops are rejected.
 
 ```json
 {
-  "name": "editor_hwpx_prepare_plan",
+  "name": "editor_hwpx_commit_plan",
   "arguments": {
     "documentId": "doc_...",
     "baseRevision": 1,
+    "filename": "briefing-edited.hwpx",
     "requirements": [{
       "id": "replace-title",
+      "statement": "제목을 2026년도 업무 추진계획으로 변경한다.",
       "action": "replace_text",
       "targetId": "s0_p4",
       "text": "2026년도 업무 추진계획"

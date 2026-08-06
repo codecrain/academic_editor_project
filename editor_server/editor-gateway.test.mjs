@@ -373,9 +373,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
       'editor_hwpx_semantic_context',
-      'editor_hwpx_prepare_plan',
-      'editor_hwpx_execute_plan',
-      'editor_hwpx_verify_plan',
+      'editor_hwpx_commit_plan',
       'editor_pdf_open',
       'editor_pdf_discard',
       'editor_pdf_read_json',
@@ -2003,19 +2001,49 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(opened.fmt, 'hwpx');
 
     const semanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
+      limit: 1,
+    });
+    assert.equal(semanticContext.returnedTargetCount, 1);
+    if (semanticContext.nextCursor) {
+      const nextSemanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
+        limit: 1,
+        cursor: semanticContext.nextCursor,
+      });
+      assert.notEqual(nextSemanticContext.targets[0].targetId, semanticContext.targets[0].targetId);
+      assert.equal(nextSemanticContext.totalTargetCount, semanticContext.totalTargetCount);
+    }
+    const completeSemanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
       kind: 'paragraph',
       limit: 20,
     });
-    const semanticTarget = semanticContext.targets.find((target) => target.text.trim().length > 0);
+    const semanticTarget = completeSemanticContext.targets.find((target) => target.text.trim().length > 0);
     assert.ok(semanticTarget);
     assert.equal(semanticTarget.styleFingerprint?.basis?.kind, 'paragraph');
+    const noOpPlan = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        baseRevision: completeSemanticContext.revision,
+        requirements: [{
+          id: 'no-op-title',
+          statement: 'Reject an unchanged title replacement.',
+          action: 'replace_text',
+          targetId: semanticTarget.targetId,
+          text: semanticTarget.text,
+        }],
+      }),
+    });
+    assert.equal(noOpPlan.status, 422);
+    assert.equal((await noOpPlan.json()).code, 'semantic_noop_requirement');
     const semanticPrepared = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
-      baseRevision: semanticContext.revision,
+      baseRevision: completeSemanticContext.revision,
       requirements: [{
         id: 'replace-title',
-        action: 'replace_text',
+        statement: 'Replace the title text.',
+        action: 'replace_fragment',
         targetId: semanticTarget.targetId,
-        text: `${semanticTarget.text} semantic plan`,
+        oldText: semanticTarget.text,
+        newText: `${semanticTarget.text} semantic plan`,
       }],
     });
     const semanticExecuted = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/execute`, {
@@ -2197,6 +2225,29 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     assert.equal(semanticContextCall.result.isError, false, JSON.stringify(semanticContextCall.result.structuredContent));
     assert.ok(semanticContextCall.result.structuredContent.targets.every((target) => !Object.hasOwn(target, 'location')));
     assert.ok(semanticContextCall.result.structuredContent.targets.some((target) => target.styleFingerprint?.basis?.kind === 'paragraph'));
+    const semanticCell = semanticContextCall.result.structuredContent.targets.find((target) => target.kind === 'cell');
+    if (semanticCell) {
+      assert.equal(Number.isInteger(semanticCell.cell?.row), true);
+      assert.equal(Number.isInteger(semanticCell.cell?.column), true);
+      assert.equal(Number.isInteger(semanticCell.cell?.index), true);
+    }
+    const tableSource = await readFile(path.resolve('editor_hwpx/samples/hwpx/ref/ref_table.hwpx'));
+    const tableOpenedCall = await mcp(22, 'editor_hwpx_open', {
+      filename: 'ref_table.hwpx',
+      bytesBase64: tableSource.toString('base64'),
+    });
+    const tableContextCall = await mcp(23, 'editor_hwpx_semantic_context', {
+      documentId: tableOpenedCall.result.structuredContent.documentId,
+      kind: 'cell',
+      limit: 20,
+    });
+    const adjacentCell = tableContextCall.result.structuredContent.targets.find((target) => target.neighbors?.rightTargetId);
+    assert.ok(adjacentCell);
+    assert.ok(tableContextCall.result.structuredContent.targets.some((target) => target.targetId === adjacentCell.neighbors.rightTargetId));
+    await mcp(24, 'editor_hwpx_discard', {
+      documentId: tableOpenedCall.result.structuredContent.documentId,
+      baseRevision: tableOpenedCall.result.structuredContent.revision,
+    });
     const initialLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
     assert.equal(initialLiveSource.status, 200);
     assert.match(initialLiveSource.headers.get('content-type'), /application\/vnd\.hancom\.hwpx/);

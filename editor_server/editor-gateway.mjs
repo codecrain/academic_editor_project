@@ -1273,6 +1273,101 @@ function semanticTargetView(target) {
     styleFingerprint: target.styleFingerprint ?? null,
     layout: target.layout ?? null,
     ...(target.table ? { table: { id: target.table.id, dims: target.table.dims } } : {}),
+    ...(target.kind === 'cell' && target.cell ? {
+      cell: {
+        index: target.cell.cellIndex,
+        row: target.cell.row,
+        column: target.cell.col,
+        rowSpan: target.cell.rowSpan,
+        colSpan: target.cell.colSpan,
+      },
+    } : {}),
+  };
+}
+
+function semanticCellNeighborMap(cells = []) {
+  const cellFacts = (cell) => cell.cell || {
+    row: cell.location?.cell?.row,
+    col: cell.location?.cell?.column,
+    rowSpan: cell.location?.cell?.rowSpan,
+    colSpan: cell.location?.cell?.colSpan,
+  };
+  const byTable = new Map();
+  for (const cell of cells) {
+    const tableId = cell.table?.id || cell.location?.tableId;
+    if (!tableId || !Number.isInteger(Number(cellFacts(cell).row)) || !Number.isInteger(Number(cellFacts(cell).col))) continue;
+    const group = byTable.get(tableId) || [];
+    group.push(cell);
+    byTable.set(tableId, group);
+  }
+  const result = new Map();
+  const overlaps = (startA, spanA, startB, spanB) => (
+    startA < startB + spanB && startB < startA + spanA
+  );
+  for (const group of byTable.values()) {
+    for (const cell of group) {
+      const facts = cellFacts(cell);
+      const row = Number(facts.row);
+      const column = Number(facts.col);
+      const rowSpan = Number(facts.rowSpan || 1);
+      const colSpan = Number(facts.colSpan || 1);
+      const neighbors = {};
+      for (const candidate of group) {
+        if (candidate.id === cell.id) continue;
+        const candidateFacts = cellFacts(candidate);
+        const candidateRow = Number(candidateFacts.row);
+        const candidateColumn = Number(candidateFacts.col);
+        const candidateRowSpan = Number(candidateFacts.rowSpan || 1);
+        const candidateColSpan = Number(candidateFacts.colSpan || 1);
+        if (candidateColumn + candidateColSpan === column
+          && overlaps(row, rowSpan, candidateRow, candidateRowSpan)) neighbors.leftTargetId ??= candidate.id;
+        if (column + colSpan === candidateColumn
+          && overlaps(row, rowSpan, candidateRow, candidateRowSpan)) neighbors.rightTargetId ??= candidate.id;
+        if (candidateRow + candidateRowSpan === row
+          && overlaps(column, colSpan, candidateColumn, candidateColSpan)) neighbors.aboveTargetId ??= candidate.id;
+        if (row + rowSpan === candidateRow
+          && overlaps(column, colSpan, candidateColumn, candidateColSpan)) neighbors.belowTargetId ??= candidate.id;
+      }
+      result.set(cell.id, neighbors);
+    }
+  }
+  return result;
+}
+
+function semanticTargetEvidence(target) {
+  const view = semanticTargetView(target);
+  return {
+    targetId: view.targetId,
+    kind: view.kind,
+    text: view.text,
+    styleHash: view.styleFingerprint?.hash ?? null,
+  };
+}
+
+function semanticPreservationReceipt(beforeById, afterById, editedTargetIds) {
+  const changed = [];
+  const missing = [];
+  const added = [];
+  for (const [targetId, before] of beforeById) {
+    if (editedTargetIds.has(targetId)) continue;
+    const after = afterById.get(targetId);
+    if (!after) {
+      missing.push(targetId);
+      continue;
+    }
+    if (before.kind !== after.kind || before.text !== after.text || before.styleHash !== after.styleHash) {
+      changed.push({ targetId, before, after });
+    }
+  }
+  for (const targetId of afterById.keys()) {
+    if (!beforeById.has(targetId)) added.push(targetId);
+  }
+  return {
+    ok: changed.length === 0 && missing.length === 0 && added.length === 0,
+    checkedTargetCount: [...beforeById.keys()].filter((targetId) => !editedTargetIds.has(targetId)).length,
+    changed,
+    missingTargetIds: missing,
+    addedTargetIds: added,
   };
 }
 
@@ -1303,24 +1398,42 @@ function normalizeSemanticRequirements(requirements) {
     const id = String(requirement?.id || '').trim();
     const action = String(requirement?.action || '').trim();
     const targetId = String(requirement?.targetId || '').trim();
+    const statement = String(requirement?.statement || '').trim();
     const sourceTargetId = requirement?.sourceTargetId === undefined ? '' : String(requirement.sourceTargetId).trim();
-    if (!id || ids.has(id)) {
+    if (!id || ids.has(id) || !statement) {
       throw new EditorContractError('invalid_semantic_plan', 'Each requirement needs a unique non-empty id.', 422);
     }
     ids.add(id);
-    if (!['replace_text', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
+    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} has an unsupported action or missing targetId.`, 422);
     }
     if (action === 'replace_text') {
       if (typeof requirement.text !== 'string') {
         throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires text for replace_text.`, 422);
       }
-      return { id, action, targetId, text: requirement.text };
+      return { id, statement, action, targetId, text: requirement.text };
+    }
+    if (action === 'replace_fragment') {
+      if (typeof requirement.oldText !== 'string' || !requirement.oldText.length || typeof requirement.newText !== 'string') {
+        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires non-empty oldText and string newText for replace_fragment.`, 422);
+      }
+      if (requirement.oldText === requirement.newText) {
+        throw new EditorContractError('semantic_noop_requirement', `Requirement ${id} does not change its text fragment.`, 422);
+      }
+      return { id, statement, action, targetId, oldText: requirement.oldText, newText: requirement.newText };
+    }
+    if (action === 'replace_joined_text') {
+      if (!Array.isArray(requirement.parts) || !requirement.parts.length || requirement.parts.length > 100
+        || requirement.parts.some((part) => typeof part !== 'string')
+        || !['newline', 'tab'].includes(requirement.separator)) {
+        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires string parts and separator newline or tab.`, 422);
+      }
+      return { id, statement, action, targetId, parts: requirement.parts, separator: requirement.separator };
     }
     if (!sourceTargetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires sourceTargetId for ${action}.`, 422);
     }
-    return { id, action, targetId, sourceTargetId };
+    return { id, statement, action, targetId, sourceTargetId };
   });
 }
 
@@ -1329,6 +1442,13 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
     const target = inspectedById.get(requirement.targetId);
     const source = requirement.sourceTargetId ? inspectedById.get(requirement.sourceTargetId) : null;
     if (requirement.action === 'replace_text') {
+      if (target.currentText === requirement.text) {
+        throw new EditorContractError(
+          'semantic_noop_requirement',
+          `Requirement ${requirement.id} does not change target ${target.id}.`,
+          422,
+        );
+      }
       return {
         requirement,
         command: target.kind === 'cell'
@@ -1336,6 +1456,53 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
           : { op: 'text.replaceParagraph', location: target.location, text: requirement.text },
         expected: { text: requirement.text },
       };
+    }
+    if (requirement.action === 'replace_fragment') {
+      const firstIndex = target.currentText.indexOf(requirement.oldText);
+      const secondIndex = firstIndex < 0
+        ? -1
+        : target.currentText.indexOf(requirement.oldText, firstIndex + requirement.oldText.length);
+      if (firstIndex < 0 || secondIndex >= 0) {
+        throw new EditorContractError(
+          'semantic_fragment_ambiguous',
+          `Requirement ${requirement.id} oldText must occur exactly once in target ${target.id}.`,
+          422,
+        );
+      }
+      const text = `${target.currentText.slice(0, firstIndex)}${requirement.newText}${target.currentText.slice(firstIndex + requirement.oldText.length)}`;
+      return {
+        requirement,
+        command: target.kind === 'cell'
+          ? { op: 'table.writeCell', target: target.location, text }
+          : { op: 'text.replaceParagraph', location: target.location, text },
+        expected: { text },
+      };
+    }
+    if (requirement.action === 'replace_joined_text') {
+      const text = requirement.parts.join(requirement.separator === 'newline' ? '\n' : '\t');
+      if (target.currentText === text) {
+        throw new EditorContractError(
+          'semantic_noop_requirement',
+          `Requirement ${requirement.id} does not change target ${target.id}.`,
+          422,
+        );
+      }
+      return {
+        requirement,
+        command: target.kind === 'cell'
+          ? { op: 'table.writeCell', target: target.location, text }
+          : { op: 'text.replaceParagraph', location: target.location, text },
+        expected: { text },
+      };
+    }
+    const targetStyleHash = target.styleFingerprint?.hash;
+    const sourceStyleHash = source.styleFingerprint?.hash;
+    if (target.id === source.id || (targetStyleHash && sourceStyleHash && targetStyleHash === sourceStyleHash)) {
+      throw new EditorContractError(
+        'semantic_noop_requirement',
+        `Requirement ${requirement.id} does not change the target style.`,
+        422,
+      );
     }
     if (requirement.action === 'copy_text_style') {
       return {
@@ -1360,13 +1527,25 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
   });
 }
 
-function semanticPostcondition(entry, after) {
+function semanticPostcondition(entry, before, after) {
   if (Object.hasOwn(entry.expected, 'text')) {
-    return { ok: after.currentText === entry.expected.text, expected: entry.expected.text, actual: after.currentText };
+    const changed = before?.text !== after.currentText;
+    return {
+      ok: changed && after.currentText === entry.expected.text,
+      expected: entry.expected.text,
+      actual: after.currentText,
+      changed,
+    };
   }
   const expectedHash = entry.expected.styleFingerprint?.hash ?? null;
+  const beforeHash = before?.styleFingerprint?.hash ?? null;
   const actualHash = after.styleFingerprint?.hash ?? null;
-  return { ok: expectedHash !== null && expectedHash === actualHash, expected: expectedHash, actual: actualHash };
+  return {
+    ok: expectedHash !== null && beforeHash !== actualHash && expectedHash === actualHash,
+    expected: expectedHash,
+    actual: actualHash,
+    changed: beforeHash !== actualHash,
+  };
 }
 
 function pruneExpiredApiSessions(state, ttlMs) {
@@ -1814,6 +1993,71 @@ async function boundedDocxTargetMapPage(state, documentId, session, args = {}) {
   });
 }
 
+function normalizeSemanticContextQuery(args = {}) {
+  const kind = args.kind == null ? null : String(args.kind);
+  if (kind !== null && kind !== 'paragraph' && kind !== 'cell') {
+    throw new EditorContractError('invalid_semantic_context', 'kind must be paragraph, cell, or null.', 422);
+  }
+  return {
+    kind,
+    limit: boundedInteger(args.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit'),
+  };
+}
+
+async function boundedHwpxSemanticContextPage(state, documentId, session, args = {}) {
+  const revision = Number(session.revision);
+  let query;
+  let offset = 0;
+  if (args.cursor) {
+    const cursor = decodeMcpCursor(state, args.cursor);
+    assertCursorStream(cursor, { documentId, revision, stream: 'hwpx-semantic-context' });
+    assertCursorQueryArguments(args, cursor.query, ['kind', 'limit']);
+    query = normalizeSemanticContextQuery(cursor.query);
+    offset = cursor.offset;
+  } else {
+    query = normalizeSemanticContextQuery(args);
+  }
+  const map = await session.targetMap();
+  const sourceTargets = query.kind === 'paragraph'
+    ? (map.paragraphs || [])
+    : query.kind === 'cell'
+      ? (map.cells || [])
+      : flattenEditableTargets(map);
+  const pageSourceTargets = sourceTargets.slice(offset, offset + query.limit);
+  const inspected = typeof session.inspectTargets === 'function'
+    ? await session.inspectTargets(pageSourceTargets.map((target) => target.location))
+    : pageSourceTargets.map((target) => session.inspectTarget(target.location));
+  const cellNeighbors = semanticCellNeighborMap(map.cells || []);
+  const targets = inspected.map((target) => ({
+    ...semanticTargetView(target),
+    ...(target.kind === 'cell' ? { neighbors: cellNeighbors.get(target.id) || {} } : {}),
+  }));
+  const makeCursor = (nextOffset) => encodeMcpCursor(state, {
+    documentId,
+    revision,
+    stream: 'hwpx-semantic-context',
+    query,
+    offset: nextOffset,
+  });
+  const makeEnvelope = (pageTargets, nextCursor, oversizedItem) => ({
+    ok: true,
+    revision,
+    kind: query.kind,
+    targets: pageTargets,
+    returnedTargetCount: pageTargets.length,
+    totalTargetCount: sourceTargets.length,
+    nextCursor,
+    truncated: nextCursor !== null,
+    ...(oversizedItem ? { oversizedItem: true } : {}),
+  });
+  const nextOffset = offset + targets.length;
+  return makeEnvelope(
+    targets,
+    nextOffset < sourceTargets.length ? makeCursor(nextOffset) : null,
+    false,
+  );
+}
+
 function normalizeCommands(body = {}) {
   return body.commands || body.ops || body.commandBatch || [];
 }
@@ -2124,34 +2368,13 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (fmt === 'hwpx' && actionPath === 'semantic/context') {
-    const kind = body.kind == null ? null : String(body.kind);
-    if (kind !== null && kind !== 'paragraph' && kind !== 'cell') {
-      throw new EditorContractError('invalid_semantic_context', 'kind must be paragraph, cell, or null.', 422);
-    }
-    const limit = boundedInteger(body.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit');
-    const map = await session.targetMap();
-    const sourceTargets = kind === 'paragraph'
-      ? (map.paragraphs || [])
-      : kind === 'cell'
-        ? (map.cells || [])
-        : flattenEditableTargets(map);
-    const targets = sourceTargets.slice(0, limit);
-    const inspected = typeof session.inspectTargets === 'function'
-      ? await session.inspectTargets(targets.map((target) => target.location))
-      : targets.map((target) => session.inspectTarget(target.location));
-    sendJson(res, 200, {
-      ok: true,
-      revision: session.revision,
-      targets: inspected.map(semanticTargetView),
-      returnedTargetCount: inspected.length,
-      totalTargetCount: sourceTargets.length,
-      truncated: inspected.length < sourceTargets.length,
-    });
+    sendJson(res, 200, await boundedHwpxSemanticContextPage(state, id, session, body));
     return true;
   }
   if (fmt === 'hwpx' && actionPath === 'semantic/prepare') {
     const baseRevision = requireBaseRevision(record, body);
     const requirements = normalizeSemanticRequirements(body.requirements);
+    const preserveUnmentioned = body.preserveUnmentioned !== false;
     const targetIds = requirements.flatMap((requirement) => [requirement.targetId, requirement.sourceTargetId].filter(Boolean));
     const inspectedById = await inspectSemanticTargetIds(session, targetIds);
     const entries = compileHwpxSemanticRequirements(requirements, inspectedById);
@@ -2161,11 +2384,25 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       throw new EditorContractError('semantic_compile_failed', error instanceof Error ? error.message : String(error), 422);
     }
     const planId = `hp_${randomUUID()}`;
+    const planDigest = sha256(Buffer.from(JSON.stringify({
+      documentId: id,
+      baseRevision,
+      preserveUnmentioned,
+      requirements,
+    }), 'utf8'));
+    let preservationBefore = new Map();
+    if (preserveUnmentioned) {
+      const allTargets = flattenEditableTargets(await session.targetMap());
+      preservationBefore = new Map(allTargets.map((target) => [target.id, semanticTargetEvidence(target)]));
+    }
     semanticPlanStore(record).set(planId, {
       id: planId,
+      planDigest,
       preparedRevision: baseRevision,
       entries,
       before: new Map([...inspectedById].map(([id, target]) => [id, semanticTargetView(target)])),
+      preservationBefore,
+      preserveUnmentioned,
       status: 'prepared',
       createdAt: Date.now(),
     });
@@ -2173,6 +2410,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       ok: true,
       documentId: id,
       planId,
+      planDigest,
       revision: baseRevision,
       requirementCount: entries.length,
       requirements: entries.map((entry) => ({ id: entry.requirement.id, action: entry.requirement.action, targetId: entry.requirement.targetId })),
@@ -2195,26 +2433,39 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     const receipt = plan.entries.map((entry) => {
       const targetId = entry.requirement.targetId;
       const after = inspectedAfter.get(targetId);
+      const before = plan.before.get(targetId);
       return {
         requirementId: entry.requirement.id,
         action: entry.requirement.action,
         targetId,
-        before: plan.before.get(targetId),
+        before,
         after: semanticTargetView(after),
-        postcondition: semanticPostcondition(entry, after),
+        postcondition: semanticPostcondition(entry, before, after),
       };
     });
+    let preservation = { ok: true, checkedTargetCount: 0, changed: [], missingTargetIds: [], addedTargetIds: [] };
+    if (plan.preserveUnmentioned) {
+      const allTargets = flattenEditableTargets(await session.targetMap());
+      const afterById = new Map(allTargets.map((target) => [target.id, semanticTargetEvidence(target)]));
+      preservation = semanticPreservationReceipt(
+        plan.preservationBefore,
+        afterById,
+        new Set(plan.entries.map((entry) => entry.requirement.targetId)),
+      );
+    }
     plan.status = 'executed';
     plan.executedRevision = session.revision;
     plan.receipt = receipt;
+    plan.preservation = preservation;
     clearRecordPreconditions(record);
     sendJson(res, 200, {
-      ok: receipt.every((entry) => entry.postcondition.ok),
+      ok: receipt.every((entry) => entry.postcondition.ok) && preservation.ok,
       documentId: id,
       planId,
       revision: session.revision,
       commandResults: result.results,
       receipt,
+      preservation,
     });
     return true;
   }
@@ -2232,7 +2483,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       return {
         requirementId: entry.requirement.id,
         targetId: entry.requirement.targetId,
-        postcondition: semanticPostcondition(entry, after),
+        postcondition: semanticPostcondition(entry, plan.before.get(entry.requirement.targetId), after),
         after: semanticTargetView(after),
       };
     });
@@ -2248,16 +2499,21 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       allPagesNonBlank: renderedPages.length === pages.length && renderedPages.every((page) => page.nonBlank === true),
     };
     const semanticOk = receipt.every((entry) => entry.postcondition.ok);
+    const preservationOk = plan.preservation?.ok === true;
     const qualityOk = qualityAllowsFinalization(quality, 'hwpx');
-    recordPreconditions(record).qualityRevision = qualityOk ? baseRevision : null;
+    recordPreconditions(record).qualityRevision = semanticOk && preservationOk && qualityOk && visual.allPagesNonBlank
+      ? baseRevision
+      : null;
     plan.status = 'verified';
     plan.verification = { receipt, quality, visual };
     sendJson(res, 200, {
-      ok: semanticOk && qualityOk && visual.allPagesNonBlank,
+      ok: semanticOk && preservationOk && qualityOk && visual.allPagesNonBlank,
       documentId: id,
       planId,
+      planDigest: plan.planDigest,
       revision: baseRevision,
       semantic: { ok: semanticOk, receipt },
+      preservation: plan.preservation,
       quality: { ok: qualityOk, report: quality },
       visual,
     });
@@ -3428,7 +3684,12 @@ async function postLocalEditorApi(req, config, pathname, body) {
     payload = { ok: false, message: text || `Editor API returned HTTP ${response.status}.` };
   }
   if (!response.ok) {
-    throw new Error(payload?.message || `Editor API returned HTTP ${response.status}.`);
+    throw new EditorContractError(
+      payload?.code || 'editor_api_request_failed',
+      payload?.message || `Editor API returned HTTP ${response.status}.`,
+      response.status,
+      payload?.details,
+    );
   }
   return payload;
 }
@@ -3645,6 +3906,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       return postLocalEditorApi(req, config, `${prefix}/semantic/context`, {
         ...(args.kind !== undefined ? { kind: args.kind } : {}),
         ...(args.limit !== undefined ? { limit: args.limit } : {}),
+        ...(args.cursor ? { cursor: args.cursor } : {}),
       });
     }
 
@@ -3661,23 +3923,121 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         commands: args.commands,
       });
     }
-    if (name === 'editor_hwpx_prepare_plan') {
-      return postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
-        baseRevision,
-        requirements: args.requirements,
-      });
-    }
-    if (name === 'editor_hwpx_execute_plan') {
-      return postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
-        baseRevision,
-        planId: args.planId,
-      });
-    }
-    if (name === 'editor_hwpx_verify_plan') {
-      return postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
-        baseRevision,
-        planId: args.planId,
-      });
+    if (name === 'editor_hwpx_commit_plan') {
+      await pruneExpiredMcpArtifacts(config);
+      const artifactId = randomUUID();
+      const artifactPath = mcpArtifactPath(artifactId, 'hwpx');
+      try {
+        const prepared = await postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
+          baseRevision,
+          requirements: args.requirements,
+          preserveUnmentioned: args.preserveUnmentioned !== false,
+        });
+        const executed = await postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
+          baseRevision,
+          planId: prepared.planId,
+        });
+        if (executed.ok !== true) {
+          throw new EditorContractError(
+            executed.preservation?.ok === false ? 'semantic_preservation_failed' : 'semantic_postcondition_failed',
+            'The semantic plan did not satisfy every postcondition and preservation check.',
+            422,
+            { receipt: executed.receipt, preservation: executed.preservation },
+          );
+        }
+        const verified = await postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
+          baseRevision: executed.revision,
+          planId: prepared.planId,
+        });
+        if (verified.ok !== true) {
+          throw new EditorContractError(
+            'semantic_verification_failed',
+            'The semantic plan failed requirement, preservation, quality, or full-page render verification.',
+            422,
+            { verification: verified },
+          );
+        }
+        const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+          baseRevision: executed.revision,
+          filename: args.filename,
+          outputPath: artifactPath,
+        });
+        const savedBytes = await readFile(artifactPath);
+        const reopened = await postLocalEditorApi(req, config, '/v1/hwpx/documents/open', {
+          filename: args.filename,
+          source: { bytesBase64: savedBytes.toString('base64') },
+        });
+        let reopenReceipt;
+        try {
+          const reopenedPrefix = `/v1/hwpx/documents/${encodeURIComponent(reopened.documentId)}`;
+          const reopenedSummary = await postLocalEditorApi(
+            req,
+            config,
+            `${reopenedPrefix}/documents/read-json`,
+            { responseMode: MCP_BOUNDED_RESPONSE_MODE, view: 'summary' },
+          );
+          const reopenedQuality = await postLocalEditorApi(
+            req,
+            config,
+            `${reopenedPrefix}/quality/check`,
+            { baseRevision: reopened.revision },
+          );
+          const reopenPages = Array.from(
+            { length: Math.max(1, Number(reopenedSummary.pageCount || reopened.pageCount || 1)) },
+            (_value, index) => index + 1,
+          );
+          const reopenedRendered = await postLocalEditorApi(
+            req,
+            config,
+            `${reopenedPrefix}/pages/render-all`,
+            { pages: reopenPages },
+          );
+          const reopenedVisualOk = reopenedRendered.pages?.length === reopenPages.length
+            && reopenedRendered.pages.every((page) => page.nonBlank === true);
+          if (!qualityAllowsFinalization(reopenedQuality, 'hwpx') || !reopenedVisualOk) {
+            throw new EditorContractError(
+              'semantic_reopen_verification_failed',
+              'The saved HWPX did not pass quality and full-page rendering after reopen.',
+              422,
+            );
+          }
+          reopenReceipt = {
+            ok: true,
+            revision: reopened.revision,
+            pageCount: reopenPages.length,
+            renderedPages: reopenPages,
+            sha256: sha256(savedBytes),
+          };
+        } finally {
+          discardApiSessionState(state, reopened.documentId, { clearLock: false });
+        }
+        const { bytesRef: _serverLocalPath, ...publicSaved } = saved;
+        discardApiSessionState(state, documentId, { clearLock: false });
+        return {
+          ok: true,
+          status: 'completed',
+          documentId,
+          planId: prepared.planId,
+          planDigest: prepared.planDigest,
+          revision: executed.revision,
+          requirementCount: prepared.requirementCount,
+          receipt: executed.receipt,
+          preservation: executed.preservation,
+          quality: verified.quality,
+          visual: verified.visual,
+          reopen: reopenReceipt,
+          artifact: { ...publicSaved, artifactId },
+          artifactId,
+          sha256: publicSaved.sha256,
+          sessionClosed: true,
+        };
+      } catch (error) {
+        discardApiSessionState(state, documentId, { clearLock: false });
+        await unlink(artifactPath).catch((unlinkError) => {
+          if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+        });
+        throw error;
+      }
     }
     if (name === `${toolPrefix}_render_pages`) {
       const pages = Array.isArray(args.pages) && args.pages.length ? args.pages.map(Number) : [1];

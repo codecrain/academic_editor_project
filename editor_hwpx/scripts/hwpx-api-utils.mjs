@@ -229,6 +229,19 @@ function escapeXmlText(text) {
     .replaceAll('>', '&gt;');
 }
 
+function encodeHwpxInlineText(text, paragraphXml = '') {
+  const tab = String(paragraphXml).match(/<hp:tab\b[^>]*\/>/)?.[0]
+    ?? '<hp:tab width="3028" leader="0" type="1"/>';
+  return String(text ?? '')
+    .split(/(\r\n|\r|\n|\t)/)
+    .map((part) => {
+      if (part === '\r\n' || part === '\r' || part === '\n') return '<hp:lineBreak/>';
+      if (part === '\t') return tab;
+      return escapeXmlText(part);
+    })
+    .join('');
+}
+
 function normalizeTextList(value) {
   if (Array.isArray(value)) {
     return value.map((item) => String(item ?? '').trim()).filter(Boolean);
@@ -669,16 +682,28 @@ function buildEditableTargets(sections, tables) {
       .filter((paragraph) => !tableHostParagraphs.has(`${paragraph.section}:${paragraph.para}`))
       .map((paragraph) => ({
       id: paragraph.id,
+      kind: 'paragraph',
       location: { paragraph: { section: paragraph.section, number: paragraph.para } },
+      currentText: paragraph.text,
       textLength: paragraph.text.length,
       allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
       }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
       id: cell.id,
+      kind: 'cell',
       location: cell.location,
+      currentText: cell.text,
       textLength: cell.text.length,
-      capacity: cell.layout.capacity,
+      layout: cell.layout,
       styleFingerprint: cell.styleFingerprint,
+      table: { id: table.id, dims: table.dims },
+      cell: {
+        cellIndex: cell.cellIndex,
+        row: cell.row,
+        col: cell.col,
+        rowSpan: cell.rowSpan,
+        colSpan: cell.colSpan,
+      },
       allowedActions: cell.allowedActions,
     }))),
   };
@@ -1372,7 +1397,7 @@ function replaceCellTextXml(cellXml, text, options = {}) {
 }
 
 function replaceFirstInlineTextXml(xml, text) {
-  const escaped = escapeXmlText(String(text ?? '').split(/\r?\n/).join(' '));
+  const escaped = encodeHwpxInlineText(text, xml);
   let replaced = false;
   const withExistingTextRun = xml.replace(/<hp:t\b([^>]*)>([\s\S]*?)<\/hp:t>/, (match, attrs) => {
     replaced = true;
@@ -1388,9 +1413,8 @@ function replaceParagraphTextXml(paragraphXml, text, options = {}) {
   if (/<hp:tbl\b/.test(paragraphXml)) {
     return replaceParagraphTextPreservingControlsXml(paragraphXml, text);
   }
-  const oneLineText = String(text ?? '').split(/\r?\n/).join(' ');
   return applyParagraphStyleIdsXml(
-    replaceInlineParagraphTextXml(paragraphXml, oneLineText),
+    replaceInlineParagraphTextXml(paragraphXml, text),
     options.styleIds,
   );
 }
@@ -1449,7 +1473,7 @@ function insertParagraphTextAfterXml(paragraphXml, text, options = {}) {
 }
 
 function replaceInlineParagraphTextXml(paragraphXml, text) {
-  const escaped = escapeXmlText(text);
+  const escaped = encodeHwpxInlineText(text, paragraphXml);
   let replaced = false;
   const withExistingTextRuns = paragraphXml.replace(/<hp:t\b([^>]*)>([\s\S]*?)<\/hp:t>/g, (match, attrs) => {
     if (!replaced) {
@@ -1472,7 +1496,7 @@ function replaceInlineParagraphTextXml(paragraphXml, text) {
 }
 
 function replaceParagraphTextPreservingControlsXml(paragraphXml, text) {
-  const oneLineText = escapeXmlText(String(text ?? '').split(/\r?\n/).join(' '));
+  const oneLineText = encodeHwpxInlineText(text, paragraphXml);
   const controlStart = paragraphXml.search(/<hp:tbl\b/);
   const head = controlStart >= 0 ? paragraphXml.slice(0, controlStart) : paragraphXml;
   const tail = controlStart >= 0 ? paragraphXml.slice(controlStart) : '';
@@ -2403,6 +2427,7 @@ export class HwpxApiSession {
         },
         cell,
         style: cell.style,
+        styleFingerprint: cell.styleFingerprint ?? styleFingerprint(cell.style),
         layout: cell.layout,
         allowedActions: cell.allowedActions,
       };

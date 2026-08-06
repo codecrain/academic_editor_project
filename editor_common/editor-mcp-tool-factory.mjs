@@ -210,7 +210,7 @@ function createEditorMcpTools({
     },
     {
       name: `${prefix}_artifact_read`,
-      description: `Read a finalized ${label} artifact by opaque ID. Intended for the authenticated application server after user approval.`,
+      description: `Read a finalized ${label} artifact by opaque ID. Intended for the authenticated application server after final verification.`,
       inputSchema: objectSchema({
         artifactId: { type: 'string', pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' },
         expectedSha256: { type: 'string', pattern: '^[0-9a-f]{64}$' },

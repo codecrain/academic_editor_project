@@ -49,9 +49,7 @@ HWPX MCP tools:
 - `editor_hwpx_artifact_read`
 - `editor_hwpx_artifact_delete`
 - `editor_hwpx_semantic_context`
-- `editor_hwpx_prepare_plan`
-- `editor_hwpx_execute_plan`
-- `editor_hwpx_verify_plan`
+- `editor_hwpx_commit_plan`
 
 PDF MCP tools:
 
@@ -85,29 +83,30 @@ every apply against that catalog before the document session can mutate.
 
 Agents that edit ordinary text, paragraph style, or cell style should prefer the
 HWPX semantic-plan path instead of composing raw HWPX locations and command
-fields. The path is deliberately stateful and fail-closed:
+fields. The model-visible path has only two steps and no user-approval state:
 
-1. `editor_hwpx_semantic_context` returns bounded target IDs, visible text,
-   current style fingerprints, and layout facts. It does not expose raw command
-   coordinates.
-2. `editor_hwpx_prepare_plan` accepts typed requirements at the returned
-   revision. The gateway resolves target IDs, inspects both target and style
-   source itself, validates the operation, compiles the raw commands, and
-   returns an opaque `planId`.
-3. `editor_hwpx_execute_plan` executes exactly that prepared batch only at the
-   same revision. Its receipt contains target-level before/after evidence and
-   explicit semantic postcondition results.
-4. `editor_hwpx_verify_plan` independently re-inspects every changed target,
-   runs HWPX quality checks, and renders every current page. It returns the
-   semantic, structural, and nonblank-page gates separately. It is not an
-   artifact handoff; callers still save the quality-checked revision and verify
-   the returned artifact hash.
+1. `editor_hwpx_semantic_context` returns one revision-bound page of target
+   IDs, visible text, current style fingerprints, layout facts, and table-cell
+   row/column coordinates. Follow its
+   opaque `nextCursor` unchanged until it is null; it does not expose raw
+   command coordinates.
+2. `editor_hwpx_commit_plan` accepts the complete typed requirement list at the
+   returned revision. The gateway resolves and inspects targets, rejects no-ops,
+   applies one atomic batch, verifies every requirement, confirms that all
+   unmentioned targets are unchanged, runs quality and full-page rendering,
+   saves the HWPX, reopens the saved bytes, reruns quality and full rendering,
+   and returns one opaque artifact receipt. Any failure discards the session and
+   produces no successful artifact.
 
-The current typed requirements are `replace_text`, `copy_text_style`, and
-`copy_cell_style`. Structural, object, tracked-change, list, and page-layout
-edits remain available through the catalogued raw command contract until their
-own target-specific receipt semantics are implemented. Unsupported typed work
-must fail explicitly rather than silently fall back to raw commands.
+The current typed requirements are `replace_text`, `replace_joined_text`,
+`replace_fragment`, `copy_text_style`, and `copy_cell_style`. Joined replacement
+constructs newline- or tab-separated text from explicit parts. Fragment replacement requires one
+exact occurrence and preserves the rest of the target. Structural, object, tracked-change, list, and page-layout
+edits remain available to trusted internal callers through the catalogued raw
+command contract. The semantic path never falls back to those commands.
+Every typed requirement must produce a real target change: replacing a target
+with its current text, or copying an already-identical style, is rejected at
+plan preparation and cannot create a successful semantic receipt.
 
 The broker enforces exact revisions, command-specific inspection or object
 inventory preconditions, and a quality check before finalization or PDF
