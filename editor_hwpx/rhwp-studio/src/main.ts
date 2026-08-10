@@ -494,7 +494,13 @@ function setupEventListeners(): void {
 }
 
 /** 문서 초기화 공통 시퀀스 (loadFile, createNewDocument 양쪽에서 사용) */
-async function initializeDocument(docInfo: DocumentInfo, displayName: string): Promise<void> {
+type ValidationLoadMode = 'prompt' | 'auto-fix' | 'as-is';
+
+async function initializeDocument(
+  docInfo: DocumentInfo,
+  displayName: string,
+  validationMode: ValidationLoadMode = 'prompt',
+): Promise<void> {
   const msg = sbMessage();
   let normalizedDuringLoad = false;
   try {
@@ -526,7 +532,12 @@ async function initializeDocument(docInfo: DocumentInfo, displayName: string): P
       const report = wasm.getValidationWarnings();
       console.log(`[validation] ${report.count} warnings`, report.summary);
       if (report.count > 0) {
-        const choice = await showValidationModalIfNeeded(report);
+        // Embedded hosts cannot answer an in-editor modal while awaiting the
+        // postMessage response. Auto-fix that path so loadFile always settles
+        // and the modal overlay cannot block the application menus.
+        const choice = validationMode === 'prompt'
+          ? await showValidationModalIfNeeded(report)
+          : validationMode;
         console.log(`[validation] user choice: ${choice}`);
         if (choice === 'auto-fix') {
           const n = wasm.reflowLinesegs();
@@ -574,13 +585,18 @@ async function loadBytes(
   fileName: string,
   fileHandle: typeof wasm.currentFileHandle,
   startTime = performance.now(),
+  validationMode: ValidationLoadMode = 'prompt',
 ): Promise<void> {
   const docInfo = wasm.loadDocument(data, fileName);
   wasm.currentFileHandle = fileHandle;
   const elapsed = performance.now() - startTime;
   // initializeDocument 안에서 #177 validation 모달이 표시될 수 있음.
   // HWPX 토스트는 모달과의 이벤트 충돌을 피하기 위해 모달 닫힌 후 표시.
-  await initializeDocument(docInfo, `${fileName} — ${docInfo.pageCount}페이지 (${elapsed.toFixed(1)}ms)`);
+  await initializeDocument(
+    docInfo,
+    `${fileName} — ${docInfo.pageCount}페이지 (${elapsed.toFixed(1)}ms)`,
+    validationMode,
+  );
   notifyHwpxSaveModeIfNeeded();
 }
 
@@ -835,7 +851,7 @@ window.addEventListener('message', async (e) => {
         return;
       }
       const bytes = new Uint8Array(msg.data);
-      await loadBytes(bytes, msg.fileName || 'document.hwp', null);
+      await loadBytes(bytes, msg.fileName || 'document.hwp', null, performance.now(), 'auto-fix');
       if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id: msg.id, result: { pageCount: wasm.pageCount } }, { targetOrigin: e.origin });
     } catch (err: any) {
       if (e.origin && e.origin !== 'null') e.source?.postMessage({ type: 'rhwp-response', id: msg.id, error: err.message || String(err) }, { targetOrigin: e.origin });
@@ -864,7 +880,7 @@ window.addEventListener('message', async (e) => {
           break;
         }
         const bytes = new Uint8Array(params.data);
-        await loadBytes(bytes, params.fileName || 'document.hwp', null);
+        await loadBytes(bytes, params.fileName || 'document.hwp', null, performance.now(), 'auto-fix');
         reply({ pageCount: wasm.pageCount });
         break;
       }
