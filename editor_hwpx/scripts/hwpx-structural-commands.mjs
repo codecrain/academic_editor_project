@@ -994,7 +994,53 @@ function sniffImage(bytes, declaredMimeType, filePath) {
   return { extension, width, height };
 }
 
-function applyInsertImage(doc, command) {
+function inspectedPageImageBounds(doc, target) {
+  let page = null;
+  if (typeof doc?.getPageDef === 'function') {
+    try {
+      page = parseNativeObject(doc.getPageDef(target.sectionIndex), 'getPageDef');
+    } catch {
+      page = null;
+    }
+  }
+  const pageWidth = positiveInteger(page?.width) ?? 59528;
+  const pageHeight = positiveInteger(page?.height) ?? 84189;
+  const contentWidth = Math.max(
+    1,
+    pageWidth - Number(page?.marginLeft || 0) - Number(page?.marginRight || 0),
+  );
+  const contentHeight = Math.max(
+    1,
+    pageHeight - Number(page?.marginTop || 0) - Number(page?.marginBottom || 0),
+  );
+  return {
+    width: Math.max(1, Math.floor(contentWidth * 0.92)),
+    height: Math.max(1, Math.floor(contentHeight * 0.45)),
+  };
+}
+
+function fitImageDimensions(image, requestedWidth, requestedHeight, bounds) {
+  let width = requestedWidth;
+  let height = requestedHeight;
+  if (width === undefined && height === undefined) {
+    width = image.width * 75;
+    height = image.height * 75;
+  } else if (width === undefined) {
+    width = Math.round(Number(height) * image.width / image.height);
+  } else if (height === undefined) {
+    height = Math.round(Number(width) * image.height / image.width);
+  }
+  width = positiveInteger(width);
+  height = positiveInteger(height);
+  if (width === null || height === null) return null;
+  const scale = Math.min(1, bounds.width / width, bounds.height / height);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function applyInsertImage(doc, command, context) {
   const bytes = decodeImageBytes(command);
   const image = sniffImage(bytes, command.mimeType, command.filePath);
   if (command.caption !== undefined
@@ -1005,6 +1051,19 @@ function applyInsertImage(doc, command) {
     );
   }
   const target = resolveHwpxTextTarget(command, { offsetRequired: false });
+  const bounds = inspectedPageImageBounds(doc, target);
+  if (!bounds) {
+    throw structuralError('HWPX_IMAGE_BOUNDS_UNAVAILABLE', 'Image target geometry is unavailable.', { target });
+  }
+  const fitted = fitImageDimensions(image, command.width, command.height, bounds);
+  if (!fitted) {
+    throw structuralError(
+      'HWPX_IMAGE_DIMENSIONS_INVALID',
+      'Image width and height must be positive HWP-unit values.',
+      { width: command.width, height: command.height },
+    );
+  }
+  const insertPicture = requireMethod(doc, 'insertPicture');
   const requestedParagraphIndex = target.paragraphIndex + 1;
   if (nonNegativeInteger(requestedParagraphIndex) === null) {
     throw structuralError(
@@ -1013,27 +1072,7 @@ function applyInsertImage(doc, command) {
       { target },
     );
   }
-  let requestedWidth = command.width;
-  let requestedHeight = command.height;
-  if (requestedWidth === undefined && requestedHeight === undefined) {
-    requestedWidth = image.width * 75;
-    requestedHeight = image.height * 75;
-  } else if (requestedWidth === undefined) {
-    requestedWidth = Math.round(Number(requestedHeight) * image.width / image.height);
-  } else if (requestedHeight === undefined) {
-    requestedHeight = Math.round(Number(requestedWidth) * image.height / image.width);
-  }
-  const width = positiveInteger(requestedWidth);
-  const height = positiveInteger(requestedHeight);
-  if (width === null || height === null) {
-    throw structuralError(
-      'HWPX_IMAGE_DIMENSIONS_INVALID',
-      'Image width and height must be positive HWP-unit values.',
-      { width: command.width, height: command.height },
-    );
-  }
   const insertParagraph = requireMethod(doc, 'insertParagraph');
-  const insertPicture = requireMethod(doc, 'insertPicture');
   const insertText = command.caption === undefined ? null : requireMethod(doc, 'insertText');
   const paragraphNative = parseNativeResult(
     insertParagraph(target.sectionIndex, requestedParagraphIndex),
@@ -1047,8 +1086,8 @@ function applyInsertImage(doc, command) {
       0,
       '',
       new Uint8Array(bytes),
-      width,
-      height,
+      fitted.width,
+      fitted.height,
       image.width,
       image.height,
       image.extension,

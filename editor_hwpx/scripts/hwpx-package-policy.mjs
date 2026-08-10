@@ -9,7 +9,6 @@ export const STRUCTURAL_EXPORT_OPS = new Set([
   'appendParagraph',
   'table.create',
   'table.insertCaption',
-  'image.insertAfterParagraph',
   'defineStyle',
   'applyStyle',
   'setRunStyle',

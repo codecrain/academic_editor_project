@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -623,7 +624,7 @@ function readPackageObjects(inputBytes) {
           id: `pic_${pics.length}`,
           sectionFile: name,
           byteOffset: match.index,
-          binItemIDRef: firstMatch(match[0], /\bbinItemIDRef="([^"]+)"/, null),
+          binItemIDRef: firstMatch(match[0], /\bbinaryItemIDRef="([^"]+)"/, null),
           zOrder: firstMatch(match[0], /\bzOrder="([^"]+)"/, null),
         });
       }
@@ -631,7 +632,11 @@ function readPackageObjects(inputBytes) {
     });
     return {
       images: names.filter((name) => /^BinData\/.+\.(bmp|gif|jpg|jpeg|png|wmf|emf)$/i.test(name))
-        .map((name) => ({ name, byteLength: entries.get(name)?.length ?? 0 })),
+        .map((name) => ({
+          name,
+          byteLength: entries.get(name)?.length ?? 0,
+          sha256: createHash('sha256').update(entries.get(name) ?? Buffer.alloc(0)).digest('hex'),
+        })),
       pictures,
       charts: sectionXml.flatMap(({ name, xml }) => [...xml.matchAll(/<hp:chart\b[\s\S]*?<\/hp:chart>/g)]
         .map((match, index) => ({ id: `chart_${index}`, sectionFile: name, byteOffset: match.index }))),
@@ -731,6 +736,7 @@ function buildEditableTargets(sections, tables) {
         col: cell.col,
         rowSpan: cell.rowSpan,
         colSpan: cell.colSpan,
+        pictureCount: Number(cell.pictureCount || 0),
       },
       allowedActions: cell.allowedActions,
     }))),
@@ -1598,6 +1604,8 @@ function patchSectionXml(
   tableSizePatches = [],
   cellSizePatches = [],
   pictureClonePatches = [],
+  pictureInsertPatches = [],
+  pictureReferencePatches = [],
   shapePatches = [],
   textBoxPatches = [],
 ) {
@@ -1610,6 +1618,8 @@ function patchSectionXml(
   const sectionTableSizePatches = tableSizePatches.filter((patch) => patch.section === sectionIndex);
   const sectionCellSizePatches = cellSizePatches.filter((patch) => patch.section === sectionIndex);
   const sectionPictureClonePatches = pictureClonePatches.filter((patch) => patch.section === sectionIndex);
+  const sectionPictureInsertPatches = pictureInsertPatches.filter((patch) => patch.section === sectionIndex);
+  const sectionPictureReferencePatches = pictureReferencePatches.filter((patch) => patch.section === sectionIndex);
   const sectionShapePatches = shapePatches.filter((patch) => patch.section === sectionIndex);
   const sectionTextBoxPatches = textBoxPatches.filter((patch) => patch.section === sectionIndex);
 
@@ -1738,6 +1748,10 @@ function patchSectionXml(
     }
   }
 
+  for (const patch of sectionPictureReferencePatches) {
+    next = retargetCellPictureReferenceXml(next, patch);
+  }
+
   if (sectionParagraphPatches.length) {
     const uniqueParagraphPatches = [...new Map(sectionParagraphPatches.map((patch) => [`${patch.section}:${patch.para}`, patch])).values()];
     const bodyParagraphs = findTopLevelParagraphs(next);
@@ -1789,6 +1803,16 @@ function patchSectionXml(
     }
   }
 
+  if (sectionPictureInsertPatches.length) {
+    for (const patch of [...sectionPictureInsertPatches].sort((a, b) => b.para - a.para)) {
+      const paragraphs = findTopLevelParagraphs(next);
+      const paragraph = paragraphs[patch.para];
+      if (!paragraph) throw new Error(`paragraph XML index not found for picture insert: ${patch.para}`);
+      const inserted = insertPictureAfterParagraphXml(paragraph.xml, next, patch);
+      next = `${next.slice(0, paragraph.start)}${inserted}${next.slice(paragraph.end)}`;
+    }
+  }
+
   return next;
 }
 
@@ -1810,8 +1834,7 @@ function sectionPageBodyHeight(sectionXml) {
   return Number.isFinite(bodyHeight) && bodyHeight > 0 ? bodyHeight : undefined;
 }
 
-function extractCellXmlFromPackage(inputBytes, table, cellIndex) {
-  const entries = readZip(inputBytes);
+function extractTableXmlFromPackageEntries(entries, table) {
   const sectionName = `Contents/section${table.section}.xml`;
   const sectionXml = entries.get(sectionName)?.toString('utf8');
   assert.ok(sectionXml, `${sectionName} not found`);
@@ -1821,9 +1844,209 @@ function extractCellXmlFromPackage(inputBytes, table, cellIndex) {
     ? findAllBlocks(paragraph.xml, 'tbl').find((block, ordinal) => packageTableId(table.section, table.para, block.xml, ordinal) === table.id)
     : findBlocks(paragraph.xml, 'tbl')[table.tableOrderInParagraph];
   assert.ok(tableXml, `table XML index not found: ${table.id}`);
-  const cellXml = findBlocks(tableXml.xml, 'tc')[cellIndex];
+  return tableXml.xml;
+}
+
+function extractCellXmlFromPackage(inputBytes, table, cellIndex, packageEntries = null) {
+  const entries = packageEntries ?? readZip(inputBytes);
+  const tableXml = extractTableXmlFromPackageEntries(entries, table);
+  const cellXml = findBlocks(tableXml, 'tc')[cellIndex];
   assert.ok(cellXml, `cell XML index not found: ${table.id} cell ${cellIndex}`);
   return cellXml.xml;
+}
+
+function annotateTablePictureSlots(inputBytes, tables) {
+  const entries = readZip(inputBytes);
+  for (const table of tables) {
+    try {
+      const tableXml = extractTableXmlFromPackageEntries(entries, table);
+      const cellBlocks = findBlocks(tableXml, 'tc');
+      for (const cell of table.cells) {
+        const pictureCount = cellBlocks[cell.cellIndex]
+          ? findAllBlocks(cellBlocks[cell.cellIndex].xml, 'pic').length
+          : 0;
+        cell.pictureCount = pictureCount;
+        if (pictureCount > 0 && !cell.allowedActions.includes('image.replaceInCell')) {
+          cell.allowedActions.push('image.replaceInCell');
+        }
+      }
+    } catch {
+      for (const cell of table.cells) cell.pictureCount = 0;
+    }
+  }
+  return tables;
+}
+
+function imagePackageFormat(bytes, declaredMimeType) {
+  const mime = String(declaredMimeType ?? '').toLowerCase();
+  let extension = null;
+  if (bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) extension = 'png';
+  else if (bytes[0] === 0xFF && bytes[1] === 0xD8) extension = 'jpg';
+  else if (bytes.subarray(0, 3).toString('ascii') === 'GIF') extension = 'gif';
+  else if (bytes.subarray(0, 2).toString('ascii') === 'BM') extension = 'bmp';
+  assert.ok(extension, 'image.replaceInCell supports PNG, JPEG, GIF, and BMP bytes');
+  const expectedMime = extension === 'jpg' ? 'image/jpeg' : `image/${extension}`;
+  if (mime) {
+    const normalized = mime === 'image/jpg' ? 'image/jpeg' : mime;
+    assert.equal(normalized, expectedMime, 'image.replaceInCell MIME type must match the binary signature');
+  }
+  return { extension, mediaType: expectedMime };
+}
+
+function imagePixelDimensions(bytes, extension) {
+  let width;
+  let height;
+  if (extension === 'png' && bytes.length >= 24) {
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else if (extension === 'gif' && bytes.length >= 10) {
+    width = bytes.readUInt16LE(6);
+    height = bytes.readUInt16LE(8);
+  } else if (extension === 'bmp' && bytes.length >= 26) {
+    width = Math.abs(bytes.readInt32LE(18));
+    height = Math.abs(bytes.readInt32LE(22));
+  } else if (extension === 'jpg') {
+    let offset = 2;
+    while (offset + 9 < bytes.length) {
+      if (bytes[offset] !== 0xFF) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      const length = bytes.readUInt16BE(offset + 2);
+      if (length < 2 || offset + 2 + length > bytes.length) break;
+      if ([0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+        0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF].includes(marker)) {
+        height = bytes.readUInt16BE(offset + 5);
+        width = bytes.readUInt16BE(offset + 7);
+        break;
+      }
+      offset += 2 + length;
+    }
+  }
+  assert.ok(Number.isInteger(width) && width > 0 && Number.isInteger(height) && height > 0,
+    'image.insertAfterParagraph could not read image dimensions');
+  return { width, height };
+}
+
+function fittedInlineImageSize(pixelWidth, pixelHeight, requestedWidth, requestedHeight) {
+  let width = Number(requestedWidth) || pixelWidth * 75;
+  let height = Number(requestedHeight) || pixelHeight * 75;
+  if (requestedWidth && !requestedHeight) height = width * pixelHeight / pixelWidth;
+  if (requestedHeight && !requestedWidth) width = height * pixelWidth / pixelHeight;
+  const scale = Math.min(1, 42000 / width, 28000 / height);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
+}
+
+function reservePackageImageSlot(inputBytes, pendingPatches, extension) {
+  const entries = readZip(inputBytes);
+  const manifest = entries.get('Contents/content.hpf')?.toString('utf8') ?? '';
+  const usedIds = new Set([
+    ...[...manifest.matchAll(/<opf:item\b[^>]*\bid="([^"]+)"/g)].map(match => match[1]),
+    ...pendingPatches.map(patch => patch.itemId).filter(Boolean),
+  ]);
+  let index = 1;
+  while (usedIds.has(`image${index}`)
+    || entries.has(`BinData/image${index}.${extension}`)
+    || pendingPatches.some(patch => patch.name === `BinData/image${index}.${extension}`)) {
+    index += 1;
+  }
+  return { itemId: `image${index}`, href: `BinData/image${index}.${extension}` };
+}
+
+function inlinePictureXml(sectionXml, patch) {
+  const pictureIds = [...sectionXml.matchAll(/<hp:pic\b[^>]*\bid="(\d+)"/g)].map(match => Number(match[1]));
+  const instanceIds = [...sectionXml.matchAll(/<hp:pic\b[^>]*\binstid="(\d+)"/g)].map(match => Number(match[1]));
+  const zOrders = [...sectionXml.matchAll(/<hp:pic\b[^>]*\bzOrder="(\d+)"/g)].map(match => Number(match[1]));
+  const pictureId = Math.max(0, ...pictureIds) + 1;
+  const instanceId = Math.max(0, ...instanceIds) + 1;
+  const zOrder = Math.max(-1, ...zOrders) + 1;
+  const sourceWidth = patch.pixelWidth * 75;
+  const sourceHeight = patch.pixelHeight * 75;
+  const scaleX = patch.width / sourceWidth;
+  const scaleY = patch.height / sourceHeight;
+  const comment = escapeXmlText(patch.altText || '첨부 이미지');
+  return `<hp:pic id="${pictureId}" zOrder="${zOrder}" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="${instanceId}" reverse="0"><hp:offset x="0" y="0"/><hp:orgSz width="${sourceWidth}" height="${sourceHeight}"/><hp:curSz width="${patch.width}" height="${patch.height}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="${Math.round(patch.width / 2)}" centerY="${Math.round(patch.height / 2)}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="${scaleX}" e2="0" e3="0" e4="0" e5="${scaleY}" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo><hc:img binaryItemIDRef="${patch.itemId}" bright="0" contrast="0" effect="REAL_PIC" alpha="0"/><hp:imgRect><hc:pt0 x="0" y="0"/><hc:pt1 x="${sourceWidth}" y="0"/><hc:pt2 x="${sourceWidth}" y="${sourceHeight}"/><hc:pt3 x="0" y="${sourceHeight}"/></hp:imgRect><hp:imgClip left="0" right="${sourceWidth}" top="0" bottom="${sourceHeight}"/><hp:inMargin left="0" right="0" top="0" bottom="0"/><hp:imgDim dimwidth="${sourceWidth}" dimheight="${sourceHeight}"/><hp:effects/><hp:sz width="${patch.width}" widthRelTo="ABSOLUTE" height="${patch.height}" heightRelTo="ABSOLUTE" protect="0"/><hp:pos treatAsChar="1" affectLSpacing="1" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="CENTER" vertOffset="0" horzOffset="0"/><hp:outMargin left="0" right="0" top="0" bottom="0"/><hp:shapeComment>${comment}</hp:shapeComment></hp:pic>`;
+}
+
+function insertPictureAfterParagraphXml(paragraphXml, sectionXml, patch) {
+  const template = paragraphTemplateFromXml(paragraphXml);
+  const sourceSegments = [...paragraphXml.matchAll(/<hp:lineseg\b[^>]*\/>/g)].map(match => match[0]);
+  const last = sourceSegments.at(-1) ?? template.lineSeg;
+  const lastVertPos = Number(firstMatch(last, /\bvertpos="(\d+)"/, String(template.startVertPos)));
+  const lastVertSize = Number(firstMatch(last, /\bvertsize="(\d+)"/, String(template.vertSize)));
+  const lastSpacing = Number(firstMatch(last, /\bspacing="(\d+)"/, String(template.spacing)));
+  const pageBodyHeight = sectionPageBodyHeight(sectionXml);
+  let vertPos = lastVertPos + lastVertSize + lastSpacing;
+  let pOpen = template.pOpen;
+  if (pageBodyHeight > 0 && vertPos + patch.height > pageBodyHeight) {
+    pOpen = setXmlAttribute(pOpen, 'pageBreak', 1);
+    vertPos = 0;
+  }
+  const lineSeg = buildLineSeg(template, 0, vertPos)
+    .replace(/\bvertsize="[^"]*"/, `vertsize="${patch.height}"`)
+    .replace(/\btextheight="[^"]*"/, `textheight="${patch.height}"`)
+    .replace(/\bbaseline="[^"]*"/, `baseline="${patch.height}"`)
+    .replace(/\bspacing="[^"]*"/, 'spacing="0"');
+  const picture = inlinePictureXml(sectionXml, patch);
+  const imageParagraph = `${pOpen}<hp:run charPrIDRef="${template.charPrIDRef}">${picture}</hp:run><hp:linesegarray>${lineSeg}</hp:linesegarray></hp:p>`;
+  if (!patch.caption) return `${paragraphXml}${imageParagraph}`;
+  const caption = buildParagraphXml(patch.caption, template, vertPos + patch.height + template.spacing).xml;
+  return `${paragraphXml}${imageParagraph}${caption}`;
+}
+
+function resolveCellPackageImage(inputBytes, table, cellIndex) {
+  const cellXml = extractCellXmlFromPackage(inputBytes, table, cellIndex);
+  const pictures = findAllBlocks(cellXml, 'pic');
+  assert.equal(
+    pictures.length,
+    1,
+    `image.replaceInCell requires exactly one existing picture in ${table.id} cell ${cellIndex}`,
+  );
+  const itemId = firstMatch(pictures[0].xml, /\bbinaryItemIDRef="([^"]+)"/, null);
+  assert.ok(itemId, 'image.replaceInCell target picture is missing binaryItemIDRef');
+  const entries = readZip(inputBytes);
+  const contentHpf = entries.get('Contents/content.hpf')?.toString('utf8') ?? '';
+  const escapedId = itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const itemTag = contentHpf.match(new RegExp(`<opf:item\\b[^>]*\\bid="${escapedId}"[^>]*/>`))?.[0];
+  assert.ok(itemTag, `image.replaceInCell package item not found: ${itemId}`);
+  const href = firstMatch(itemTag, /\bhref="([^"]+)"/, null);
+  assert.ok(href && entries.has(href), `image.replaceInCell package bytes not found: ${href}`);
+  const sectionReferences = [...entries.entries()]
+    .filter(([name]) => /^Contents\/section\d+\.xml$/i.test(name))
+    .reduce((count, [, value]) => (
+      count + [...value.toString('utf8').matchAll(new RegExp(`\\bbinaryItemIDRef="${escapedId}"`, 'g'))].length
+    ), 0);
+  return { itemId, href, sectionReferences };
+}
+
+function retargetCellPictureReferenceXml(sectionXml, patch) {
+  const paragraphs = findTopLevelParagraphs(sectionXml);
+  const paragraph = paragraphs[patch.para];
+  assert.ok(paragraph, `paragraph XML index not found for picture retarget: ${patch.para}`);
+  const tables = patch.xmlTableId
+    ? findAllBlocks(paragraph.xml, 'tbl')
+    : findBlocks(paragraph.xml, 'tbl');
+  const table = patch.xmlTableId
+    ? tables.find((block, ordinal) => packageTableId(patch.section, patch.para, block.xml, ordinal) === patch.xmlTableId)
+    : tables[patch.tableOrderInParagraph];
+  assert.ok(table, `table XML index not found for picture retarget: ${patch.xmlTableId ?? patch.tableOrderInParagraph}`);
+  const cell = findBlocks(table.xml, 'tc')[patch.cellIndex];
+  assert.ok(cell, `cell XML index not found for picture retarget: ${patch.cellIndex}`);
+  const pictures = findAllBlocks(cell.xml, 'pic');
+  assert.equal(pictures.length, 1, 'image.replaceInCell requires exactly one existing picture in the target cell');
+  const picture = pictures[0];
+  const escapedOldId = patch.oldItemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`\\bbinaryItemIDRef="${escapedOldId}"`);
+  assert.match(picture.xml, pattern, `picture does not reference expected package item: ${patch.oldItemId}`);
+  const nextPictureXml = picture.xml.replace(pattern, `binaryItemIDRef="${patch.newItemId}"`);
+  const nextCellXml = `${cell.xml.slice(0, picture.start)}${nextPictureXml}${cell.xml.slice(picture.end)}`;
+  const start = paragraph.start + table.start + cell.start;
+  const end = paragraph.start + table.start + cell.end;
+  return `${sectionXml.slice(0, start)}${nextCellXml}${sectionXml.slice(end)}`;
 }
 
 function extractParagraphXmlFromPackage(inputBytes, location) {
@@ -2325,6 +2548,8 @@ export class HwpxApiSession {
     this.tableSizePatches = [];
     this.cellSizePatches = [];
     this.pictureClonePatches = [];
+    this.pictureInsertPatches = [];
+    this.pictureReferencePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -2348,7 +2573,7 @@ export class HwpxApiSession {
 
     const nativeTables = discoverTables(this.doc);
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
-    const tables = [...nativeTables, ...nestedTables];
+    const tables = annotateTablePictureSlots(this.inputBytes, [...nativeTables, ...nestedTables]);
     const styleGraph = readStyleGraph(this.doc);
     const objectGraph = readPackageObjects(this.inputBytes);
     const editableTargets = buildEditableTargets(sections, tables);
@@ -2790,6 +3015,36 @@ export class HwpxApiSession {
       }];
     }
 
+    if (key === 'imagereplaceincell') {
+      return [{
+        ...command,
+        opId,
+        op: 'image.replaceInCell',
+        target: command.target ?? command.location,
+        bytes: command.bytes,
+        bytesBase64: command.bytesBase64,
+        filePath: command.filePath,
+        mimeType: command.mimeType,
+      }];
+    }
+
+    if (key === 'imageinsertafterparagraph' || key === 'imageinsert' || key === 'objectinsertimage') {
+      return [{
+        ...command,
+        opId,
+        op: 'image.insertAfterParagraph',
+        target: command.target ?? command.location,
+        bytes: command.bytes,
+        bytesBase64: command.bytesBase64,
+        filePath: command.filePath,
+        mimeType: command.mimeType,
+        width: command.width,
+        height: command.height,
+        altText: command.altText,
+        caption: command.caption,
+      }];
+    }
+
     if (key === 'imagegenerateandreplace' || key === 'objectgenerateandreplace' || key === 'chartgenerateandreplace') {
       return [{
         ...command,
@@ -2924,6 +3179,8 @@ export class HwpxApiSession {
       this.tableSizePatches = [];
       this.cellSizePatches = [];
       this.pictureClonePatches = [];
+      this.pictureInsertPatches = [];
+      this.pictureReferencePatches = [];
       this.packagePatches = [];
       this.shapePatches = [];
       this.textBoxPatches = [];
@@ -2948,6 +3205,8 @@ export class HwpxApiSession {
     this.tableSizePatches = [];
     this.cellSizePatches = [];
     this.pictureClonePatches = [];
+    this.pictureInsertPatches = [];
+    this.pictureReferencePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -3025,6 +3284,8 @@ export class HwpxApiSession {
     this.tableSizePatches = [];
     this.cellSizePatches = [];
     this.pictureClonePatches = [];
+    this.pictureInsertPatches = [];
+    this.pictureReferencePatches = [];
     this.packagePatches = [];
     this.shapePatches = [];
     this.textBoxPatches = [];
@@ -3302,6 +3563,113 @@ export class HwpxApiSession {
         assert.ok(bytes && bytes.length > 0, 'image.replace requires bytes, bytesBase64, or filePath');
         this.packagePatches.push({ name: op.imageName, bytes: Buffer.from(bytes), opId: op.opId });
         results.push({ opId: op.opId, ok: true, target: op.imageName, action: 'image.replace', byteLength: bytes.length });
+      } else if (op.op === 'image.replaceInCell') {
+        const table = this.tableFromLocation(op.target);
+        const cell = this.cellFromLocation(table, op.target);
+        let bytes = op.bytes;
+        if (bytes && !Buffer.isBuffer(bytes)) {
+          bytes = Buffer.from(bytes);
+        } else if (!bytes && op.bytesBase64) {
+          bytes = Buffer.from(op.bytesBase64, 'base64');
+        } else if (!bytes && op.filePath) {
+          bytes = readFileSync(op.filePath);
+        }
+        assert.ok(bytes && bytes.length > 0, 'image.replaceInCell requires bytes, bytesBase64, or filePath');
+        const format = imagePackageFormat(bytes, op.mimeType);
+        const slot = resolveCellPackageImage(this.inputBytes, table, cell.cellIndex);
+        const imageSha256 = createHash('sha256').update(bytes).digest('hex');
+        let imageName;
+        if (slot.sectionReferences === 1) {
+          imageName = `BinData/${slot.itemId}.${format.extension}`;
+          this.packagePatches.push({
+            name: slot.href,
+            replacementName: imageName,
+            itemId: slot.itemId,
+            mediaType: format.mediaType,
+            bytes: Buffer.from(bytes),
+            opId: op.opId,
+          });
+        } else {
+          const replacementSlot = reservePackageImageSlot(
+            this.inputBytes,
+            this.packagePatches,
+            format.extension,
+          );
+          imageName = replacementSlot.href;
+          this.pictureReferencePatches.push({
+            section: table.section,
+            para: table.para,
+            tableOrderInParagraph: table.tableOrderInParagraph,
+            xmlTableId: table.packageOnly ? table.id : null,
+            cellIndex: cell.cellIndex,
+            oldItemId: slot.itemId,
+            newItemId: replacementSlot.itemId,
+            opId: op.opId,
+          });
+          this.packagePatches.push({
+            name: replacementSlot.href,
+            itemId: replacementSlot.itemId,
+            mediaType: format.mediaType,
+            bytes: Buffer.from(bytes),
+            create: true,
+            opId: op.opId,
+          });
+        }
+        results.push({
+          opId: op.opId,
+          ok: true,
+          target: cell.id,
+          action: 'image.replaceInCell',
+          imageName,
+          sha256: imageSha256,
+          byteLength: bytes.length,
+        });
+      } else if (op.op === 'image.insertAfterParagraph') {
+        const target = this.inspectTarget(op.target);
+        assert.equal(target.kind, 'paragraph', 'image.insertAfterParagraph requires a paragraph target');
+        let bytes = op.bytes;
+        if (bytes && !Buffer.isBuffer(bytes)) {
+          bytes = Buffer.from(bytes);
+        } else if (!bytes && op.bytesBase64) {
+          bytes = Buffer.from(op.bytesBase64, 'base64');
+        } else if (!bytes && op.filePath) {
+          bytes = readFileSync(op.filePath);
+        }
+        assert.ok(bytes && bytes.length > 0, 'image.insertAfterParagraph requires bytes, bytesBase64, or filePath');
+        const format = imagePackageFormat(bytes, op.mimeType);
+        const pixels = imagePixelDimensions(bytes, format.extension);
+        const size = fittedInlineImageSize(pixels.width, pixels.height, op.width, op.height);
+        const slot = reservePackageImageSlot(this.inputBytes, this.packagePatches, format.extension);
+        const imageSha256 = createHash('sha256').update(bytes).digest('hex');
+        this.pictureInsertPatches.push({
+          section: target.native.section,
+          para: target.native.paragraph,
+          itemId: slot.itemId,
+          pixelWidth: pixels.width,
+          pixelHeight: pixels.height,
+          width: size.width,
+          height: size.height,
+          altText: String(op.altText || ''),
+          caption: String(op.caption || ''),
+          opId: op.opId,
+        });
+        this.packagePatches.push({
+          name: slot.href,
+          itemId: slot.itemId,
+          mediaType: format.mediaType,
+          bytes: Buffer.from(bytes),
+          create: true,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          target: target.id,
+          action: 'image.insertAfterParagraph',
+          imageName: slot.href,
+          sha256: imageSha256,
+          byteLength: bytes.length,
+        });
       } else if (op.op === 'image.generateAndReplace') {
         assert.ok(op.imageName, 'image.generateAndReplace requires imageName');
         assert.match(op.imageName, /\.png$/i, 'image.generateAndReplace currently requires a PNG package entry');
@@ -3411,7 +3779,8 @@ export class HwpxApiSession {
         this.cellPatches.length + this.paragraphPatches.length
           + this.paragraphInsertPatches.length + this.paragraphDeletePatches.length
           + this.tableRowInsertPatches.length + this.tableSizePatches.length + this.cellSizePatches.length
-          + this.pictureClonePatches.length + this.packagePatches.length
+          + this.pictureClonePatches.length + this.pictureInsertPatches.length
+          + this.pictureReferencePatches.length + this.packagePatches.length
           + this.shapePatches.length + this.textBoxPatches.length,
         0,
         'tracked changes cannot share an unsafe save stage with other patch types',
@@ -3430,7 +3799,8 @@ export class HwpxApiSession {
     if (!this.cellPatches.length && !this.paragraphPatches.length
       && !this.paragraphInsertPatches.length && !this.paragraphDeletePatches.length
       && !this.tableRowInsertPatches.length && !this.tableSizePatches.length && !this.cellSizePatches.length
-      && !this.pictureClonePatches.length && !this.packagePatches.length
+      && !this.pictureClonePatches.length && !this.pictureInsertPatches.length
+      && !this.pictureReferencePatches.length && !this.packagePatches.length
       && !this.shapePatches.length && !this.textBoxPatches.length) {
       return {
         bytes: Buffer.from(this.inputBytes),
@@ -3449,6 +3819,8 @@ export class HwpxApiSession {
       ...this.tableSizePatches.map((patch) => patch.section),
       ...this.cellSizePatches.map((patch) => patch.section),
       ...this.pictureClonePatches.map((patch) => patch.section),
+      ...this.pictureInsertPatches.map((patch) => patch.section),
+      ...this.pictureReferencePatches.map((patch) => patch.section),
       ...this.shapePatches.map((patch) => patch.section),
       ...this.textBoxPatches.map((patch) => patch.section),
     ]);
@@ -3467,14 +3839,42 @@ export class HwpxApiSession {
         this.tableSizePatches,
         this.cellSizePatches,
         this.pictureClonePatches,
+        this.pictureInsertPatches,
+        this.pictureReferencePatches,
         this.shapePatches,
         this.textBoxPatches,
       );
       entries.set(sectionName, Buffer.from(nextSectionXml, 'utf8'));
     }
     for (const patch of this.packagePatches) {
-      assert.ok(entries.has(patch.name), `package entry not found: ${patch.name}`);
-      entries.set(patch.name, patch.bytes);
+      if (patch.create) {
+        assert.ok(!entries.has(patch.name), `package entry already exists: ${patch.name}`);
+        entries.set(patch.name, patch.bytes);
+        const manifestName = 'Contents/content.hpf';
+        const manifest = entries.get(manifestName)?.toString('utf8') ?? '';
+        assert.ok(manifest.includes('</opf:manifest>'), 'HWPX package manifest is missing');
+        const itemTag = `<opf:item id="${patch.itemId}" href="${patch.name}" media-type="${patch.mediaType}" isEmbeded="1"/>`;
+        entries.set(manifestName, Buffer.from(manifest.replace('</opf:manifest>', `${itemTag}</opf:manifest>`), 'utf8'));
+      } else if (patch.replacementName) {
+        assert.ok(entries.has(patch.name), `package entry not found: ${patch.name}`);
+        if (patch.replacementName !== patch.name) entries.delete(patch.name);
+        entries.set(patch.replacementName, patch.bytes);
+        const manifestName = 'Contents/content.hpf';
+        const manifest = entries.get(manifestName)?.toString('utf8') ?? '';
+        const escapedId = patch.itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const itemPattern = new RegExp(`<opf:item\\b[^>]*\\bid="${escapedId}"[^>]*/>`);
+        const itemTag = manifest.match(itemPattern)?.[0];
+        assert.ok(itemTag, `package item not found while saving: ${patch.itemId}`);
+        const nextItemTag = setXmlAttribute(
+          setXmlAttribute(itemTag, 'href', patch.replacementName),
+          'media-type',
+          patch.mediaType,
+        );
+        entries.set(manifestName, Buffer.from(manifest.replace(itemPattern, nextItemTag), 'utf8'));
+      } else {
+        assert.ok(entries.has(patch.name), `package entry not found: ${patch.name}`);
+        entries.set(patch.name, patch.bytes);
+      }
     }
     const saved = createZip([...entries.entries()]);
     const reopened = new HwpDocument(new Uint8Array(saved));

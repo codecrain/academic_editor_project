@@ -24,6 +24,7 @@ editor_hwpx_save_checkpoint
 editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 editor_hwpx_semantic_context
+editor_hwpx_apply_plan
 editor_hwpx_commit_plan
 ```
 
@@ -84,19 +85,38 @@ Inspect the target before mutation. The `apply` call uses `baseRevision`, not
 The complete batch succeeds or fails as one revision. A failed batch produces
 no partial mutation.
 
-## Semantic context and atomic commit
+## Semantic context, iterative apply, and atomic commit
 
 For ordinary text, paragraph-style, and cell-style editing, use the semantic
 path rather than constructing raw locations: `semantic_context` returns
 one revision-bound target page, including row/column coordinates for table cells,
-and an opaque `nextCursor` when more targets remain. `commit_plan` then validates
-and executes the complete requirement list
-as one atomic batch, verifies target-level postconditions, checks every
-unmentioned target for accidental changes, runs quality and full-page rendering,
-saves, reopens, and rerenders the saved bytes, and returns one artifact receipt.
-There is no user-approval state or raw-command fallback. The current actions are
-`replace_text`, `replace_joined_text`, `replace_fragment`, `select_checkbox`, `copy_text_style`, and `copy_cell_style`;
+and an opaque `nextCursor` when more targets remain. `apply_plan` validates and
+executes one bounded requirement list as an atomic batch, verifies target-level
+postconditions, checks unmentioned targets for accidental changes, runs quality
+and full-page rendering, and keeps the isolated session open. Re-read semantic
+context at the returned revision before another batch so old target IDs are never
+reused after a structural change. `commit_plan` remains the one-call variant that
+also saves, reopens, rerenders, and returns one artifact receipt. There is no
+user-approval state or raw-command fallback. The current actions are
+`replace_text`, `replace_joined_text`, `replace_fragment`, `select_checkbox`, `insert_image_after`, `copy_text_style`, and `copy_cell_style`;
 fragment replacement requires one exact occurrence, and no-ops are rejected.
+
+```json
+{
+  "name": "editor_hwpx_apply_plan",
+  "arguments": {
+    "documentId": "doc_...",
+    "baseRevision": 1,
+    "requirements": [{
+      "id": "replace-title",
+      "statement": "제목을 변경한다.",
+      "action": "replace_text",
+      "targetId": "s0_p4",
+      "text": "2026년도 업무 추진계획"
+    }]
+  }
+}
+```
 
 ```json
 {

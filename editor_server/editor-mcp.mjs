@@ -63,6 +63,12 @@ const HWPX_SEMANTIC_REQUIREMENT_SCHEMA = Object.freeze({
     hwpxRequirementVariant('select_checkbox', {
       optionText: { type: 'string', minLength: 1, maxLength: 1000 },
     }, ['optionText']),
+    hwpxRequirementVariant('insert_image_after', {
+      bytesBase64: { type: 'string', minLength: 4 },
+      mimeType: { type: 'string', enum: ['image/png', 'image/jpeg', 'image/gif', 'image/bmp'] },
+      caption: { type: 'string', minLength: 1, maxLength: 1000 },
+      altText: { type: 'string', minLength: 1, maxLength: 1000 },
+    }, ['bytesBase64', 'mimeType']),
     hwpxRequirementVariant('copy_text_style', {
       sourceTargetId: { type: 'string', minLength: 1, maxLength: 256 },
     }, ['sourceTargetId']),
@@ -91,6 +97,21 @@ const HWPX_MCP_TOOLS = Object.freeze([...createEditorMcpTools({
     },
   },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+}, {
+  name: 'editor_hwpx_apply_plan',
+  description: 'Validate and atomically apply one bounded typed HWPX edit batch without closing the session. Returns current-revision receipts, preservation, quality, and full-page render evidence so the calling editor agent can re-read and decide whether another batch is needed.',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'baseRevision', 'requirements'],
+    properties: {
+      documentId: { type: 'string', minLength: 1 },
+      baseRevision: { type: 'integer', minimum: 1 },
+      requirements: { type: 'array', minItems: 1, maxItems: 40, items: HWPX_SEMANTIC_REQUIREMENT_SCHEMA },
+      preserveUnmentioned: { type: 'boolean' },
+    },
+  },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 }, {
   name: 'editor_hwpx_commit_plan',
   description: 'Validate, atomically execute, preserve-check, quality-check, render, and finalize one complete typed HWPX plan. Every user requirement must be represented once. Any failure discards the isolated session and produces no artifact.',

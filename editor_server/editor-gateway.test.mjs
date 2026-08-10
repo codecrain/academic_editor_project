@@ -373,6 +373,7 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
       'editor_hwpx_semantic_context',
+      'editor_hwpx_apply_plan',
       'editor_hwpx_commit_plan',
       'editor_pdf_open',
       'editor_pdf_discard',
@@ -2059,6 +2060,31 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(semanticVerified.ok, true, JSON.stringify(semanticVerified));
     assert.equal(semanticVerified.visual.allPagesNonBlank, true);
 
+    const imagePrepared = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
+      baseRevision: semanticExecuted.revision,
+      requirements: [{
+        id: 'insert-evidence-image',
+        statement: 'Insert one authenticated evidence image with a caption.',
+        action: 'insert_image_after',
+        targetId: semanticTarget.targetId,
+        bytesBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=',
+        mimeType: 'image/png',
+        caption: 'Figure 1. Verified evidence image',
+        altText: 'A one-pixel semantic image fixture.',
+      }],
+    });
+    const imageExecuted = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/execute`, {
+      baseRevision: imagePrepared.revision,
+      planId: imagePrepared.planId,
+    });
+    assert.equal(imageExecuted.ok, true, JSON.stringify(imageExecuted));
+    assert.equal(imageExecuted.receipt[0].postcondition.ok, true);
+    const imageVerified = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/verify`, {
+      baseRevision: imageExecuted.revision,
+      planId: imagePrepared.planId,
+    });
+    assert.equal(imageVerified.ok, true, JSON.stringify(imageVerified));
+
     const docxOpened = await post('/v1/docx/documents/open', {
       source: { bytesBase64: createDocxBytes({ paragraphs: ['DOCX isolation fixture'] }).toString('base64') },
       filename: 'isolation.docx',
@@ -2099,13 +2125,13 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     const uninspectedApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...commandPayload, baseRevision: semanticExecuted.revision }),
+      body: JSON.stringify({ ...commandPayload, baseRevision: imageExecuted.revision }),
     });
     assert.equal(uninspectedApply.status, 409);
     assert.equal((await uninspectedApply.json()).code, 'inspection_required');
 
     for (const [fmt, documentId, prematurePath, baseRevision] of [
-      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx'), semanticExecuted.revision],
+      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx'), imageExecuted.revision],
       ['docx', docxOpened.documentId, path.join(tempRoot, 'premature.docx'), 1],
     ]) {
       const prematureSave = await fetch(`${origin}/v1/${fmt}/documents/${documentId}/documents/save-source`, {
@@ -2126,9 +2152,9 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
 
     const command = await post(`/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
       ...commandPayload,
-      baseRevision: semanticExecuted.revision,
+      baseRevision: imageExecuted.revision,
     });
-    assert.equal(command.revision, semanticExecuted.revision + 1);
+    assert.equal(command.revision, imageExecuted.revision + 1);
 
     const quality = await post(`/v1/hwpx/documents/${opened.documentId}/quality/check`, { baseRevision: command.revision });
     assert.equal(quality.ok, true);
@@ -2231,6 +2257,49 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
       assert.equal(Number.isInteger(semanticCell.cell?.column), true);
       assert.equal(Number.isInteger(semanticCell.cell?.index), true);
     }
+    const semanticOpenedCall = await mcp(210, 'editor_hwpx_open', {
+      filename: 'semantic-apply.hwpx',
+      bytesBase64: sourceBytes.toString('base64'),
+    });
+    const semanticOpened = semanticOpenedCall.result.structuredContent;
+    const semanticApplyContext = await mcp(211, 'editor_hwpx_semantic_context', {
+      documentId: semanticOpened.documentId,
+      kind: 'paragraph',
+      limit: 20,
+    });
+    const semanticTarget = semanticApplyContext.result.structuredContent.targets.find(
+      (target) => target.kind === 'paragraph' && target.text,
+    );
+    assert.ok(semanticTarget);
+    const applyPlanCall = await mcp(212, 'editor_hwpx_apply_plan', {
+      documentId: semanticOpened.documentId,
+      baseRevision: semanticOpened.revision,
+      requirements: [{
+        id: 'replace-first-paragraph',
+        statement: '첫 문단을 수정한다.',
+        action: 'replace_text',
+        targetId: semanticTarget.targetId,
+        text: '반복 검토용 의미 편집',
+      }],
+      preserveUnmentioned: true,
+    });
+    assert.equal(applyPlanCall.result.isError, false, JSON.stringify(applyPlanCall.result.structuredContent));
+    const appliedPlan = applyPlanCall.result.structuredContent;
+    assert.equal(appliedPlan.status, 'review_required');
+    assert.equal(appliedPlan.sessionClosed, false);
+    assert.ok(appliedPlan.revision > semanticOpened.revision);
+    const reviewedContext = await mcp(213, 'editor_hwpx_semantic_context', {
+      documentId: semanticOpened.documentId,
+      kind: 'paragraph',
+      limit: 20,
+    });
+    assert.ok(reviewedContext.result.structuredContent.targets.some(
+      (target) => target.targetId === semanticTarget.targetId && target.text === '반복 검토용 의미 편집',
+    ));
+    await mcp(214, 'editor_hwpx_discard', {
+      documentId: semanticOpened.documentId,
+      baseRevision: appliedPlan.revision,
+    });
     const tableSource = await readFile(path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/public-form-template.hwpx'));
     const tableOpenedCall = await mcp(22, 'editor_hwpx_open', {
       filename: 'public-form-template.hwpx',

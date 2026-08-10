@@ -535,6 +535,34 @@ test('HWPX API text.insertAfterParagraph preserves package and reopens inserted 
   assert.ok(texts.includes('INSERTED DETAIL'));
 });
 
+test('HWPX API image.insertAfterParagraph uses the package-preserving path and retains source objects', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync(ESG_FIXTURE_PATH);
+  const session = new HwpxApiSession(input);
+  const before = session.objectInventory();
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+
+  session.commandsBatch([{
+    op: 'image.insertAfterParagraph',
+    target: { paragraph: { section: 0, number: 0 } },
+    bytes: png,
+    mimeType: 'image/png',
+    caption: '그림 1. 검증 이미지',
+  }]);
+
+  const saved = session.save();
+  const reopened = new HwpxApiSession(saved.bytes);
+  const after = reopened.objectInventory();
+  assert.ok(after.images.length >= before.images.length + 1);
+  assert.ok(after.pictures.length >= before.pictures.length + 1);
+  assert.ok(reopened.readJson().sections[0].paragraphs.some(paragraph => (
+    paragraph.text.includes('그림 1. 검증 이미지')
+  )));
+});
+
 test('HWPX API top-level paragraph replacement preserves public briefing pagination', async () => {
   await initHwpxRuntime();
   const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);

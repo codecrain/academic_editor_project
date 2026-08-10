@@ -63,7 +63,7 @@ test('command classification separates patch-safe and RHWP structural export ope
     { op: 'image.insert' },
   ]), {
     mode: 'structural-export',
-    reasons: ['insertText', 'image.insertAfterParagraph'],
+    reasons: ['insertText'],
   });
   const promoted = HWPX_COMMAND_CATALOG
     .filter(command => command.execution === 'structural-adapter')

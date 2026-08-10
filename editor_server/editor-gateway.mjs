@@ -1280,6 +1280,7 @@ function semanticTargetView(target) {
         column: target.cell.col,
         rowSpan: target.cell.rowSpan,
         colSpan: target.cell.colSpan,
+        pictureCount: Number(target.cell.pictureCount || 0),
       },
     } : {}),
   };
@@ -1344,6 +1345,10 @@ function semanticTargetEvidence(target) {
   };
 }
 
+function semanticStableTargetKey(target) {
+  return hwpxAdapter.stableTargetKey(target.location) || target.id;
+}
+
 function semanticPreservationReceipt(beforeById, afterById, editedTargetIds) {
   const changed = [];
   const missing = [];
@@ -1368,6 +1373,44 @@ function semanticPreservationReceipt(beforeById, afterById, editedTargetIds) {
     changed,
     missingTargetIds: missing,
     addedTargetIds: added,
+  };
+}
+
+function semanticEvidenceFingerprint(evidence) {
+  return JSON.stringify([evidence.kind, evidence.text, evidence.styleHash]);
+}
+
+function semanticStructuralPreservationReceipt(beforeTargets, afterTargets, maxAddedTargets, editedTargetIds = new Set()) {
+  const counts = (targets) => {
+    const result = new Map();
+    for (const target of targets) {
+      if (editedTargetIds.has(target.id)) continue;
+      const evidence = target.kind && Object.hasOwn(target, 'styleHash')
+        ? target
+        : semanticTargetEvidence(target);
+      const key = semanticEvidenceFingerprint(evidence);
+      result.set(key, (result.get(key) || 0) + 1);
+    }
+    return result;
+  };
+  const beforeCounts = counts(beforeTargets);
+  const afterCounts = counts(afterTargets);
+  const missing = [];
+  for (const [fingerprint, count] of beforeCounts) {
+    const actual = afterCounts.get(fingerprint) || 0;
+    if (actual < count) missing.push({ fingerprint, expectedCount: count, actualCount: actual });
+  }
+  const beforeCount = beforeTargets.filter((target) => !editedTargetIds.has(target.id)).length;
+  const afterCount = afterTargets.filter((target) => !editedTargetIds.has(target.id)).length;
+  const addedTargetCount = Math.max(0, afterCount - beforeCount);
+  return {
+    ok: missing.length === 0 && addedTargetCount <= maxAddedTargets,
+    checkedTargetCount: beforeCount,
+    changed: missing,
+    missingTargetIds: [],
+    addedTargetIds: [],
+    addedTargetCount,
+    maxAddedTargetCount: maxAddedTargets,
   };
 }
 
@@ -1404,7 +1447,7 @@ function normalizeSemanticRequirements(requirements) {
       throw new EditorContractError('invalid_semantic_plan', 'Each requirement needs a unique non-empty id.', 422);
     }
     ids.add(id);
-    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'select_checkbox', 'copy_text_style', 'copy_cell_style'].includes(action) || !targetId) {
+    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'select_checkbox', 'copy_text_style', 'copy_cell_style', 'insert_image_after'].includes(action) || !targetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} has an unsupported action or missing targetId.`, 422);
     }
     if (action === 'replace_text') {
@@ -1436,6 +1479,20 @@ function normalizeSemanticRequirements(requirements) {
         throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires non-empty optionText for select_checkbox.`, 422);
       }
       return { id, statement, action, targetId, optionText };
+    }
+    if (action === 'insert_image_after') {
+      const bytesBase64 = typeof requirement.bytesBase64 === 'string' ? requirement.bytesBase64.trim() : '';
+      const mimeType = typeof requirement.mimeType === 'string' ? requirement.mimeType.trim().toLowerCase() : '';
+      const caption = typeof requirement.caption === 'string' ? requirement.caption.trim() : '';
+      const altText = typeof requirement.altText === 'string' ? requirement.altText.trim() : '';
+      if (!bytesBase64 || !/^image\/(png|jpeg|gif|bmp)$/.test(mimeType)) {
+        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires authenticated image bytes and a supported MIME type.`, 422);
+      }
+      return {
+        id, statement, action, targetId, bytesBase64, mimeType,
+        ...(caption ? { caption } : {}),
+        ...(altText ? { altText } : {}),
+      };
     }
     if (!sourceTargetId) {
       throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires sourceTargetId for ${action}.`, 422);
@@ -1533,6 +1590,40 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
         expected: { checkboxOptionText: requirement.optionText },
       };
     }
+    if (requirement.action === 'insert_image_after') {
+      if (!['paragraph', 'cell'].includes(target.kind)) {
+        throw new EditorContractError(
+          'semantic_target_kind_mismatch',
+          `Requirement ${requirement.id} insert_image_after requires a paragraph or table-cell target.`,
+          422,
+        );
+      }
+      const expectedSha256 = sha256(Buffer.from(requirement.bytesBase64, 'base64'));
+      if (target.kind === 'cell') {
+        return {
+          requirement,
+          command: {
+            op: 'image.replaceInCell',
+            target: target.location,
+            bytesBase64: requirement.bytesBase64,
+            mimeType: requirement.mimeType,
+          },
+          expected: { replacedImage: true, expectedSha256 },
+        };
+      }
+      return {
+        requirement,
+        command: {
+          op: 'image.insertAfterParagraph',
+          target: target.location,
+          bytesBase64: requirement.bytesBase64,
+          mimeType: requirement.mimeType,
+          ...(requirement.caption ? { caption: requirement.caption } : {}),
+          ...(requirement.altText ? { altText: requirement.altText } : {}),
+        },
+        expected: { insertedImage: true, caption: requirement.caption || '' },
+      };
+    }
     const targetStyleHash = target.styleFingerprint?.hash;
     const sourceStyleHash = source.styleFingerprint?.hash;
     if (target.id === source.id || (targetStyleHash && sourceStyleHash && targetStyleHash === sourceStyleHash)) {
@@ -1565,7 +1656,37 @@ function compileHwpxSemanticRequirements(requirements, inspectedById) {
   });
 }
 
-function semanticPostcondition(entry, before, after) {
+function semanticPostcondition(entry, before, after, structuralEvidence = {}) {
+  if (entry.expected.replacedImage === true) {
+    const expectedSha256 = String(entry.expected.expectedSha256 || '');
+    const actualSha256 = String(structuralEvidence.sha256 || '');
+    return {
+      ok: Boolean(expectedSha256) && actualSha256 === expectedSha256,
+      expected: { sha256: expectedSha256 },
+      actual: {
+        imageName: structuralEvidence.imageName || null,
+        sha256: actualSha256 || null,
+      },
+      changed: Boolean(actualSha256) && actualSha256 === expectedSha256,
+    };
+  }
+  if (entry.expected.insertedImage === true) {
+    const imageCountIncreased = Number(structuralEvidence.imageCountAfter || 0)
+      > Number(structuralEvidence.imageCountBefore || 0);
+    const captionVisible = !entry.expected.caption
+      || Number(structuralEvidence.captionCountAfter || 0) > Number(structuralEvidence.captionCountBefore || 0);
+    return {
+      ok: imageCountIncreased && captionVisible,
+      expected: { imageCountIncreased: true, caption: entry.expected.caption || null },
+      actual: {
+        imageCountBefore: Number(structuralEvidence.imageCountBefore || 0),
+        imageCountAfter: Number(structuralEvidence.imageCountAfter || 0),
+        captionCountBefore: Number(structuralEvidence.captionCountBefore || 0),
+        captionCountAfter: Number(structuralEvidence.captionCountAfter || 0),
+      },
+      changed: imageCountIncreased,
+    };
+  }
   if (Object.hasOwn(entry.expected, 'checkboxOptionText')) {
     const optionText = entry.expected.checkboxOptionText;
     const optionIndex = after.currentText.indexOf(optionText);
@@ -2462,9 +2583,14 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       requirements,
     }), 'utf8'));
     let preservationBefore = new Map();
+    let imageCountBefore = 0;
     if (preserveUnmentioned) {
       const allTargets = flattenEditableTargets(await session.targetMap());
-      preservationBefore = new Map(allTargets.map((target) => [target.id, semanticTargetEvidence(target)]));
+      preservationBefore = new Map(allTargets.map((target) => [semanticStableTargetKey(target), semanticTargetEvidence(target)]));
+    }
+    if (entries.some((entry) => entry.expected.insertedImage === true)) {
+      const inventory = await session.objectInventory();
+      imageCountBefore = Number(inventory?.images?.length || inventory?.summary?.images || 0);
     }
     semanticPlanStore(record).set(planId, {
       id: planId,
@@ -2473,6 +2599,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       entries,
       before: new Map([...inspectedById].map(([id, target]) => [id, semanticTargetView(target)])),
       preservationBefore,
+      imageCountBefore,
       preserveUnmentioned,
       status: 'prepared',
       createdAt: Date.now(),
@@ -2498,32 +2625,101 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     if (plan.preparedRevision !== baseRevision) {
       throw new EditorContractError('semantic_plan_stale', `Plan ${planId} was prepared for revision ${plan.preparedRevision}, current revision is ${baseRevision}.`, 409);
     }
-    const result = await session.apply(plan.entries.map((entry) => entry.command));
-    const targetIds = plan.entries.map((entry) => entry.requirement.targetId);
-    const inspectedAfter = await inspectSemanticTargetIds(session, targetIds);
-    const receipt = plan.entries.map((entry) => {
-      const targetId = entry.requirement.targetId;
-      const after = inspectedAfter.get(targetId);
-      const before = plan.before.get(targetId);
-      return {
-        requirementId: entry.requirement.id,
-        action: entry.requirement.action,
-        targetId,
-        before,
-        after: semanticTargetView(after),
-        postcondition: semanticPostcondition(entry, before, after),
-      };
-    });
+    const isImageEntry = (entry) => entry.expected.insertedImage === true || entry.expected.replacedImage === true;
+    const regularEntries = plan.entries.filter((entry) => !isImageEntry(entry));
+    const structuralEntries = plan.entries
+      .filter(isImageEntry)
+      .sort((left, right) => {
+        const leftParagraph = left.command.target?.paragraph || {};
+        const rightParagraph = right.command.target?.paragraph || {};
+        return Number(rightParagraph.section || 0) - Number(leftParagraph.section || 0)
+          || Number(rightParagraph.number || 0) - Number(leftParagraph.number || 0);
+      });
+    const commandResults = [];
+    let regularReceipt = [];
+    let regularAfterTargets = flattenEditableTargets(await session.targetMap());
     let preservation = { ok: true, checkedTargetCount: 0, changed: [], missingTargetIds: [], addedTargetIds: [] };
-    if (plan.preserveUnmentioned) {
-      const allTargets = flattenEditableTargets(await session.targetMap());
-      const afterById = new Map(allTargets.map((target) => [target.id, semanticTargetEvidence(target)]));
-      preservation = semanticPreservationReceipt(
-        plan.preservationBefore,
-        afterById,
-        new Set(plan.entries.map((entry) => entry.requirement.targetId)),
-      );
+    if (regularEntries.length) {
+      const regularResult = await session.apply(regularEntries.map((entry) => entry.command));
+      commandResults.push(...(regularResult.results || []));
+      const regularLocations = regularEntries.map((entry) => entry.command.target || entry.command.location);
+      const inspectedRegularTargets = typeof session.inspectTargets === 'function'
+        ? await session.inspectTargets(regularLocations)
+        : regularLocations.map((location) => session.inspectTarget(location));
+      regularReceipt = regularEntries.map((entry, index) => {
+        const targetId = entry.requirement.targetId;
+        const after = inspectedRegularTargets[index];
+        const before = plan.before.get(targetId);
+        return {
+          requirementId: entry.requirement.id,
+          action: entry.requirement.action,
+          targetId,
+          before,
+          after: semanticTargetView(after),
+          postcondition: semanticPostcondition(entry, before, after),
+        };
+      });
+      regularAfterTargets = flattenEditableTargets(await session.targetMap());
+      if (plan.preserveUnmentioned) {
+        const afterById = new Map(regularAfterTargets.map((target) => [semanticStableTargetKey(target), semanticTargetEvidence(target)]));
+        preservation = semanticPreservationReceipt(
+          plan.preservationBefore,
+          afterById,
+          new Set(inspectedRegularTargets.map((target) => semanticStableTargetKey(target))),
+        );
+      }
     }
+    let structuralReceipt = [];
+    if (structuralEntries.length) {
+      const structuralResult = await session.apply(structuralEntries.map((entry) => entry.command));
+      commandResults.push(...(structuralResult.results || []));
+      const afterTargets = flattenEditableTargets(await session.targetMap());
+      const inventory = await session.objectInventory();
+      const imageCountAfter = Number(inventory?.images?.length || inventory?.summary?.images || 0);
+      structuralReceipt = structuralEntries.map((entry, index) => {
+        const caption = entry.expected.caption || '';
+        const countText = (targets, text) => targets.filter((target) => String(target.currentText || '') === text).length;
+        const structuralEvidence = {
+          imageCountBefore: plan.imageCountBefore,
+          imageCountAfter,
+          captionCountBefore: caption ? countText(regularAfterTargets, caption) : 0,
+          captionCountAfter: caption ? countText(afterTargets, caption) : 0,
+          imageName: structuralResult.results?.[index]?.imageName || null,
+          sha256: structuralResult.results?.[index]?.sha256 || null,
+        };
+        const before = plan.before.get(entry.requirement.targetId);
+        return {
+          requirementId: entry.requirement.id,
+          action: entry.requirement.action,
+          targetId: entry.requirement.targetId,
+          before,
+          after: before,
+          postcondition: semanticPostcondition(entry, before, before, structuralEvidence),
+        };
+      });
+      const structuralPreservation = plan.preserveUnmentioned
+        ? semanticStructuralPreservationReceipt(
+          regularAfterTargets,
+          afterTargets,
+          structuralEntries.length * 2,
+          new Set(structuralEntries.map((entry) => entry.requirement.targetId)),
+        )
+        : { ok: true, checkedTargetCount: 0, changed: [], missingTargetIds: [], addedTargetIds: [] };
+      preservation = {
+        ...structuralPreservation,
+        ok: preservation.ok && structuralPreservation.ok,
+        regular: preservation,
+        structural: structuralPreservation,
+      };
+      const insertedEntryCount = structuralEntries.filter((entry) => entry.expected.insertedImage === true).length;
+      if (imageCountAfter - plan.imageCountBefore < insertedEntryCount) {
+        for (const [index, item] of structuralReceipt.entries()) {
+          if (structuralEntries[index].expected.insertedImage === true) item.postcondition.ok = false;
+        }
+      }
+    }
+    const receiptById = new Map([...regularReceipt, ...structuralReceipt].map((entry) => [entry.requirementId, entry]));
+    const receipt = plan.entries.map((entry) => receiptById.get(entry.requirement.id));
     plan.status = 'executed';
     plan.executedRevision = session.revision;
     plan.receipt = receipt;
@@ -2534,7 +2730,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       documentId: id,
       planId,
       revision: session.revision,
-      commandResults: result.results,
+      commandResults,
       receipt,
       preservation,
     });
@@ -2547,17 +2743,56 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     if (!plan || plan.status !== 'executed' || plan.executedRevision !== baseRevision) {
       throw new EditorContractError('semantic_verification_unavailable', 'Plan has not been executed at this revision. Execute a current prepared plan first.', 409);
     }
-    const targetIds = plan.entries.map((entry) => entry.requirement.targetId);
-    const inspected = await inspectSemanticTargetIds(session, targetIds);
+    const currentTargets = flattenEditableTargets(await session.targetMap());
+    const inventory = await session.objectInventory();
+    const imageCountAfter = Number(inventory?.images?.length || inventory?.summary?.images || 0);
+    const priorReceiptById = new Map((plan.receipt || []).map((entry) => [entry.requirementId, entry]));
     const receipt = plan.entries.map((entry) => {
-      const after = inspected.get(entry.requirement.targetId);
+      const prior = priorReceiptById.get(entry.requirement.id);
+      if (entry.expected.insertedImage !== true && entry.expected.replacedImage !== true) {
+        return {
+          requirementId: entry.requirement.id,
+          targetId: entry.requirement.targetId,
+          postcondition: prior.postcondition,
+          after: prior.after,
+        };
+      }
+      if (entry.expected.replacedImage === true) {
+        const imageName = prior.postcondition.actual.imageName;
+        const image = (inventory?.images || []).find((item) => item.name === imageName);
+        const before = plan.before.get(entry.requirement.targetId);
+        return {
+          requirementId: entry.requirement.id,
+          targetId: entry.requirement.targetId,
+          postcondition: semanticPostcondition(entry, before, before, {
+            imageName,
+            sha256: image?.sha256 || null,
+          }),
+          after: prior.after,
+        };
+      }
+      const caption = entry.expected.caption || '';
+      const captionCountAfter = caption
+        ? currentTargets.filter((target) => String(target.currentText || '') === caption).length
+        : 0;
+      const before = plan.before.get(entry.requirement.targetId);
       return {
         requirementId: entry.requirement.id,
         targetId: entry.requirement.targetId,
-        postcondition: semanticPostcondition(entry, plan.before.get(entry.requirement.targetId), after),
-        after: semanticTargetView(after),
+        postcondition: semanticPostcondition(entry, before, before, {
+          imageCountBefore: plan.imageCountBefore,
+          imageCountAfter,
+          captionCountBefore: prior.postcondition.actual.captionCountBefore,
+          captionCountAfter,
+        }),
+        after: prior.after,
       };
     });
+    if (imageCountAfter - plan.imageCountBefore < plan.entries.filter((entry) => entry.expected.insertedImage === true).length) {
+      for (const item of receipt.filter((entry) => priorReceiptById.get(entry.requirementId)?.action === 'insert_image_after')) {
+        item.postcondition.ok = false;
+      }
+    }
     const quality = await session.qualityCheck({
       baselineJson: record.baselineJson,
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
@@ -3993,6 +4228,51 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         baseRevision,
         commands: args.commands,
       });
+    }
+    if (name === 'editor_hwpx_apply_plan') {
+      const prepared = await postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
+        baseRevision,
+        requirements: args.requirements,
+        preserveUnmentioned: args.preserveUnmentioned !== false,
+      });
+      const executed = await postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
+        baseRevision,
+        planId: prepared.planId,
+      });
+      if (executed.ok !== true) {
+        throw new EditorContractError(
+          executed.preservation?.ok === false ? 'semantic_preservation_failed' : 'semantic_postcondition_failed',
+          'The semantic edit batch did not satisfy every postcondition and preservation check.',
+          422,
+          { receipt: executed.receipt, preservation: executed.preservation },
+        );
+      }
+      const verified = await postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
+        baseRevision: executed.revision,
+        planId: prepared.planId,
+      });
+      if (verified.ok !== true) {
+        throw new EditorContractError(
+          'semantic_verification_failed',
+          'The semantic edit batch failed requirement, preservation, quality, or full-page render verification.',
+          422,
+          { verification: verified },
+        );
+      }
+      return {
+        ok: true,
+        status: 'review_required',
+        documentId,
+        planId: prepared.planId,
+        planDigest: prepared.planDigest,
+        revision: executed.revision,
+        requirementCount: prepared.requirementCount,
+        receipt: executed.receipt,
+        preservation: executed.preservation,
+        quality: verified.quality,
+        visual: verified.visual,
+        sessionClosed: false,
+      };
     }
     if (name === 'editor_hwpx_commit_plan') {
       await pruneExpiredMcpArtifacts(config);
