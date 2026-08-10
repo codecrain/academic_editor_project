@@ -3066,6 +3066,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     const rendered = fmt === 'hwpx'
       ? await (config.hwpxPdfRenderer || hwpxAdapter.renderPages)(sourceBytes, {
         pages: 'all',
+        command: config.hwpxPdfCommand,
         dockerImage: config.hwpxPdfDockerImage,
         timeoutMs: config.hwpxPdfTimeoutMs,
         tempRoot: config.hwpxPdfTempRoot,
@@ -4872,6 +4873,7 @@ function buildConfigFromEnv() {
     docxRenderOperationTimeoutSeconds: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_OPERATION_TIMEOUT_SECONDS', '180'), 180),
     docxRenderShutdownTimeoutSeconds: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_SHUTDOWN_TIMEOUT_SECONDS', '10'), 10),
     docxRenderMaxResultBytes: parsePositiveInteger(readEnv('EDITOR_DOCX_RENDER_MAX_RESULT_BYTES', String(64 * 1024 * 1024)), 64 * 1024 * 1024),
+    hwpxPdfCommand: readEnv('EDITOR_HWPX_PDF_COMMAND', ''),
     hwpxPdfDockerImage: readEnv('EDITOR_HWPX_PDF_DOCKER_IMAGE', 'academic-rhwp-pdf:latest'),
     hwpxPdfTimeoutMs: parsePositiveInteger(readEnv('EDITOR_HWPX_PDF_TIMEOUT_MS', '210000'), 210_000),
     hwpxPdfTempRoot: path.resolve(readEnv('EDITOR_HWPX_PDF_TEMP_ROOT', os.tmpdir())),

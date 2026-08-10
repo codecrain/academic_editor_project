@@ -128,6 +128,7 @@ function renderHwpxPdf(bytes, options = {}) {
 async function renderHwpxPdfAsync(sourceBytes, options) {
   const timeoutMs = Math.max(1, Number(options.timeoutMs ?? DEFAULT_TIMEOUT_MS));
   const tempRoot = path.resolve(options.tempRoot || os.tmpdir());
+  const command = String(options.command || '').trim();
   const dockerImage = String(options.dockerImage || DEFAULT_DOCKER_IMAGE);
   const runProcess = options.runProcess || runOwnedProcess;
   const containerName = `academic-hwpx-pdf-${randomUUID().replaceAll('-', '')}`;
@@ -138,14 +139,16 @@ async function renderHwpxPdfAsync(sourceBytes, options) {
 
   try {
     await writeFile(inputPath, sourceBytes);
-    const args = [
-      'run', '--rm', '--name', containerName,
-      '-v', `${requestDir}:/work`,
-      dockerImage,
-      'export-pdf', '/work/input.hwpx', '-o', '/work/output.pdf', '--json',
-    ];
+    const args = command
+      ? ['export-pdf', inputPath, '-o', outputPath, '--json']
+      : [
+        'run', '--rm', '--name', containerName,
+        '-v', `${requestDir}:/work`,
+        dockerImage,
+        'export-pdf', '/work/input.hwpx', '-o', '/work/output.pdf', '--json',
+      ];
     const completed = await awaitOwnedProcess(
-      runProcess('docker', args, { timeoutMs, requestDir, containerName }),
+      runProcess(command || 'docker', args, { timeoutMs, requestDir, containerName }),
       timeoutMs,
     );
     if (Number(completed?.code) !== 0) {
@@ -164,10 +167,12 @@ async function renderHwpxPdfAsync(sourceBytes, options) {
       renderer: 'rhwp-native',
     };
   } finally {
-    try {
-      await Promise.resolve(runProcess('docker', ['rm', '-f', containerName], { containerName, requestDir }));
-    } catch {
-      // --rm normally removed the request-owned container already.
+    if (!command) {
+      try {
+        await Promise.resolve(runProcess('docker', ['rm', '-f', containerName], { containerName, requestDir }));
+      } catch {
+        // --rm normally removed the request-owned container already.
+      }
     }
     await rm(requestDir, { recursive: true, force: true });
   }

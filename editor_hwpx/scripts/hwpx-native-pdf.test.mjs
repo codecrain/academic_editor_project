@@ -62,6 +62,29 @@ test('HWPX native PDF runner returns verified metadata from an isolated request'
   await access(tempRoot);
 });
 
+test('HWPX native PDF runner uses the configured in-image command without Docker', async (t) => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'hwpx-native-pdf-test-'));
+  t.after(() => rm(tempRoot, { recursive: true, force: true }));
+  const calls = [];
+
+  const result = await renderHwpxPdf(HWPX_BYTES, {
+    tempRoot,
+    command: '/usr/local/bin/rhwp',
+    runProcess: async (command, args, options) => {
+      calls.push({ command, args });
+      await writeFile(path.join(options.requestDir, 'output.pdf'), PDF_BYTES);
+      return { code: 0, stdout: JSON.stringify({ ok: true, pageCount: 1 }), stderr: '' };
+    },
+  });
+
+  assert.equal(result.pageCount, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, '/usr/local/bin/rhwp');
+  assert.equal(calls[0].args[0], 'export-pdf');
+  assert.equal(calls[0].args.at(-1), '--json');
+  assert.equal(calls.some(({ command }) => command === 'docker'), false);
+});
+
 test('HWPX native PDF runner rejects malformed PDF output and removes its request directory', async (t) => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'hwpx-native-pdf-test-'));
   t.after(() => rm(tempRoot, { recursive: true, force: true }));
