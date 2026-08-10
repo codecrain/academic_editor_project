@@ -2098,10 +2098,19 @@ elements.advancedConfirm.addEventListener('close', () => {
 });
 
 try {
+  // EmbedPDF defaults to a jsDelivr PDFium URL. Production runs in an air-gapped
+  // network, so resolve the vendored WASM beside this module instead.
+  const pdfiumWasmUrl = new URL('./vendor/embedpdf/pdfium.wasm', import.meta.url).href;
   const viewer = EmbedPDF.init({
     type: 'container',
     target: elements.pdfViewer,
     worker: true,
+    wasmUrl: pdfiumWasmUrl,
+    // EmbedPDF otherwise loads UI/signature fonts, PDF fallback fonts, and the
+    // default stamp manifest from public CDNs at runtime.
+    fonts: { ui: null, signature: null },
+    fontFallback: null,
+    stamp: { manifests: [] },
     // This editor is embedded by a host application. The host supplies documents
     // through the generic postMessage bridge, so EmbedPDF's local "Open document"
     // tab is intentionally not exposed.

@@ -19,6 +19,11 @@ test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   }
   assert.match(source, /import EmbedPDF from '\.\/vendor\/embedpdf\/embedpdf\.js'/);
   assert.match(source, /worker: true/);
+  assert.match(source, /new URL\('\.\/vendor\/embedpdf\/pdfium\.wasm', import\.meta\.url\)\.href/);
+  assert.match(source, /wasmUrl: pdfiumWasmUrl/);
+  assert.match(source, /fonts: \{ ui: null, signature: null \}/);
+  assert.match(source, /fontFallback: null/);
+  assert.match(source, /stamp: \{ manifests: \[\] \}/);
   assert.match(source, /annotations:/);
   assert.match(source, /enforceDocumentPermissions: true/);
   assert.match(source, /window\.academicPdfEditor/);

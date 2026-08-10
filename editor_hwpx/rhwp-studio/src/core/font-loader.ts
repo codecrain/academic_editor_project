@@ -9,7 +9,7 @@
 interface FontEntry {
   name: string;
   file: string;
-  /** woff2(기본) 또는 woff — CDN woff 파일용 */
+  /** woff2(기본) 또는 woff */
   format?: 'woff2' | 'woff';
   /** CSS unicode-range — 지정 시 해당 코드포인트만 매칭, 다운로드도 해당 영역 사용 시에만 발생 */
   unicodeRange?: string;
@@ -28,22 +28,22 @@ export function resolveFontAssetUrl(file: string, basePath = appBasePath()): str
   return `${normalizedBase}${file.replace(/^\/+/, '')}`;
 }
 
-// 함초롬체 CDN (눈누 jsdelivr — 비상업적 사용 허용, 한컴 라이선스)
-const CDN_HAMCHOB_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatang.woff';
-const CDN_HAMCHOB_B = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatangB.woff';
-const CDN_HAMCHOD_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_four@1.0/HCRDotum.woff';
+// 함초롬체는 폐쇄망 런타임을 위해 저장소에 고정한다.
+const HAMCHOB_R = 'fonts/HANBatang.woff';
+const HAMCHOB_B = 'fonts/HANBatangB.woff';
+const HAMCHOD_R = 'fonts/HCRDotum.woff';
 
 // 한컴 webhwp CSS(@font-face) 매핑 기준 + HWP 문서에서 사용하는 별칭
 const FONT_LIST: FontEntry[] = [
-  // === 함초롬/함초롱/한컴 폰트 (CDN 참조) ===
-  { name: '함초롬돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '함초롬바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '함초롱돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '함초롱바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '한컴돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '한컴바탕', file: CDN_HAMCHOB_R, format: 'woff' },
-  { name: '새돋움', file: CDN_HAMCHOD_R, format: 'woff' },
-  { name: '새바탕', file: CDN_HAMCHOB_R, format: 'woff' },
+  // === 함초롬/함초롱/한컴 폰트 (로컬 고정 자산) ===
+  { name: '함초롬돋움', file: HAMCHOD_R, format: 'woff' },
+  { name: '함초롬바탕', file: HAMCHOB_R, format: 'woff' },
+  { name: '함초롱돋움', file: HAMCHOD_R, format: 'woff' },
+  { name: '함초롱바탕', file: HAMCHOB_R, format: 'woff' },
+  { name: '한컴돋움', file: HAMCHOD_R, format: 'woff' },
+  { name: '한컴바탕', file: HAMCHOB_R, format: 'woff' },
+  { name: '새돋움', file: HAMCHOD_R, format: 'woff' },
+  { name: '새바탕', file: HAMCHOB_R, format: 'woff' },
   // === 한컴 HY 폰트 → 오픈소스 대체 ===
   { name: 'HY헤드라인M', file: 'fonts/NotoSansKR-Bold.woff2' },
   { name: 'HYHeadLine M', file: 'fonts/NotoSansKR-Bold.woff2' },
