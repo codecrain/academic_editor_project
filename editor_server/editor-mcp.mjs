@@ -9,6 +9,7 @@ import {
   HWPX_MCP_SAVE_MODES,
   HWPX_MCP_TOOL_NAMES,
 } from './hwpx-mcp-contract.mjs';
+import { HWPX_REVIEW_PROFILES } from './hwpx-review-profile.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -62,6 +63,17 @@ const HWPX_VISUAL_POLICY = {
     expectedBodyFont: { type: 'string', minLength: 1, maxLength: 128 },
     expectedBodyFontSizePt: { type: 'number', minimum: 0.1, maximum: 1000 },
     failOnStyleVariance: { type: 'boolean' },
+    failOnSmallText: { type: 'boolean' },
+    minFontSizePt: { type: 'number', minimum: 0.1, maximum: 1000 },
+    minRelativeVerticalOccupancy: { type: 'number', minimum: 0, maximum: 1 },
+    allowedSparsePages: {
+      type: 'array', maxItems: 120, uniqueItems: true,
+      items: { type: 'integer', minimum: 1 },
+    },
+    requireCenteredImages: { type: 'boolean' },
+    maxImageCenterOffsetRatio: { type: 'number', minimum: 0, maximum: 1 },
+    minCenteredImageWidthRatio: { type: 'number', minimum: 0, maximum: 1 },
+    minDominantBodyFontRatio: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
 const HWPX_EXPECTATIONS = {
@@ -75,6 +87,8 @@ const HWPX_EXPECTATIONS = {
     minCharacters: { type: 'integer', minimum: 0 },
     minTables: { type: 'integer', minimum: 0 },
     tableCount: { type: 'integer', minimum: 0 },
+    minParagraphs: { type: 'integer', minimum: 0 },
+    minPictures: { type: 'integer', minimum: 0 },
     sourceFormat: { type: 'string', enum: ['hwp', 'hwpx'] },
     contains: { type: 'array', maxItems: 50, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 1000 } },
     notContains: { type: 'array', maxItems: 50, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 1000 } },
@@ -89,6 +103,23 @@ const HWPX_EXPECTATIONS = {
         },
       },
     },
+  },
+};
+const HWPX_REFERENCE_COMPARISON = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  required: ['referenceTemplateDocumentId', 'referenceFinalDocumentId', 'targetTemplateDocumentId'],
+  description: 'Optional four-document transformation comparison. The current document is the candidate; the three referenced sessions must remain open through verified save.',
+  properties: {
+    referenceTemplateDocumentId: HWPX_DOCUMENT_ID,
+    referenceFinalDocumentId: HWPX_DOCUMENT_ID,
+    targetTemplateDocumentId: HWPX_DOCUMENT_ID,
+    minPageGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
+    minTextGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
+    minParagraphGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
+    minTableGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
+    minPictureCountFactor: { type: 'number', minimum: 0, maximum: 10 },
+    maxMedianOccupancyGap: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
 const HWPX_SECURITY_POLICY = {
@@ -135,7 +166,7 @@ const HWPX_MCP_TOOLS = Object.freeze([
       tableId: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
       page: { type: ['integer', 'null'], minimum: 1 },
       includeSvg: { type: 'boolean', default: false },
-      profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' },
+      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' },
       visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
@@ -213,10 +244,11 @@ const HWPX_MCP_TOOLS = Object.freeze([
       pages: { type: ['array', 'null'], minItems: 1, maxItems: 120, uniqueItems: true, items: { type: 'integer', minimum: 1 } },
       includeBaseline: { type: 'boolean', default: false },
       includeSvg: { type: 'boolean', default: false, description: 'Inline SVG is opt-in; the default returns bounded render metrics and SVG hashes.' },
-      profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural', description: 'submission additionally fails unresolved placeholders, dummy identifiers, required blanks, explicit instruction remnants, and risky floating-image flow.' },
+      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural', description: 'submission adds semantic readiness gates; public-proposal additionally enforces proposal typography, pagination, images, instructions, unavailable data, and real execution objects.' },
       visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
+      referenceComparison: HWPX_REFERENCE_COMPARISON,
     }, ['documentId', 'baseRevision']),
     annotations: HWPX_READ_ONLY,
   },
@@ -228,17 +260,18 @@ const HWPX_MCP_TOOLS = Object.freeze([
       baseRevision: HWPX_REVISION,
       filename: { type: 'string', minLength: 1, maxLength: 255 },
       mode: { type: 'string', enum: [...HWPX_MCP_SAVE_MODES], default: 'verified' },
-      profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' },
+      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' },
       visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
+      referenceComparison: HWPX_REFERENCE_COMPARISON,
     }, ['documentId', 'baseRevision', 'filename']),
     annotations: HWPX_STATE_CREATING,
   },
   {
     name: HWPX_MCP_TOOL_NAMES.exportPdf,
     description: 'Export the current cleanly reviewed HWP/HWPX revision to a verified PDF artifact without closing the edit session.',
-    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' }, visualPolicy: HWPX_VISUAL_POLICY, expectations: HWPX_EXPECTATIONS, securityPolicy: HWPX_SECURITY_POLICY }, ['documentId', 'baseRevision']),
+    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' }, visualPolicy: HWPX_VISUAL_POLICY, expectations: HWPX_EXPECTATIONS, securityPolicy: HWPX_SECURITY_POLICY, referenceComparison: HWPX_REFERENCE_COMPARISON }, ['documentId', 'baseRevision']),
     annotations: HWPX_STATE_CREATING,
   },
   {

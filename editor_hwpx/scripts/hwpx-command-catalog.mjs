@@ -583,6 +583,37 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'image.insertInCell',
+    category: 'image',
+    description: 'Insert a new bounded picture into an inspected table-cell paragraph, including an empty signature or seal field.',
+    required: ['target'],
+    optional: ['assetRef', 'mimeType', 'targetParagraphIndex', 'width', 'height', 'altText'],
+    anyOf: [['bytesBase64', 'assetRef']],
+    precondition: 'target_inspect',
+    execution: 'preserve-package-adapter',
+    fields: {
+      target: 'Exact inspected destination table-cell location.',
+      bytesBase64: 'Base64-encoded image bytes.',
+      assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
+      mimeType: 'Declared image MIME type matching the bytes.',
+      targetParagraphIndex: 'Zero-based paragraph inside the destination cell; defaults to 0.',
+      width: 'Optional positive picture width in HWP units; contained within the cell inner width.',
+      height: 'Optional positive picture height in HWP units; contained within the cell inner height.',
+      altText: 'Optional accessible image description.',
+    },
+    example: {
+      op: 'image.insertInCell',
+      target: { tableId: 'tbl_1', cell: { number: 2 } },
+      bytesBase64: '<base64>',
+      mimeType: 'image/png',
+      altText: '대표자 서명',
+    },
+    notes: [
+      'HWPX stores centered inline content in the exact destination cell. Binary HWP stores a cell-contained overlay at the inspected cell coordinates because its native adapter cannot add a nested inline picture; the receipt reports placementMode=cell-anchored-overlay.',
+      'Both paths must survive save/reopen. Resize the cell explicitly first when a larger signature field is intended.',
+    ],
+  }),
+  command({
     op: 'image.cloneToCell',
     category: 'image',
     description: 'Clone an existing picture control discovered by object_inventory into a paragraph of an inspected table cell.',
@@ -829,6 +860,7 @@ const SINGLE_TARGET_INSPECTION_OPS = new Set([
   'setParagraphStyle',
   'image.insertAfterParagraph',
   'image.replaceInCell',
+  'image.insertInCell',
   'image.cloneToCell',
   'insertFootnote',
   'table.insertRows',
@@ -1240,7 +1272,7 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
     };
   });
   return {
-    version: '3.0.0',
+    version: '3.1.0',
     sourceFormat: normalizedSourceFormat,
     categories: HWPX_COMMAND_CATEGORIES,
     commandCount: sourceAwareCommands.length,

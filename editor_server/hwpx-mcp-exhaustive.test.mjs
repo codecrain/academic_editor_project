@@ -193,7 +193,7 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       await inspect(state, 'quality');
       const catalog = await inspect(state, 'catalog');
       assert.deepEqual(catalog.commands.map((item) => item.op), [...HWPX_COMMAND_OPS]);
-      for (const imageOp of ['image.replace', 'image.insertAfterParagraph', 'image.replaceInCell']) {
+      for (const imageOp of ['image.replace', 'image.insertAfterParagraph', 'image.replaceInCell', 'image.insertInCell']) {
         const imageCommand = catalog.commands.find((item) => item.op === imageOp);
         assert.deepEqual(imageCommand.anyOf, [['bytesBase64', 'assetRef']]);
         assert.equal(Object.hasOwn(imageCommand.fields, 'filePath'), false);
@@ -351,6 +351,24 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       await inspectTargets(state, [target.location]); await edit(state, [{ op: 'image.replaceInCell', target: target.location, bytesBase64: TINY_PNG_BASE64, mimeType: 'image/png' }]);
     });
     await withDoc('briefing', async (state) => {
+      const cells = await outlineItems(state, 'cell'); const target = cells.find((item) => item.pictureCount === 0);
+      assert.ok(target);
+      await inspectTargets(state, [target.location]);
+      await edit(state, [{ op: 'image.insertInCell', target: target.location, targetParagraphIndex: 0, bytesBase64: TINY_PNG_BASE64, mimeType: 'image/png', altText: '셀 서명' }]);
+      const inspected = await inspectTargets(state, [target.location]);
+      assert.equal(inspected.targets[0].cell.pictureCount, 1);
+    });
+    await withDoc('hwpTable', async (state) => {
+      const cells = await outlineItems(state, 'cell'); const target = cells.find((item) => item.pictureCount === 0);
+      assert.ok(target);
+      const before = await inspect(state, 'objects');
+      await inspectTargets(state, [target.location]);
+      const result = await edit(state, [{ op: 'image.insertInCell', target: target.location, targetParagraphIndex: 0, bytesBase64: TINY_PNG_BASE64, mimeType: 'image/png', altText: 'HWP 셀 서명' }]);
+      assert.equal(result.results[0].placementMode, 'cell-anchored-overlay');
+      const after = await inspect(state, 'objects');
+      assert.equal(after.pictures.length, before.pictures.length + 1);
+    }, 'cell-signature.hwp');
+    await withDoc('briefing', async (state) => {
       const objects = await inspect(state, 'objects'); const cells = await outlineItems(state, 'cell'); const target = cells.find((item) => item.pictureCount === 0);
       await inspectTargets(state, [target.location]); await edit(state, [{ op: 'image.cloneToCell', target: target.location, sourcePictureId: objects.pictures[0].id, targetParagraphIndex: 0 }]);
     });
@@ -382,6 +400,41 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
     } finally {
       await discard(assetTarget);
       await discard(assetSource);
+    }
+
+    const referenceTemplate = await open('blank', 'reference-template.hwpx');
+    const referenceFinal = await open('briefing', 'reference-final.hwpx');
+    const targetTemplate = await open('blank', 'target-template.hwpx');
+    const candidate = await open('blank', 'candidate.hwpx');
+    try {
+      await expectError('editor_hwpx_review', {
+        documentId: candidate.documentId,
+        baseRevision: candidate.revision,
+        referenceComparison: {
+          referenceTemplateDocumentId: referenceTemplate.documentId,
+          referenceFinalDocumentId: referenceTemplate.documentId,
+          targetTemplateDocumentId: targetTemplate.documentId,
+        },
+      }, 'reference_comparison_document_invalid');
+      const comparison = await call('editor_hwpx_review', {
+        documentId: candidate.documentId,
+        baseRevision: candidate.revision,
+        referenceComparison: {
+          referenceTemplateDocumentId: referenceTemplate.documentId,
+          referenceFinalDocumentId: referenceFinal.documentId,
+          targetTemplateDocumentId: targetTemplate.documentId,
+        },
+      });
+      assert.equal(comparison.ok, false);
+      assert.equal(comparison.quality.referenceComparison.ok, false);
+      assert.ok(comparison.quality.referenceComparison.failed.length > 0);
+      assert.equal(comparison.quality.referenceComparison.metrics.referenceFinal.pageCount, 11);
+      assert.equal(comparison.quality.referenceComparison.metrics.candidate.pageCount, 1);
+    } finally {
+      await discard(candidate);
+      await discard(targetTemplate);
+      await discard(referenceFinal);
+      await discard(referenceTemplate);
     }
 
     const styleSource = await open('briefing', 'style-source.hwpx');

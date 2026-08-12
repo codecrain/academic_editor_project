@@ -781,6 +781,67 @@ test('image.insertAfterParagraph preserves aspect ratio and creates its advertis
   ]);
 });
 
+test('image.insertInCell centers a bounded native picture on the exact inspected cell', () => {
+  const calls = [];
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const doc = {
+    insertPicture: (...args) => {
+      calls.push(['insertPicture', ...args]);
+      return '{"ok":true,"paraIdx":2,"controlIdx":7}';
+    },
+    setPictureProperties: (...args) => {
+      calls.push(['setPictureProperties', ...args]);
+      return '{"ok":true}';
+    },
+    getPictureProperties: (...args) => {
+      calls.push(['getPictureProperties', ...args]);
+      return '{"treatAsChar":false,"horzRelTo":"Paper","vertRelTo":"Paper","horzOffset":182500,"vertOffset":160000,"width":75,"height":75}';
+    },
+  };
+  const context = {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        section: 0,
+        para: 2,
+        control: 3,
+        tableOrderInParagraph: 0,
+        cells: [{
+          cellIndex: 4,
+          paragraphs: [{ index: 0, text: '' }],
+          style: { cell: { width: 5000, height: 3000, paddingLeft: 100, paddingRight: 100, paddingTop: 100, paddingBottom: 100 } },
+          layout: { bbox: { x: 2400, y: 2100, w: 80, h: 60 } },
+          native: { section: 0, paragraph: 2, control: 3, cellIndex: 4 },
+        }],
+      }],
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'image.insertInCell',
+    target: { tableId: 'tbl_0', cell: { number: 4 } },
+    bytesBase64: png.toString('base64'),
+    mimeType: 'image/png',
+    altText: '대표자 서명',
+  }, context);
+
+  const cellPath = JSON.stringify([{ controlIndex: 3, cellIndex: 4, cellParaIndex: 0 }]);
+  assert.deepEqual(calls[0].slice(1, 5), [0, 2, 0, cellPath]);
+  assert.deepEqual(Buffer.from(calls[0][5]), png);
+  assert.equal(calls[1][0], 'setPictureProperties');
+  const requestedPlacement = JSON.parse(calls[1][4]);
+  assert.equal(requestedPlacement.horzOffset, 182963);
+  assert.equal(requestedPlacement.vertOffset, 159713);
+  assert.deepEqual(calls[2], ['getPictureProperties', 0, 2, 7]);
+  assert.equal(result.target.controlIndex, 3);
+  assert.equal(result.target.cellIndex, 4);
+  assert.equal(result.createdTargets[0].controlIndex, 7);
+  assert.equal(result.placementMode, 'cell-anchored-overlay');
+  assert.equal(result.placement.treatAsChar, false);
+});
+
 test('image.insertAfterParagraph rejects a native engine that does not persist inline placement', () => {
   const png = Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',

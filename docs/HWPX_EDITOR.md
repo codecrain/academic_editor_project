@@ -20,7 +20,7 @@ Canonical entrypoints:
 
 ## Capability status
 
-The HWPX catalog exposes 38 canonical commands and every HWPX entry currently
+The HWPX catalog exposes 39 canonical commands and every HWPX entry currently
 reports `readiness=available`. `execution` still identifies the actual path
 used by an operation, such as the native RHWP path, structural adapter, or
 preserve-package adapter. It is evidence about implementation, not a readiness
@@ -55,6 +55,7 @@ paragraph.structure
 image.replace
 image.insertAfterParagraph
 image.replaceInCell
+image.insertInCell
 image.cloneToCell
 image.generateAndReplace
 setDocumentMetadata
@@ -81,11 +82,18 @@ name is shared; query the format's command schema first.
 4. Apply one revision-bound atomic batch with `edit` and `baseRevision`.
 5. Inspect `history` to verify the revision and semantic digest transition,
    then run `review` for the new revision with full-page coverage. Use
-   `profile="submission"` for applications, forms, and other deliverables that
-   must not retain unresolved placeholders or author instructions.
+   `profile="public-proposal"` for completed public applications and proposals;
+   it also rejects unavailable-data wording, text-only execution fields, small
+   text, sparse pages, chapter-flow failures, off-center content images, and
+   weak body-style convergence. Use `profile="submission"` for less opinionated
+   form completeness checks.
 6. Inspect every affected rendered page and its neighbors.
-7. Save in verified mode with the same review profile (use `profile="submission"` for deliverables), or recovery-only checkpoint mode; read the opaque artifact, verify hashes and
-   reopen it, then delete the artifact.
+7. Save in verified mode with the exact same review inputs (use
+   `profile="public-proposal"` for completed proposals), or recovery-only
+   checkpoint mode; read the opaque artifact, verify hashes and reopen it, then
+   delete the artifact. After verified save the mutable session is closed, but
+   the same `browserPresentation.url` serves an immutable hash-bound final
+   preview until the artifact TTL expires.
 8. If the workflow is cancelled, call `discard` with `documentId` and the
    current `baseRevision`.
 
@@ -112,6 +120,9 @@ security policy accepted by review.
 - Newly inserted paragraph images must persist `treatAsChar=true` when re-read;
   native HWP may retain dormant floating-layout fields while inline mode is active.
   Floating placement requires a subsequent explicit `object.format`.
+- `image.insertInCell` stores an inline picture in HWPX. Binary HWP stores a
+  centered, cell-contained overlay and exposes that format-specific placement
+  in the command receipt; save/reopen verification checks the spatial result.
 
 ## Verification
 

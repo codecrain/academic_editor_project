@@ -2159,7 +2159,10 @@ function patchSectionXml(
       const cells = findBlocks(table.xml, 'tc');
       const cell = cells[patch.cellIndex];
       if (!cell) throw new Error(`cell XML index not found for picture clone: ${patch.cellIndex}`);
-      const cellXml = insertPictureIntoCellXml(cell.xml, patch.sourcePictureXml, next, patch);
+      const sourcePictureXml = patch.newImage
+        ? inlinePictureXml(next, patch)
+        : patch.sourcePictureXml;
+      const cellXml = insertPictureIntoCellXml(cell.xml, sourcePictureXml, next, patch);
       const start = paragraph.start + table.start + cell.start;
       const end = paragraph.start + table.start + cell.end;
       next = `${next.slice(0, start)}${cellXml}${next.slice(end)}`;
@@ -3509,7 +3512,37 @@ export class HwpxApiSession {
   }
 
   targetMap() {
-    return this.exportJson().editableTargets;
+    const json = this.exportJson();
+    const paragraphById = new Map(json.sections.flatMap((section) => section.paragraphs || [])
+      .map((paragraph) => [paragraph.id, paragraph]));
+    const cellById = new Map(json.tables.flatMap((table) => (table.cells || []).map((cell) => [cell.id, { table, cell }])));
+    return {
+      paragraphs: (json.editableTargets?.paragraphs || []).map((target) => {
+        const source = paragraphById.get(target.id);
+        const pageHint = this.paragraphPageHint(source?.section, source?.para);
+        return {
+          ...target,
+          ...(pageHint ? { pageHint } : {}),
+          hierarchy: source?.hierarchy ?? null,
+          paragraphFormat: source?.paragraphFormat ?? null,
+          characterFormat: source?.characterFormat ?? null,
+        };
+      }),
+      cells: (json.editableTargets?.cells || []).map((target) => {
+        const source = cellById.get(target.id);
+        const pageHint = source
+          ? this.pageHintFromRect(source.table.layout?.bbox) ?? this.paragraphPageHint(source.table.section, source.table.para)
+          : null;
+        const firstParagraph = source?.cell?.paragraphs?.[0] ?? null;
+        return {
+          ...target,
+          ...(pageHint ? { pageHint } : {}),
+          hierarchy: source?.cell?.paragraphs?.length === 1 ? firstParagraph?.hierarchy ?? null : null,
+          paragraphFormat: source?.cell?.paragraphs?.length === 1 ? firstParagraph?.paragraphFormat ?? null : null,
+          characterFormat: source?.cell?.paragraphs?.length === 1 ? firstParagraph?.characterFormat ?? null : null,
+        };
+      }),
+    };
   }
 
   pageHintFromRect(rect) {
@@ -3609,7 +3642,10 @@ export class HwpxApiSession {
     assert.ok(image, `embedded image not found: ${name}`);
     const picture = inventory.pictures.find((item) => item.id === image.pictureId);
     assert.ok(picture, `placed picture not found for image: ${name}`);
-    const bytes = this.doc.getControlImageData(picture.section, picture.paragraph, '', picture.control);
+    const cellPathJson = Array.isArray(picture.native?.cellPath)
+      ? JSON.stringify(picture.native.cellPath)
+      : '';
+    const bytes = this.doc.getControlImageData(picture.section, picture.paragraph, cellPathJson, picture.control);
     assert.ok(bytes?.length, `embedded image bytes unavailable: ${name}`);
     return { ...image, bytes: Buffer.from(bytes) };
   }
@@ -4057,6 +4093,21 @@ export class HwpxApiSession {
       }];
     }
 
+    if (key === 'imageinsertincell') {
+      return [{
+        ...command,
+        opId,
+        op: 'image.insertInCell',
+        target: command.target ?? command.location,
+        bytesBase64: command.bytesBase64,
+        mimeType: command.mimeType,
+        targetParagraphIndex: command.targetParagraphIndex,
+        width: command.width,
+        height: command.height,
+        altText: command.altText,
+      }];
+    }
+
     if (key === 'imagegenerateandreplace') {
       return [{
         ...command,
@@ -4212,9 +4263,11 @@ export class HwpxApiSession {
     const hwpSource = !isZipPackage(this.inputBytes);
     const structuralReasons = [...packageClassification.reasons];
     if (hwpSource && ops.some(op => (
-      (resolveHwpxCommand(op)?.op ?? op?.op) === 'image.insertAfterParagraph'
+      ['image.insertAfterParagraph', 'image.insertInCell'].includes(resolveHwpxCommand(op)?.op ?? op?.op)
     ))) {
-      structuralReasons.push('image.insertAfterParagraph');
+      structuralReasons.push(...ops
+        .map(op => resolveHwpxCommand(op)?.op ?? op?.op)
+        .filter(op => ['image.insertAfterParagraph', 'image.insertInCell'].includes(op)));
     }
     const classification = {
       mode: structuralReasons.length > 0 ? 'structural-export' : 'patch-safe',
@@ -4370,7 +4423,7 @@ export class HwpxApiSession {
         && classifyHwpxCommands([{ ...sourceOp, op: entry.op }]).mode === 'structural-export';
       const useStructuralAdapter = entry && (
         (packageStructural && (entry.op !== 'appendParagraph' || hwpSource))
-        || (hwpSource && entry.op === 'image.insertAfterParagraph')
+        || (hwpSource && ['image.insertAfterParagraph', 'image.insertInCell'].includes(entry.op))
       );
       if (useStructuralAdapter) {
         const before = working.exportJson();
@@ -4720,7 +4773,7 @@ export class HwpxApiSession {
       } else if (op.op === 'image.cloneToCell') {
         const table = this.tableFromLocation(op.target);
         const cell = this.cellFromLocation(table, op.target);
-        const sourcePictureXml = extractPictureXmlFromPackage(this.inputBytes, op.sourcePictureId);
+      const sourcePictureXml = extractPictureXmlFromPackage(this.inputBytes, op.sourcePictureId);
         this.pictureClonePatches.push({
           section: table.section,
           para: table.para,
@@ -4743,6 +4796,62 @@ export class HwpxApiSession {
           action: 'image.cloneToCell',
           target: cell.id,
           sourcePictureId: op.sourcePictureId,
+          expectedPictureCount: Number(cell.pictureCount || 0) + 1,
+        });
+      } else if (op.op === 'image.insertInCell') {
+        const table = this.tableFromLocation(op.target);
+        const cell = this.cellFromLocation(table, op.target);
+        const bytes = op.bytesBase64 ? Buffer.from(op.bytesBase64, 'base64') : null;
+        assert.ok(bytes && bytes.length > 0, 'image.insertInCell requires bytesBase64');
+        const format = imagePackageFormat(bytes, op.mimeType);
+        const pixels = imagePixelDimensions(bytes, format.extension);
+        const requested = fittedInlineImageSize(pixels.width, pixels.height, op.width, op.height);
+        const cellStyle = cell.style?.cell ?? {};
+        const innerWidth = Math.max(1, Number(cellStyle.width || 0)
+          - Number(cellStyle.paddingLeft || 0) - Number(cellStyle.paddingRight || 0));
+        const innerHeight = Math.max(1, Number(cellStyle.height || 0)
+          - Number(cellStyle.paddingTop || 0) - Number(cellStyle.paddingBottom || 0));
+        const scale = Math.min(1, innerWidth / requested.width, innerHeight / requested.height);
+        const size = {
+          width: Math.max(1, Math.round(requested.width * scale)),
+          height: Math.max(1, Math.round(requested.height * scale)),
+        };
+        const slot = reservePackageImageSlot(this.inputBytes, this.packagePatches, format.extension);
+        const imageSha256 = createHash('sha256').update(bytes).digest('hex');
+        this.pictureClonePatches.push({
+          section: table.section,
+          para: table.para,
+          tableOrderInParagraph: table.tableOrderInParagraph,
+          xmlTableId: table.packageOnly ? table.id : null,
+          cellIndex: cell.cellIndex,
+          targetParagraphIndex: Number(op.targetParagraphIndex ?? 0),
+          itemId: slot.itemId,
+          pixelWidth: pixels.width,
+          pixelHeight: pixels.height,
+          width: size.width,
+          height: size.height,
+          altText: String(op.altText || ''),
+          newImage: true,
+          opId: op.opId,
+        });
+        this.packagePatches.push({
+          name: slot.href,
+          itemId: slot.itemId,
+          mediaType: format.mediaType,
+          bytes: Buffer.from(bytes),
+          create: true,
+          opId: op.opId,
+        });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'image.insertInCell',
+          target: cell.id,
+          imageName: slot.href,
+          sha256: imageSha256,
+          byteLength: bytes.length,
+          width: size.width,
+          height: size.height,
           expectedPictureCount: Number(cell.pictureCount || 0) + 1,
         });
       } else if (op.op === 'replaceText') {

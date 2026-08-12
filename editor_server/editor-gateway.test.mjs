@@ -2140,9 +2140,9 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       view: 'capabilities',
     });
     const capabilities = capabilitiesCall.result.structuredContent;
-    assert.equal(capabilities.contractVersion, '3.0.0');
+    assert.equal(capabilities.contractVersion, '3.1.0');
     assert.equal(capabilities.lifecycleTools.length, 9);
-    assert.equal(capabilities.commandCatalog.commandCount, 38);
+    assert.equal(capabilities.commandCatalog.commandCount, 39);
     assert.ok(capabilities.inspectViews.includes('fields'));
     assert.ok(capabilities.integratedCapabilityFamilies.assurance.includes('security'));
 
@@ -2396,6 +2396,20 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     artifact = saveCall.result.structuredContent;
     assert.equal(artifact.sessionClosed, true);
     assert.ok(artifact.byteLength > 0);
+    assert.equal(artifact.browserPresentation.finalized, true);
+    assert.equal(artifact.browserPresentation.sha256, artifact.sha256);
+    assert.equal(artifact.browserPresentation.refreshMode, 'immutable_after_verified_save');
+
+    const finalizedPreviewResponse = await fetch(
+      `${origin}/v1/hwpx/documents/${opened.documentId}/live-source`,
+    );
+    assert.equal(finalizedPreviewResponse.status, 200);
+    assert.equal(finalizedPreviewResponse.headers.get('x-editor-finalized'), 'true');
+    assert.equal(finalizedPreviewResponse.headers.get('x-editor-sha256'), artifact.sha256);
+    assert.equal(finalizedPreviewResponse.headers.get('cache-control'), 'no-store');
+    const finalizedPreviewBytes = Buffer.from(await finalizedPreviewResponse.arrayBuffer());
+    assert.equal(finalizedPreviewBytes.length, artifact.byteLength);
+    assert.equal(createHash('sha256').update(finalizedPreviewBytes).digest('hex'), artifact.sha256);
 
     const wrongArtifactHash = `${artifact.sha256[0] === '0' ? '1' : '0'}${artifact.sha256.slice(1)}`;
     const wrongHashReadCall = await mcp('editor_hwpx_artifact_read', {

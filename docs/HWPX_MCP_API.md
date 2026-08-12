@@ -2,7 +2,7 @@
 
 Academic Editor exposes one revision-bound HWP/HWPX lifecycle through Streamable HTTP at `/mcp` and through the canonical HTTP actions under `/v1/hwpx/documents/{documentId}`. The `hwpx` route/tool prefix identifies the editor module; verified output preserves the opened source format.
 
-Contract version: `3.0.0`
+Contract version: `3.1.0`
 
 The executable identity is `academic-editor-mcp`. It supports MCP protocol
 versions `2025-06-18` and `2025-03-26`, preferring `2025-06-18`. The canonical
@@ -25,7 +25,9 @@ editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 ```
 
-Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. It currently contains 38 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. Version 3.1.0 contains 39 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+
+`image.insertInCell` fills a previously blank signature, seal, or evidence-image cell from either `bytesBase64` or a cross-document `assetRef`. HWPX persists the image inline in the exact cell paragraph. Legacy binary HWP persists a bounded overlay whose center lies inside the inspected cell, and returns `placementMode="cell-anchored-overlay"`; semantic review accepts that HWP-native representation only when the saved/reopened picture spatially overlaps the intended execution cell.
 
 ## Integrated capability model
 
@@ -38,7 +40,8 @@ The public surface is one state machine rather than parallel editor APIs:
 | Fine-grained mutation | `edit` with exact catalog operations, atomic batches, target/object/field preconditions |
 | Field and form work | `inspect(fields)` plus `field.setValues`, verified after save/reopen |
 | Security and trust | `inspect(security)`, `securityPolicy`, explicit hidden-text/prompt-injection/Unicode evidence |
-| Semantic acceptance | `expectations` for source format, page/table/text/field assertions |
+| Semantic acceptance | `expectations` for source format, page/paragraph/table/picture/text/field assertions |
+| Reference transformation | `referenceComparison` binds blank/completed reference, blank target, and current candidate sessions |
 | Provenance | `inspect(history)`, command receipts, revision transitions, semantic digests |
 | Layout and quality | `inspect(quality|page)`, full-page `review`, clipping and visual-policy evidence |
 | Final artifacts | policy-bound verified `save`, `export_pdf`, hash-bound artifact read/delete |
@@ -53,9 +56,9 @@ Engine-level methods are adapters behind this state machine. They do not form a 
 | `editor_hwpx_open` | `filename` and exactly one of `bytesBase64`/`bytesRef` | none | Creates an isolated session; not read-only or idempotent. |
 | `editor_hwpx_inspect` | `documentId`, `view` | current `baseRevision`, filters, bounded cursor/limits | Read-only and idempotent. |
 | `editor_hwpx_edit` | `documentId`, `baseRevision`, `commands` | `templatePolicy`; per-command `assetRef`/`styleRef` | Atomically applies the batch and advances the revision. |
-| `editor_hwpx_review` | `documentId`, `baseRevision` | `pages`, `includeBaseline`, opt-in `includeSvg`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Read-only document review; records the accepted current-revision review and exact finalization policy. |
-| `editor_hwpx_save` | `documentId`, `baseRevision`, `filename` | `mode=verified|checkpoint`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates an artifact and returns SHA-256 plus `byteLength`; verified save closes the session. |
-| `editor_hwpx_export_pdf` | `documentId`, `baseRevision` | PDF `filename`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates a PDF artifact without closing the edit session. |
+| `editor_hwpx_review` | `documentId`, `baseRevision` | `pages`, `includeBaseline`, opt-in `includeSvg`, `profile`, `visualPolicy`, `expectations`, `securityPolicy`, `referenceComparison` | Read-only document review; records the accepted current-revision review and exact finalization policy. |
+| `editor_hwpx_save` | `documentId`, `baseRevision`, `filename` | `mode=verified|checkpoint`, `profile`, `visualPolicy`, `expectations`, `securityPolicy`, `referenceComparison` | Creates an artifact and returns SHA-256 plus `byteLength`; verified save closes mutation while preserving an immutable final browser preview. |
+| `editor_hwpx_export_pdf` | `documentId`, `baseRevision` | PDF `filename`, `profile`, `visualPolicy`, `expectations`, `securityPolicy`, `referenceComparison` | Creates a PDF artifact without closing the edit session. |
 | `editor_hwpx_discard` | `documentId`, `baseRevision` | none | Destructively closes the session; idempotent. |
 | `editor_hwpx_artifact_read` | `artifactId`, `expectedSha256` | none | Reads HWP/HWPX/PDF artifact bytes; read-only. |
 | `editor_hwpx_artifact_delete` | `artifactId`, `expectedSha256` | none | Destructively deletes the verified artifact. |
@@ -88,11 +91,11 @@ and an `op` from the live catalog. Unknown top-level tool arguments are rejected
 
 4. Reload the returned `browserPresentation.url` after each successful revision-changing call when using the Codex in-app Browser.
 5. Inspect `history`, then run `editor_hwpx_review` at the current revision. It checks structure, actual rendered cell clipping, pagination, every requested page (all pages by default), caller expectations, and security policy.
-6. Save with `editor_hwpx_save(mode="verified", profile="submission")` for a deliverable. Verified save preserves the source format (`.hwp` remains HWP; `.hwpx` remains HWPX), requires a clean current-revision review with the same profile and policy inputs, and performs save/reopen/hash/render checks. `checkpoint` is recovery-only.
+6. For a completed public proposal, review and save with `profile="public-proposal"`. Repeat the exact same `visualPolicy`, `expectations`, `securityPolicy`, and `referenceComparison` at save. Verified save preserves the source format (`.hwp` remains HWP; `.hwpx` remains HWPX), requires a clean current-revision review, and performs save/reopen/hash/render checks. `checkpoint` is recovery-only.
 
 Binary HWP uses native structural operations and is never silently converted to HWPX. Commands that depend on HWPX package XML (existing-image byte replacement, package-level picture cloning, tracked-change XML, and XML-only convenience style cloning) fail explicitly with `HWP_COMMAND_REQUIRES_HWPX_PACKAGE`. Native `setRunStyle`, `setParagraphStyle`, `applyStyle`, table resize/row insertion, paragraph insertion, and new-image insertion remain available for HWP.
 
-7. Read the opaque artifact, verify its SHA-256 and package signature independently, then delete it.
+7. Reload the returned `browserPresentation.url`; after verified save the same URL serves immutable bytes whose `X-Editor-Sha256` and ETag match the artifact. Read the opaque artifact, verify its SHA-256 and package signature independently, then delete it. The final preview remains read-only until the configured artifact TTL expires.
 
 On cancellation or failed validation, call `editor_hwpx_discard`.
 
@@ -105,7 +108,7 @@ On cancellation or failed validation, call `editor_hwpx_discard`.
 - `objects`: package assets plus page-linked pictures, shapes, charts, and text boxes. Top-level and table-cell pictures expose stable native targets; nested pictures include `cellPath` so `object.format` can update the exact control. Text-box replacement/deletion matches normalized visible text exactly rather than searching raw XML.
 - `template`: explicit required/removable/protected/replaceable/repeatable/conditional policy plus advisory instruction, conditional, freeform, and unresolved-field suggestions with evidence and confidence. Suggestions never mutate or protect content automatically.
 - `page`: one rendered page with dimensions, content bounds, vertical occupancy, density/readability metrics, and document-wide-scanned target linkage. The response reports matched/returned/truncated target counts. Inline SVG is opt-in; the default returns its byte length and SHA-256.
-- `quality`: structural, semantic, submission-readiness, actual rendered-layout findings, and explicit visual-policy findings. Use `profile="submission"` when the artifact is meant to be submitted.
+- `quality`: structural, semantic, submission-readiness, actual rendered-layout findings, and explicit visual-policy findings. Use `profile="public-proposal"` for a completed public application or proposal.
 - `catalog`: canonical command definitions, readiness, required native methods, and examples.
 - `search`: bounded exact text matches with target locations and surrounding context.
 - `fields`: bounded field inventory with stable IDs, names, values, and duplicate-name occurrence order.
@@ -134,7 +137,7 @@ Every `render-cell-clip` issue includes renderer provenance and, when the curren
 
 Image mutation accepts either `bytesBase64` or `assetRef`; server-local `filePath` and in-process `bytes` are not part of the public command contract. An image command can use `assetRef={documentId,imageName}` while both HWP/HWPX sessions are open. The gateway reads the exact inventoried source bytes and records SHA-256, length, MIME, source, and target in `resourceTransfers`. `format.apply` can use `styleRef={documentId,location,scope}` to transfer measured properties rather than unsafe source-local style IDs. Measured fractional HWP units are normalized to the target contract; unsupported values are omitted before mutation and reported as `transferredFields`/`omittedFields` in the transfer receipt.
 
-Review renders each current page once, reports clipping plus page/font/line/image/content-bound/occupancy metrics, and reuses that evidence. `profile="submission"` additionally blocks unresolved placeholders, dummy identifiers, explicit required blanks, explicit instruction remnants, and paper/page-anchored floating-image flow risks. The optional `visualPolicy` is the single place to declare editorial layout expectations: `allowedTextColors` (default black), `failOnColoredText`, `failOnImageFlow`, `failOnSparsePages`/`minVerticalOccupancy`, `requireChapterPageBreak`, `requireHeadingKeepWithNext`, `expectedBodyFont`, `expectedBodyFontSizePt`, and `failOnStyleVariance`. `expectations` verifies semantic outcomes such as page/table counts, source format, required or forbidden text, and exact field values. `securityPolicy` controls whether hidden text, prompt-injection evidence, or Unicode deception blocks finalization. Colored text and image geometry are warnings in structural review but become submission errors by default; heading/style rules become errors only when explicitly enabled. A verified HWPX save/export must repeat the exact profile, visual policy, expectations, and security policy accepted by the current-revision review; a mismatch fails closed with `quality_profile_required`, `quality_visual_policy_required`, or `quality_agent_policy_required`. MCP responses always return `svgByteLength` and `svgSha256`; `includeSvg=true` additionally returns the exact inline SVG without removing that evidence. Requested pages that do not exist are returned in `unavailablePages` with or without baseline comparison instead of being silently omitted or fabricated.
+Review renders each current page once, reports clipping plus page/font/line/image/content-bound/occupancy metrics, and reuses that evidence. `profile="submission"` blocks unresolved placeholders, dummy identifiers, explicit required blanks, explicit instruction remnants, and paper/page-anchored floating-image flow risks. `profile="public-proposal"` includes those checks and additionally blocks unavailable-data or deferred-completion wording, any remaining author instruction, text-only signature/seal fields, text below 7.5 pt, sparse pages and document-relative occupancy outliers, chapter headings that do not start a rendered page or remain with following content, materially off-center content images, and weak dominant body-font convergence. The optional `visualPolicy` is the single place to override editorial layout expectations: `allowedTextColors`, `failOnColoredText`, `failOnImageFlow`, `failOnSparsePages`, `minVerticalOccupancy`, `minRelativeVerticalOccupancy`, `allowedSparsePages`, `failOnSmallText`, `minFontSizePt`, `requireChapterPageBreak`, `requireHeadingKeepWithNext`, `requireCenteredImages`, `maxImageCenterOffsetRatio`, `minCenteredImageWidthRatio`, `expectedBodyFont`, `expectedBodyFontSizePt`, `minDominantBodyFontRatio`, and `failOnStyleVariance`. `expectations` verifies page, paragraph, table, picture, source-format, required/forbidden text, and exact field outcomes. `referenceComparison` names three distinct open sessions (`referenceTemplateDocumentId`, `referenceFinalDocumentId`, `targetTemplateDocumentId`); the reviewed document is the candidate. It renders the completed reference and rejects a candidate whose measured page, text, paragraph, table, picture, or median page-occupancy transformation falls materially below the completed reference relative to the two blank forms. Thresholds are explicit, including `minPageGrowthFactor`. `securityPolicy` controls hidden text, prompt-injection evidence, and Unicode deception. A verified HWPX save/export must repeat the exact profile, visual policy, expectations, security policy, and reference comparison accepted by the current-revision review; a mismatch fails closed. MCP responses always return `svgByteLength` and `svgSha256`; `includeSvg=true` additionally returns the exact inline SVG. Requested pages that do not exist are returned in `unavailablePages` instead of being silently omitted or fabricated.
 
 ## Stable failure codes
 
@@ -145,6 +148,7 @@ Review renders each current page once, reports clipping plus page/font/line/imag
 - Exact text-box selector failures: `HWPX_TEXTBOX_NOT_FOUND`.
 - Template classification failures: `template_policy_conflict`, `template_required_table`, `template_required_image`, `template_protected_region`.
 - Finalization precondition failures: `quality_check_required`, `quality_profile_required`, `quality_visual_policy_required`, `quality_agent_policy_required`.
+- Finalized preview integrity failures: `finalized_preview_hash_mismatch`, `finalized_preview_size_mismatch`.
 - Bounded fitting failures retain engine codes such as `HWPX_AUTOFIT_PAGE_CONSTRAINT_EXCEEDED` and `HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION` instead of collapsing to `tool_execution_failed`.
 
 Every failed edit is atomic: revision, live-source bytes, and previously active template policy remain unchanged.

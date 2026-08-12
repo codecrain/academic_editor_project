@@ -1,5 +1,11 @@
+import {
+  isPublicProposalProfile,
+  isSubmissionProfile,
+  normalizeHwpxReviewProfile,
+} from './hwpx-review-profile.mjs';
+
 const DEFAULT_ALLOWED_TEXT_COLORS = Object.freeze(['#000000']);
-const DEFAULT_HEADING_PATTERN = /^\s*(?:\d+\.\s|\d+-\d+\.\s)/u;
+const DEFAULT_HEADING_PATTERN = /^\s*(?:[IVXLC]+\.|\d{1,2}\.(?!\d)|\d{1,2}-\d{1,2}\.?|\d{1,2}\.\d{1,2}\.?)\s/u;
 
 function normalizeHexColor(value) {
   const text = String(value || '').trim().toLowerCase();
@@ -10,20 +16,24 @@ function normalizeHexColor(value) {
 }
 
 function normalizeVisualPolicy(policy = {}, profile = 'structural') {
+  const normalizedProfile = normalizeHwpxReviewProfile(profile);
+  const submission = isSubmissionProfile(normalizedProfile);
+  const publicProposal = isPublicProposalProfile(normalizedProfile);
   const source = policy && typeof policy === 'object' && !Array.isArray(policy) ? policy : {};
   const allowedTextColors = [...new Set(
     (Array.isArray(source.allowedTextColors) ? source.allowedTextColors : DEFAULT_ALLOWED_TEXT_COLORS)
       .map(normalizeHexColor).filter(Boolean),
   )];
   const failOnColoredText = source.failOnColoredText === true || (
-    source.failOnColoredText === undefined && profile === 'submission'
+    source.failOnColoredText === undefined && submission
   );
   const failOnImageFlow = source.failOnImageFlow === true || (
-    source.failOnImageFlow === undefined && profile === 'submission'
+    source.failOnImageFlow === undefined && submission
   );
-  const failOnSparsePages = source.failOnSparsePages === true;
+  const failOnSparsePages = source.failOnSparsePages === true
+    || source.failOnSparsePages === undefined && publicProposal;
   const minVerticalOccupancy = source.minVerticalOccupancy === undefined
-    ? 0.12
+    ? publicProposal ? 0.35 : 0.12
     : Number(source.minVerticalOccupancy);
   if (!Number.isFinite(minVerticalOccupancy) || minVerticalOccupancy < 0 || minVerticalOccupancy > 1) {
     throw new Error('visualPolicy.minVerticalOccupancy must be between 0 and 1.');
@@ -33,21 +43,41 @@ function normalizeVisualPolicy(policy = {}, profile = 'structural') {
   else if (typeof source.headingPattern === 'string' && source.headingPattern.trim()) {
     try { headingPattern = new RegExp(source.headingPattern, 'u'); } catch { /* use the safe default */ }
   }
+  const bounded = (name, value, min = 0, max = 1) => {
+    if (!Number.isFinite(value) || value < min || value > max) {
+      throw new Error(`visualPolicy.${name} must be between ${min} and ${max}.`);
+    }
+    return value;
+  };
   return {
     allowedTextColors,
     failOnColoredText,
     failOnImageFlow,
     failOnSparsePages,
     minVerticalOccupancy,
-    requireChapterPageBreak: source.requireChapterPageBreak === true,
-    requireHeadingKeepWithNext: source.requireHeadingKeepWithNext === true,
+    requireChapterPageBreak: source.requireChapterPageBreak === true
+      || source.requireChapterPageBreak === undefined && publicProposal,
+    requireHeadingKeepWithNext: source.requireHeadingKeepWithNext === true
+      || source.requireHeadingKeepWithNext === undefined && publicProposal,
     headingPattern,
     expectedBodyFont: typeof source.expectedBodyFont === 'string' && source.expectedBodyFont.trim()
       ? source.expectedBodyFont.trim()
       : null,
     expectedBodyFontSizePt: source.expectedBodyFontSizePt === undefined
       ? null : Number(source.expectedBodyFontSizePt),
-    failOnStyleVariance: source.failOnStyleVariance === true,
+    failOnStyleVariance: source.failOnStyleVariance === true
+      || source.failOnStyleVariance === undefined && publicProposal,
+    failOnSmallText: source.failOnSmallText === true
+      || source.failOnSmallText === undefined && publicProposal,
+    minFontSizePt: bounded('minFontSizePt', source.minFontSizePt === undefined ? publicProposal ? 7.5 : 0 : Number(source.minFontSizePt), 0, 1000),
+    minRelativeVerticalOccupancy: source.minRelativeVerticalOccupancy === undefined
+      ? publicProposal ? 0.65 : 0 : bounded('minRelativeVerticalOccupancy', Number(source.minRelativeVerticalOccupancy)),
+    allowedSparsePages: [...new Set((source.allowedSparsePages || []).map(Number).filter(Number.isInteger))],
+    requireCenteredImages: source.requireCenteredImages === true
+      || source.requireCenteredImages === undefined && publicProposal,
+    maxImageCenterOffsetRatio: bounded('maxImageCenterOffsetRatio', source.maxImageCenterOffsetRatio === undefined ? 0.08 : Number(source.maxImageCenterOffsetRatio)),
+    minCenteredImageWidthRatio: bounded('minCenteredImageWidthRatio', source.minCenteredImageWidthRatio === undefined ? 0.2 : Number(source.minCenteredImageWidthRatio)),
+    minDominantBodyFontRatio: bounded('minDominantBodyFontRatio', source.minDominantBodyFontRatio === undefined ? publicProposal ? 0.75 : 0 : Number(source.minDominantBodyFontRatio)),
   };
 }
 
@@ -99,9 +129,9 @@ function analyzeSvgVisualPage(page, policy) {
   }
 
   const metrics = page.layout?.pageMetrics || {};
-  if (policy.failOnSparsePages && Number.isFinite(metrics.verticalOccupancy)
-    && metrics.verticalOccupancy < policy.minVerticalOccupancy
-    && Number(metrics.textCharacters || 0) < 180) {
+  if (policy.failOnSparsePages && !policy.allowedSparsePages.includes(Number(page.page))
+    && Number.isFinite(metrics.verticalOccupancy)
+    && metrics.verticalOccupancy < policy.minVerticalOccupancy) {
     issues.push({
       severity: 'error',
       code: 'render-sparse-page',
@@ -114,6 +144,7 @@ function analyzeSvgVisualPage(page, policy) {
 
   const body = parseBodyClip(svg);
   const imageIssues = [];
+  const imageAlignmentIssues = [];
   for (const match of svg.matchAll(/<image\b([^>]*)\/?>(?:<\/image>)?/gi)) {
     const attrs = match[1];
     const image = {
@@ -127,6 +158,14 @@ function analyzeSvgVisualPage(page, policy) {
       || image.x + image.width > body.x + body.width + 1
       || image.y + image.height > body.y + body.height + 1;
     if (outside) imageIssues.push(image);
+    const bodyCenter = body.x + body.width / 2;
+    const imageCenter = image.x + image.width / 2;
+    const widthRatio = image.width / body.width;
+    const centerOffsetRatio = Math.abs(imageCenter - bodyCenter) / body.width;
+    if (policy.requireCenteredImages && widthRatio >= policy.minCenteredImageWidthRatio
+      && centerOffsetRatio > policy.maxImageCenterOffsetRatio) {
+      imageAlignmentIssues.push({ ...image, widthRatio, centerOffsetRatio, bodyCenter, imageCenter });
+    }
   }
   if (imageIssues.length) {
     issues.push({
@@ -137,27 +176,86 @@ function analyzeSvgVisualPage(page, policy) {
       images: imageIssues,
     });
   }
+  if (imageAlignmentIssues.length) {
+    issues.push({
+      severity: 'error',
+      code: 'render-image-not-visually-centered',
+      message: 'A content image is not centered within the rendered page body area.',
+      page: page.page,
+      images: imageAlignmentIssues,
+    });
+  }
+  if (policy.failOnSmallText && Number.isFinite(metrics.minFontSize)
+    && metrics.minFontSize < policy.minFontSizePt) {
+    issues.push({
+      severity: 'error',
+      code: 'render-font-size-below-policy',
+      message: 'Rendered text is smaller than the active editorial readability floor.',
+      page: page.page,
+      minFontSize: metrics.minFontSize,
+      requiredMinFontSize: policy.minFontSizePt,
+    });
+  }
   return {
     colors: Object.fromEntries(colors),
     coloredText,
     imageIssues,
+    imageAlignmentIssues,
     issues,
   };
 }
 
 function headingLike(text, pattern) {
-  return pattern.test(String(text || ''));
+  const normalized = String(text || '').trim();
+  if (!normalized || normalized.length > 120 || /[\r\n]/u.test(normalized) || /[?？]\s*$/u.test(normalized)) return false;
+  pattern.lastIndex = 0;
+  return pattern.test(normalized);
+}
+
+function characterFontSizePt(target) {
+  const character = target?.characterFormat ?? target?.styleFingerprint?.basis?.text ?? {};
+  const raw = Number(character.fontSizePt ?? character.fontSize ?? 0);
+  return Number.isFinite(raw) && raw > 100 ? raw / 100 : raw;
+}
+
+function highConfidenceChapter(target, text) {
+  if (!/^\s*(?:[IVXLC]+\.|\d{1,2}\.(?!\d))\s/u.test(text)) return false;
+  const hierarchy = target?.hierarchy ?? {};
+  const outlineType = String(hierarchy.outlineType ?? hierarchy.headType ?? '').toLowerCase();
+  const outlineLevel = Number(hierarchy.outlineLevel);
+  const explicitOutline = outlineType && !['none', 'normal', '0'].includes(outlineType)
+    || Number.isInteger(outlineLevel) && outlineLevel >= 0 && outlineLevel <= 1;
+  return explicitOutline || characterFontSizePt(target) >= 15;
+}
+
+function orderedTargets(targetMap) {
+  return [
+    ...(Array.isArray(targetMap?.paragraphs) ? targetMap.paragraphs : []),
+    ...(Array.isArray(targetMap?.cells) ? targetMap.cells : []),
+  ].filter((target) => String(target.text ?? target.currentText ?? '').trim())
+    .sort((left, right) => {
+      const a = left.flow || {};
+      const b = right.flow || {};
+      return Number(a.section || 0) - Number(b.section || 0)
+        || Number(a.paragraph || 0) - Number(b.paragraph || 0)
+        || Number(a.order || 0) - Number(b.order || 0);
+    });
 }
 
 function analyzeHeadingFlow(targetMap, policy) {
   const issues = [];
-  const paragraphs = Array.isArray(targetMap?.paragraphs) ? targetMap.paragraphs : [];
-  for (const target of paragraphs) {
+  const targets = orderedTargets(targetMap);
+  for (let index = 0; index < targets.length; index += 1) {
+    const target = targets[index];
     const text = String(target.text ?? target.currentText ?? '').trim();
     if (!text || !headingLike(text, policy.headingPattern)) continue;
     const hierarchy = target.hierarchy || {};
-    const chapter = /^\d+\.\s/u.test(text);
-    if (chapter && policy.requireChapterPageBreak && hierarchy.pageBreakBefore !== true) {
+    const chapter = highConfidenceChapter(target, text);
+    const previous = targets[index - 1];
+    const startsRenderedPage = Boolean(previous) && Number.isInteger(Number(target.pageHint))
+      && Number(target.pageHint) !== Number(previous?.pageHint);
+    if (chapter && policy.requireChapterPageBreak
+      && hierarchy.pageBreakBefore !== true && !startsRenderedPage) {
       issues.push({
         severity: 'error',
         code: 'heading-page-break-missing',
@@ -167,7 +265,10 @@ function analyzeHeadingFlow(targetMap, policy) {
         text: text.slice(0, 160),
       });
     }
-    if (policy.requireHeadingKeepWithNext && hierarchy.keepWithNext !== true) {
+    const next = targets[index + 1];
+    const keptByRenderedFlow = Number.isInteger(Number(target.pageHint))
+      && Number(target.pageHint) === Number(next?.pageHint);
+    if (policy.requireHeadingKeepWithNext && hierarchy.keepWithNext !== true && !keptByRenderedFlow) {
       issues.push({
         severity: 'error',
         code: 'heading-keep-with-next-missing',
@@ -183,7 +284,10 @@ function analyzeHeadingFlow(targetMap, policy) {
 
 function analyzeStyleVariance(json, policy) {
   const paragraphs = (json?.sections || []).flatMap((section) => section.paragraphs || [])
-    .filter((paragraph) => String(paragraph.text || '').trim());
+    .filter((paragraph) => {
+      const text = String(paragraph.text || '').trim();
+      return text.length >= 20 && !headingLike(text, policy.headingPattern);
+    });
   const families = new Map();
   const sizes = new Map();
   const colors = new Map();
@@ -218,32 +322,71 @@ function analyzeStyleVariance(json, policy) {
       observed: sizeValues,
     });
   }
+  const totalFamilies = [...families.values()].reduce((sum, count) => sum + count, 0);
+  const dominantFamily = [...families.entries()].sort((a, b) => b[1] - a[1])[0] || [null, 0];
+  const dominantBodyFontRatio = totalFamilies ? dominantFamily[1] / totalFamilies : 1;
+  if (policy.minDominantBodyFontRatio > 0 && dominantBodyFontRatio < policy.minDominantBodyFontRatio) {
+    issues.push({
+      severity: policy.failOnStyleVariance ? 'error' : 'warning',
+      code: 'style-body-font-dominance-low',
+      message: 'Body typography does not converge on one dominant font family.',
+      dominantFont: dominantFamily[0],
+      dominantBodyFontRatio,
+      requiredRatio: policy.minDominantBodyFontRatio,
+      observed: Object.fromEntries(families),
+    });
+  }
   return {
     bodyParagraphCount: paragraphs.length,
     fontFamilies: Object.fromEntries(families),
     fontSizes: Object.fromEntries(sizes),
     textColors: Object.fromEntries(colors),
+    dominantFont: dominantFamily[0],
+    dominantBodyFontRatio,
     issues,
   };
 }
 
 function analyzeHwpxVisualEvidence({ json, targetMap, renderedPages = [], profile = 'structural', visualPolicy = {} } = {}) {
-  const policy = normalizeVisualPolicy(visualPolicy, profile);
+  const normalizedProfile = normalizeHwpxReviewProfile(profile);
+  const policy = normalizeVisualPolicy(visualPolicy, normalizedProfile);
   const pageEvidence = renderedPages.map((page) => ({ page: page.page, ...analyzeSvgVisualPage(page, policy) }));
+  const occupancies = pageEvidence
+    .filter((page) => !policy.allowedSparsePages.includes(Number(page.page)))
+    .map((page) => Number(renderedPages.find((item) => item.page === page.page)?.layout?.pageMetrics?.verticalOccupancy))
+    .filter(Number.isFinite).sort((a, b) => a - b);
+  const medianOccupancy = occupancies.length
+    ? occupancies[Math.floor(occupancies.length / 2)] : null;
+  const relativeOccupancyIssues = Number.isFinite(medianOccupancy) && policy.minRelativeVerticalOccupancy > 0
+    ? renderedPages.filter((page) => {
+        const occupancy = Number(page.layout?.pageMetrics?.verticalOccupancy);
+        return !policy.allowedSparsePages.includes(Number(page.page)) && Number.isFinite(occupancy)
+          && occupancy < medianOccupancy * policy.minRelativeVerticalOccupancy;
+      }).map((page) => ({
+        severity: 'error',
+        code: 'render-page-relative-occupancy-low',
+        message: 'A page is a low-occupancy outlier relative to the document median.',
+        page: page.page,
+        verticalOccupancy: page.layout?.pageMetrics?.verticalOccupancy,
+        medianVerticalOccupancy: medianOccupancy,
+        requiredRatio: policy.minRelativeVerticalOccupancy,
+      })) : [];
   const heading = analyzeHeadingFlow(targetMap, policy);
   const styles = analyzeStyleVariance(json, policy);
   const issues = [
     ...pageEvidence.flatMap((page) => page.issues),
+    ...relativeOccupancyIssues,
     ...heading.issues,
     ...styles.issues,
   ];
   return {
-    profile,
+    profile: normalizedProfile,
     policy: {
       ...policy,
       headingPattern: policy.headingPattern.source,
     },
     pages: pageEvidence,
+    occupancy: { medianVerticalOccupancy: medianOccupancy, issues: relativeOccupancyIssues },
     headings: { issueCount: heading.issues.length, issues: heading.issues },
     styles,
     issues,

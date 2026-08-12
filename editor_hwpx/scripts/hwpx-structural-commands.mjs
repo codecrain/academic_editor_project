@@ -1196,6 +1196,144 @@ function applyInsertImage(doc, command, context) {
   });
 }
 
+function applyInsertImageInCell(doc, command, context) {
+  const bytes = decodeImageBytes(command);
+  const image = sniffImage(bytes, command.mimeType, command.filePath);
+  const target = command.target ?? command.location ?? {};
+  const tableId = String(target.tableId ?? target.table?.id ?? '');
+  const table = (context?.before?.tables ?? []).find((item) => String(item.id) === tableId);
+  const cellNumber = nonNegativeInteger(target.cell?.number ?? target.cell?.cellIndex ?? target.cell?.index);
+  const cell = table?.cells?.find((item) => Number(item.cellIndex) === cellNumber);
+  const targetParagraphIndex = nonNegativeInteger(command.targetParagraphIndex ?? 0);
+  if (!table || !cell || targetParagraphIndex === null || !cell.paragraphs?.[targetParagraphIndex]) {
+    throw structuralError(
+      'HWPX_TARGET_INVALID',
+      'image.insertInCell requires an inspected table cell and an existing target paragraph index.',
+      { tableId, cellNumber, targetParagraphIndex },
+    );
+  }
+  const cellStyle = cell.style?.cell ?? {};
+  const cellBounds = cell.layout?.bbox ?? {};
+  const innerWidth = Number(cellStyle.width || 0)
+    - Number(cellStyle.paddingLeft || 0) - Number(cellStyle.paddingRight || 0);
+  const innerHeight = Number(cellStyle.height || 0)
+    - Number(cellStyle.paddingTop || 0) - Number(cellStyle.paddingBottom || 0);
+  if (!(innerWidth > 0) || !(innerHeight > 0)) {
+    throw structuralError(
+      'HWPX_IMAGE_BOUNDS_UNAVAILABLE',
+      'The inspected table cell does not expose positive inner image bounds.',
+      { tableId, cellNumber, innerWidth, innerHeight },
+    );
+  }
+  const fitted = fitImageDimensions(image, command.width, command.height, {
+    width: innerWidth,
+    height: innerHeight,
+  });
+  if (!fitted) {
+    throw structuralError(
+      'HWPX_IMAGE_DIMENSIONS_INVALID',
+      'Image width and height must be positive HWP-unit values.',
+      { width: command.width, height: command.height },
+    );
+  }
+  const native = cell.native ?? {};
+  const sectionIndex = firstSpecifiedInteger(native.section, table.section);
+  const paragraphIndex = firstSpecifiedInteger(native.paragraph, table.para);
+  const controlIndex = firstSpecifiedInteger(native.control, table.control);
+  const nativeCellIndex = firstSpecifiedInteger(native.cellIndex, cell.cellIndex);
+  if ([sectionIndex, paragraphIndex, controlIndex, nativeCellIndex].some((value) => value === null)) {
+    throw structuralError('HWPX_TARGET_INVALID', 'The inspected table cell omits native insertion coordinates.', {
+      tableId,
+      cellNumber,
+    });
+  }
+  const cellPath = [{
+    controlIndex,
+    cellIndex: nativeCellIndex,
+    cellParaIndex: targetParagraphIndex,
+  }];
+  const cellPathJson = JSON.stringify(cellPath);
+  const insertPicture = requireMethod(doc, 'insertPicture');
+  const setPictureProperties = requireMethod(doc, 'setPictureProperties');
+  const pictureNative = parseNativeResult(insertPicture(
+    sectionIndex,
+    paragraphIndex,
+    0,
+    cellPathJson,
+    new Uint8Array(bytes),
+    fitted.width,
+    fitted.height,
+    image.width,
+    image.height,
+    image.extension,
+    String(command.altText ?? ''),
+    null,
+    null,
+  ), 'insertPicture', ['controlIdx']);
+  const unitsPerCssPixel = 75;
+  const cellX = Number(cellBounds.x);
+  const cellY = Number(cellBounds.y);
+  const cellWidthPx = Number(cellBounds.w ?? cellBounds.width);
+  const cellHeightPx = Number(cellBounds.h ?? cellBounds.height);
+  if (![cellX, cellY, cellWidthPx, cellHeightPx].every(Number.isFinite)
+    || cellWidthPx <= 0 || cellHeightPx <= 0) {
+    throw structuralError(
+      'HWPX_IMAGE_BOUNDS_UNAVAILABLE',
+      'The inspected table cell does not expose rendered bounds required for centered native HWP placement.',
+      { tableId, cellNumber, cellBounds },
+    );
+  }
+  const placement = normalizeFormatProperties('image', {
+    treatAsChar: false,
+    textWrap: 'Square',
+    vertRelTo: 'Paper',
+    vertAlign: 'Top',
+    horzRelTo: 'Paper',
+    horzAlign: 'Left',
+    vertOffset: Math.round((cellY + Math.max(0, cellHeightPx - fitted.height / unitsPerCssPixel) / 2) * unitsPerCssPixel),
+    horzOffset: Math.round((cellX + Math.max(0, cellWidthPx - fitted.width / unitsPerCssPixel) / 2) * unitsPerCssPixel),
+    allowOverlap: false,
+    restrictInPage: true,
+    keepWithAnchor: true,
+    width: fitted.width,
+    height: fitted.height,
+  });
+  const placementNative = parseNativeResult(setPictureProperties(
+    sectionIndex,
+    paragraphIndex,
+    pictureNative.controlIdx,
+    JSON.stringify(placement),
+  ), 'setPictureProperties');
+  const getPictureProperties = requireMethod(doc, 'getPictureProperties');
+  const actualPlacement = parseNativeObject(getPictureProperties(
+    sectionIndex,
+    paragraphIndex,
+    pictureNative.controlIdx,
+  ), 'getPictureProperties');
+  return structuralResult(command, pictureNative, {
+    kind: 'cell',
+    sectionIndex,
+    paragraphIndex,
+    controlIndex,
+    cellIndex: nativeCellIndex,
+    cellParagraphIndex: targetParagraphIndex,
+  }, [{
+    kind: 'image',
+    sectionIndex,
+    paragraphIndex,
+    controlIndex: pictureNative.controlIdx,
+  }], {
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+    byteLength: bytes.length,
+    width: fitted.width,
+    height: fitted.height,
+    placementMode: 'cell-anchored-overlay',
+    requestedPlacement: placement,
+    placementNative,
+    placement: actualPlacement,
+  });
+}
+
 function applyPageSetup(doc, command) {
   const sectionIndex = resolveSectionIndex(doc, command.sectionIndex);
   const width = positiveInteger(command.width);
@@ -2162,6 +2300,8 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyInsertTableCaption(doc, command, context);
     case 'image.insertAfterParagraph':
       return applyInsertImage(doc, command, context);
+    case 'image.insertInCell':
+      return applyInsertImageInCell(doc, command, context);
     case 'setPageSetup':
       return applyPageSetup(doc, command);
     case 'setHeaderFooter':

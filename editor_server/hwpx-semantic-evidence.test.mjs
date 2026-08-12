@@ -53,3 +53,63 @@ test('structural profile reports semantic signals without rejecting them', () =>
   assert.equal(result.counts.unresolvedTargets, 1);
   assert.equal(result.counts.riskyFloatingImages, 1);
 });
+
+test('public proposal blocks unavailable data, unclassified instructions, and text-only signatures', () => {
+  const value = fixture();
+  value.editableTargets.cells.push(
+    { id: 'c2', kind: 'cell', text: '자료 미제공', pictureCount: 0, location: { tableId: 'tbl_0', cell: { number: 2 } }, pageHint: 1 },
+    { id: 'c3', kind: 'cell', text: '대표자: 신해용 (인)', pictureCount: 0, location: { tableId: 'tbl_0', cell: { number: 3 } }, pageHint: 1 },
+  );
+  const result = analyzeHwpxSemanticEvidence(value, { profile: 'public-proposal' });
+  assert.equal(result.ok, false);
+  assert.equal(result.counts.unresolvedTargets, 2);
+  assert.equal(result.counts.missingExecutionObjectTargets, 1);
+  assert.ok(result.issues.some((issue) => issue.code === 'submission-author-instruction-remains' && issue.severity === 'error'));
+  assert.ok(result.issues.some((issue) => issue.code === 'submission-execution-object-missing'));
+});
+
+test('public proposal accepts an execution field with a persisted picture', () => {
+  const value = fixture();
+  value.editableTargets.paragraphs = [];
+  value.editableTargets.cells = [{
+    id: 'signed', kind: 'cell', text: '대표자: 신해용 (인)', pictureCount: 1,
+    location: { tableId: 'tbl_0', cell: { number: 3 } }, pageHint: 1,
+  }];
+  value.objectGraph.pictures = [];
+  const result = analyzeHwpxSemanticEvidence(value, { profile: 'public-proposal' });
+  assert.equal(result.counts.missingExecutionObjectTargets, 0);
+});
+
+test('public proposal accepts a native HWP signature spatially anchored inside its target cell', () => {
+  const value = fixture();
+  value.editableTargets.paragraphs = [];
+  value.editableTargets.cells = [{
+    id: 'signed', kind: 'cell', text: '대표자: 신해용 (서명)', pictureCount: 0, pageHint: 2,
+    layout: { bbox: { x: 100, y: 200, width: 300, height: 100 } },
+    location: { tableId: 'tbl_0', cell: { number: 3 } },
+  }];
+  value.objectGraph.pictures = [{
+    id: 'native-signature', pageHint: 2, bounds: { x: 220, y: 220, width: 80, height: 40 },
+    properties: { treatAsChar: false, textWrap: 'Square', vertRelTo: 'Paper', horzRelTo: 'Paper' },
+  }];
+  const result = analyzeHwpxSemanticEvidence(value, { profile: 'public-proposal' });
+  assert.equal(result.counts.missingExecutionObjectTargets, 0);
+  assert.equal(result.counts.riskyFloatingImages, 0);
+});
+
+test('public proposal rejects a native picture that does not overlap the signature cell', () => {
+  const value = fixture();
+  value.editableTargets.paragraphs = [];
+  value.editableTargets.cells = [{
+    id: 'unsigned', kind: 'cell', text: '대표자: 신해용 (서명)', pictureCount: 0, pageHint: 2,
+    layout: { bbox: { x: 100, y: 200, width: 300, height: 100 } },
+    location: { tableId: 'tbl_0', cell: { number: 3 } },
+  }];
+  value.objectGraph.pictures = [{
+    id: 'unrelated-picture', pageHint: 2, bounds: { x: 700, y: 900, width: 80, height: 40 },
+    properties: { treatAsChar: false, textWrap: 'Square', vertRelTo: 'Paper', horzRelTo: 'Paper' },
+  }];
+  const result = analyzeHwpxSemanticEvidence(value, { profile: 'public-proposal' });
+  assert.equal(result.counts.missingExecutionObjectTargets, 1);
+  assert.equal(result.counts.riskyFloatingImages, 1);
+});

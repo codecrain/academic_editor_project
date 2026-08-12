@@ -22,6 +22,8 @@ import { EditorSessionWorkerPool, defaultWorkerCount } from './editor-session-ru
 import { analyzeSvgCellClipping, analyzeSvgPageMetrics, svgHasVisibleContent } from './svg-render-evidence.mjs';
 import { analyzeHwpxSemanticEvidence, suggestHwpxTemplateRegions } from './hwpx-semantic-evidence.mjs';
 import { analyzeHwpxVisualEvidence } from './hwpx-visual-evidence.mjs';
+import { analyzeHwpxReferenceTransformation } from './hwpx-reference-comparison.mjs';
+import { normalizeHwpxReviewProfile } from './hwpx-review-profile.mjs';
 import {
   docxAdapter,
   formatAdapters,
@@ -1209,6 +1211,7 @@ function agentReviewPolicyKey(body = {}) {
   return stableJson({
     expectations: body.expectations ?? null,
     securityPolicy: body.securityPolicy ?? null,
+    referenceComparison: body.referenceComparison ?? null,
   });
 }
 
@@ -1301,7 +1304,7 @@ function assertMutationPreconditions(record, action, body, commands = []) {
     );
   }
   if ((action === 'save-source' || action === 'export-pdf') && record.fmt === 'hwpx') {
-    const requiredProfile = body?.profile === 'submission' ? 'submission' : 'structural';
+    const requiredProfile = normalizeHwpxReviewProfile(body?.profile);
     if (preconditions.qualityProfile !== requiredProfile) {
       throw new EditorContractError(
         'quality_profile_required',
@@ -1372,6 +1375,104 @@ function mcpArtifactDirectory() {
   return outDir;
 }
 
+function finalizedHwpxPreviewDirectory() {
+  const outDir = path.join(repoRoot, '.build', 'gateway-finalized-hwpx-previews');
+  mkdirSync(outDir, { recursive: true });
+  return outDir;
+}
+
+function finalizedHwpxPreviewPath(documentId, extension) {
+  const normalizedDocumentId = String(documentId || '');
+  if (!/^doc_[0-9a-f-]{36}$/i.test(normalizedDocumentId)) {
+    throw new Error('Invalid finalized HWPX preview document ID.');
+  }
+  const normalizedExtension = String(extension || '').toLowerCase();
+  if (normalizedExtension !== 'hwp' && normalizedExtension !== 'hwpx') {
+    throw new Error('Invalid finalized HWPX preview extension.');
+  }
+  return path.join(finalizedHwpxPreviewDirectory(), `${normalizedDocumentId}.${normalizedExtension}`);
+}
+
+async function storeFinalizedHwpxPreview(state, config, {
+  documentId,
+  artifactPath,
+  extension,
+  revision,
+  filename,
+  sha256: expectedSha256,
+  byteLength: expectedByteLength,
+}) {
+  const previewPath = finalizedHwpxPreviewPath(documentId, extension);
+  await copyFile(artifactPath, previewPath);
+  const bytes = await readFile(previewPath);
+  const actualSha256 = sha256(bytes);
+  if (expectedSha256 && actualSha256 !== expectedSha256) {
+    await unlink(previewPath).catch(() => undefined);
+    throw new EditorContractError(
+      'finalized_preview_hash_mismatch',
+      'The immutable finalized preview does not match the verified saved artifact.',
+      500,
+      { expectedSha256, actualSha256 },
+    );
+  }
+  if (expectedByteLength !== undefined && bytes.length !== Number(expectedByteLength)) {
+    await unlink(previewPath).catch(() => undefined);
+    throw new EditorContractError(
+      'finalized_preview_size_mismatch',
+      'The immutable finalized preview length does not match the verified saved artifact.',
+      500,
+      { expectedByteLength: Number(expectedByteLength), actualByteLength: bytes.length },
+    );
+  }
+  state.finalizedHwpxPreviews ??= new Map();
+  const expiresAt = Date.now() + Math.max(60_000, Number(config.mcpArtifactTtlMs || 24 * 60 * 60 * 1000));
+  const record = {
+    documentId,
+    filePath: previewPath,
+    extension,
+    mimeType: extension === 'hwp' ? 'application/x-hwp' : 'application/vnd.hancom.hwpx',
+    revision,
+    filename,
+    sha256: actualSha256,
+    byteLength: bytes.length,
+    expiresAt,
+  };
+  state.finalizedHwpxPreviews.set(documentId, record);
+  return record;
+}
+
+async function serveFinalizedHwpxPreview(req, res, state, documentId) {
+  if (req.method !== 'GET') return false;
+  const record = state.finalizedHwpxPreviews?.get(documentId);
+  if (!record) return false;
+  if (record.expiresAt <= Date.now()) {
+    state.finalizedHwpxPreviews.delete(documentId);
+    await unlink(record.filePath).catch(() => undefined);
+    return false;
+  }
+  try {
+    const info = await stat(record.filePath);
+    if (!info.isFile() || info.size !== record.byteLength) {
+      throw new Error('Finalized preview file is missing or has an unexpected length.');
+    }
+    res.writeHead(200, {
+      'Content-Type': record.mimeType,
+      'Content-Length': String(record.byteLength),
+      'Cache-Control': 'no-store',
+      ETag: `"${record.sha256}"`,
+      'X-Editor-Finalized': 'true',
+      'X-Editor-Revision': String(record.revision),
+      'X-Editor-Sha256': record.sha256,
+    });
+    createReadStream(record.filePath).pipe(res);
+    return true;
+  } catch (error) {
+    state.finalizedHwpxPreviews.delete(documentId);
+    await unlink(record.filePath).catch(() => undefined);
+    throw error;
+  }
+}
+
 const MCP_ARTIFACT_EXTENSIONS = new Set(['docx', 'hwp', 'hwpx', 'pdf']);
 
 function mcpArtifactPath(artifactId, extension = 'docx') {
@@ -1429,6 +1530,19 @@ async function pruneExpiredMcpArtifacts(config) {
         if (error?.code !== 'ENOENT') {
           throw error;
         }
+      }
+    }));
+
+  const previewNames = await readdir(finalizedHwpxPreviewDirectory());
+  await Promise.all(previewNames
+    .filter((name) => /^doc_[0-9a-f-]{36}\.(?:hwp|hwpx)$/i.test(name))
+    .map(async (name) => {
+      const filePath = path.join(finalizedHwpxPreviewDirectory(), name);
+      try {
+        const info = await stat(filePath);
+        if (info.mtimeMs < cutoff) await unlink(filePath);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
       }
     }));
 }
@@ -1822,6 +1936,8 @@ function evaluateHwpxExpectations(json, expectations = null) {
   const text = records.map(record => record.text).join('\n');
   const pageCount = Number(json.pageCount || 0);
   const tableCount = Number(json.tables?.length || 0);
+  const paragraphCount = Number(json.paragraphCount ?? json.blocks?.length ?? 0);
+  const pictureCount = Number(json.objectCounts?.pictures ?? json.objectGraph?.pictures?.length ?? 0);
   const checks = [];
   const check = (name, expected, actual, pass) => checks.push({ name, expected, actual, pass: Boolean(pass) });
   if (expectations.pageCount !== undefined) check('pageCount', expectations.pageCount, pageCount, pageCount === expectations.pageCount);
@@ -1830,6 +1946,8 @@ function evaluateHwpxExpectations(json, expectations = null) {
   if (expectations.minCharacters !== undefined) check('minCharacters', expectations.minCharacters, text.length, text.length >= expectations.minCharacters);
   if (expectations.minTables !== undefined) check('minTables', expectations.minTables, tableCount, tableCount >= expectations.minTables);
   if (expectations.tableCount !== undefined) check('tableCount', expectations.tableCount, tableCount, tableCount === expectations.tableCount);
+  if (expectations.minParagraphs !== undefined) check('minParagraphs', expectations.minParagraphs, paragraphCount, paragraphCount >= expectations.minParagraphs);
+  if (expectations.minPictures !== undefined) check('minPictures', expectations.minPictures, pictureCount, pictureCount >= expectations.minPictures);
   if (expectations.sourceFormat !== undefined) check('sourceFormat', expectations.sourceFormat, json.sourceFormat, json.sourceFormat === expectations.sourceFormat);
   for (const value of expectations.contains ?? []) check('contains', value, text.includes(value), text.includes(value));
   for (const value of expectations.notContains ?? []) check('notContains', value, text.includes(value), !text.includes(value));
@@ -1883,13 +2001,94 @@ function integrateHwpxReviewEvidence(quality, json, options = {}) {
   for (const failed of expectations.failed) {
     issues.push({ severity: 'error', code: 'document-expectation-failed', message: `Document expectation failed: ${failed.name}.`, expectation: failed });
   }
+  const referenceComparison = options.referenceComparisonEvidence ?? null;
+  if (referenceComparison) issues.push(...referenceComparison.issues);
   return {
     ...quality,
     ok: quality.ok === true && issues.every(issue => issue.severity !== 'error'),
     issues,
     security,
     expectations,
+    referenceComparison,
     semanticDigest: hwpxSemanticDigest(json),
+  };
+}
+
+async function resolveHwpxReferenceComparison(state, candidateDocumentId, request, candidateJson, candidateRenderedLayout) {
+  if (!request) return null;
+  const ids = {
+    referenceTemplate: String(request.referenceTemplateDocumentId || ''),
+    referenceFinal: String(request.referenceFinalDocumentId || ''),
+    targetTemplate: String(request.targetTemplateDocumentId || ''),
+  };
+  if (Object.values(ids).some((id) => !id || id === candidateDocumentId)) {
+    throw new EditorContractError(
+      'reference_comparison_document_invalid',
+      'referenceComparison requires three distinct, open reference sessions different from the candidate.',
+      422,
+    );
+  }
+  const uniqueIds = new Set(Object.values(ids));
+  if (uniqueIds.size !== 3) {
+    throw new EditorContractError('reference_comparison_document_invalid', 'Reference comparison document IDs must be distinct.', 422);
+  }
+  const records = Object.fromEntries(Object.entries(ids).map(([role, id]) => [role, findApiRecord(state, 'hwpx', id)]));
+  const missing = Object.entries(records).filter(([, record]) => !record).map(([role]) => role);
+  if (missing.length) {
+    throw new EditorContractError(
+      'reference_comparison_session_missing',
+      `Reference comparison sessions are unavailable: ${missing.join(', ')}.`,
+      404,
+      { missing },
+    );
+  }
+  const [referenceTemplate, referenceFinal, targetTemplate] = await Promise.all([
+    readHwpxSemanticSnapshot(records.referenceTemplate.session),
+    readHwpxSemanticSnapshot(records.referenceFinal.session),
+    readHwpxSemanticSnapshot(records.targetTemplate.session),
+  ]);
+  state.hwpxReferenceRenderCache ??= new Map();
+  const referenceCacheKey = `${ids.referenceFinal}:${records.referenceFinal.session.revision}`;
+  let referenceFinalRenderedLayout = state.hwpxReferenceRenderCache.get(referenceCacheKey);
+  if (!referenceFinalRenderedLayout) {
+    const referenceFinalPageCount = Math.max(
+      1,
+      Number(referenceFinal.pageCount || await pageCountFromSession(records.referenceFinal.session) || 1),
+    );
+    const referenceFinalRenderedPages = await renderHwpxSvgPages(
+      records.referenceFinal.session,
+      Array.from({ length: referenceFinalPageCount }, (_value, index) => index + 1),
+    );
+    referenceFinalRenderedLayout = {
+      pageCount: referenceFinalPageCount,
+      renderedPageCount: referenceFinalRenderedPages.length,
+      pages: referenceFinalRenderedPages.map((page) => ({
+        page: page.page,
+        ...page.layout?.pageMetrics,
+      })),
+    };
+    state.hwpxReferenceRenderCache.set(referenceCacheKey, referenceFinalRenderedLayout);
+    while (state.hwpxReferenceRenderCache.size > 16) {
+      state.hwpxReferenceRenderCache.delete(state.hwpxReferenceRenderCache.keys().next().value);
+    }
+  }
+  const {
+    referenceTemplateDocumentId: _referenceTemplateDocumentId,
+    referenceFinalDocumentId: _referenceFinalDocumentId,
+    targetTemplateDocumentId: _targetTemplateDocumentId,
+    ...policy
+  } = request;
+  return {
+    documentIds: ids,
+    ...analyzeHwpxReferenceTransformation({
+      referenceTemplate,
+      referenceFinal,
+      targetTemplate,
+      candidate: candidateJson,
+      referenceFinalRenderedLayout,
+      candidateRenderedLayout,
+      policy,
+    }),
   };
 }
 
@@ -2820,6 +3019,9 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
 async function handleEditorApiAction(req, res, config, state, fmt, id, actionPath) {
   const record = findApiRecord(state, fmt, id);
   if (!record) {
+    if (fmt === 'hwpx' && actionPath === 'live-source' && await serveFinalizedHwpxPreview(req, res, state, id)) {
+      return true;
+    }
     sendJson(res, 404, { ok: false, message: 'Document session not found.' });
     return true;
   }
@@ -3104,7 +3306,18 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       visualPolicy: body.visualPolicy,
     });
     const { _renderedPages: allRenderedPages = [], ...rawQuality } = qualityResult;
-    const quality = integrateHwpxReviewEvidence(rawQuality, await readHwpxSemanticSnapshot(session), body);
+    const semanticSnapshot = await readHwpxSemanticSnapshot(session);
+    const referenceComparisonEvidence = await resolveHwpxReferenceComparison(
+      state,
+      id,
+      body.referenceComparison,
+      semanticSnapshot,
+      rawQuality.renderedLayout,
+    );
+    const quality = integrateHwpxReviewEvidence(rawQuality, semanticSnapshot, {
+      ...body,
+      referenceComparisonEvidence,
+    });
     const reviewPassed = qualityAllowsFinalization(quality, 'hwpx');
     recordPreconditions(record).qualityRevision = reviewPassed ? baseRevision : null;
     recordPreconditions(record).qualityProfile = reviewPassed ? quality.reviewProfile : null;
@@ -3374,7 +3587,18 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         profile: body.profile,
         visualPolicy: body.visualPolicy,
       });
-      const verification = integrateHwpxReviewEvidence(rawVerification, await readHwpxSemanticSnapshot(verifier), body);
+      const reopenedSnapshot = await readHwpxSemanticSnapshot(verifier);
+      const referenceComparisonEvidence = await resolveHwpxReferenceComparison(
+        state,
+        id,
+        body.referenceComparison,
+        reopenedSnapshot,
+        rawVerification.renderedLayout,
+      );
+      const verification = integrateHwpxReviewEvidence(rawVerification, reopenedSnapshot, {
+        ...body,
+        referenceComparisonEvidence,
+      });
       if (!qualityAllowsFinalization(verification, 'hwpx')) {
         throw new EditorContractError(
           'saved_document_verification_failed',
@@ -4882,6 +5106,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
           visualPolicy: args.visualPolicy,
           expectations: args.expectations,
           securityPolicy: args.securityPolicy,
+          referenceComparison: args.referenceComparison,
           outputPath,
         });
         const { bytesRef: _serverLocalPath, bytesBase64: _inlineBytes, ...publicResult } = exported;
@@ -4946,6 +5171,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         && findApiRecord(state, 'hwpx', documentId)?.sourceFormat === 'hwp'
         ? 'hwp'
         : fmt;
+      const artifactPath = mcpArtifactPath(artifactId, artifactExtension);
       const saved = await postLocalEditorApi(req, config, `${prefix}/save`, {
         baseRevision,
         filename: args.filename,
@@ -4953,12 +5179,38 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         visualPolicy: args.visualPolicy,
         expectations: args.expectations,
         securityPolicy: args.securityPolicy,
+        referenceComparison: args.referenceComparison,
         mode: 'verified',
-        outputPath: mcpArtifactPath(artifactId, artifactExtension),
+        outputPath: artifactPath,
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
+      const finalizedPreview = await storeFinalizedHwpxPreview(state, config, {
+        documentId,
+        artifactPath,
+        extension: artifactExtension,
+        revision: saved.revision,
+        filename: args.filename,
+        sha256: saved.sha256,
+        byteLength: saved.byteLength,
+      });
       discardApiSessionState(state, documentId, { clearLock: false });
-      return { ...publicResult, artifactId, sessionClosed: true };
+      const editorUrl = new URL(config.hwpxBasePath, config.publicOrigin);
+      editorUrl.searchParams.set('url', `/v1/hwpx/documents/${documentId}/live-source`);
+      editorUrl.searchParams.set('filename', args.filename);
+      return {
+        ...publicResult,
+        artifactId,
+        sessionClosed: true,
+        browserPresentation: {
+          url: editorUrl.toString(),
+          surface: 'codex_in_app_browser_side_panel',
+          refreshMode: 'immutable_after_verified_save',
+          readOnly: true,
+          finalized: true,
+          expiresAt: finalizedPreview.expiresAt,
+          sha256: finalizedPreview.sha256,
+        },
+      };
     }
     if (fmt !== 'hwpx' && name === `${toolPrefix}_save_source`) {
       await pruneExpiredMcpArtifacts(config);
@@ -5082,6 +5334,8 @@ function createGatewayServer(config) {
     lock: '',
     version: 1,
     docxActivityHub: new DocxActivityHub(),
+    finalizedHwpxPreviews: new Map(),
+    hwpxReferenceRenderCache: new Map(),
   };
 
   const server = http.createServer(async (req, res) => {

@@ -27,6 +27,23 @@ test('HWPX API preserve save returns original bytes when no commands run', async
   assert.equal(saved.validation.pageCount, 2);
 });
 
+test('HWP native asset reading preserves nested table cellPath coordinates', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/pic-in-table-01.hwp'));
+  const inventory = session.objectInventory();
+  const image = inventory.images.find((item) => {
+    const candidate = inventory.pictures.find((picture) => picture.id === item.pictureId);
+    return Array.isArray(candidate?.native?.cellPath);
+  });
+  const picture = inventory.pictures.find((item) => item.id === image?.pictureId);
+  assert.ok(picture);
+  assert.ok(image);
+  const asset = session.readAsset(image.name);
+  assert.equal(asset.byteLength, image.byteLength);
+  assert.equal(asset.sha256, image.sha256);
+  assert.ok(asset.bytes.length > 0);
+});
+
 test('HWP field values are parsed, updated atomically, and verified after reopen', async () => {
   await initHwpxRuntime();
   const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/field-01-memo.hwp'));
