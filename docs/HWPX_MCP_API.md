@@ -62,7 +62,7 @@ Engine-level methods are adapters behind this state machine. They do not form a 
 
 `documentId` is always the opaque value returned by `open`. `baseRevision` is
 the exact current integer revision, never a caller-generated sequence. An edit
-batch contains 1–100 commands; every command has a unique stable `commandId`
+batch contains 1 through 100 commands; every command has a unique stable `commandId`
 and an `op` from the live catalog. Unknown top-level tool arguments are rejected.
 
 ## Lifecycle
@@ -103,7 +103,7 @@ On cancellation or failed validation, call `editor_hwpx_discard`.
 - `styles`: measured body and cell-paragraph style groups with counts and examples. It reports native paragraph/character properties, margins, indentation, outline level, and fingerprints; it does not guess headings from text.
 - `targets`: an alias of the ordered target projection with optional kind/table filters.
 - `target`: exact current-revision inspection by locations, or unambiguous text resolution by query.
-- `objects`: images, drawings, nested tables, and package object inventory.
+- `objects`: package assets plus page-linked pictures, shapes, charts, and text boxes. Top-level and table-cell pictures expose stable native targets; nested pictures include `cellPath` so `object.format` can update the exact control. Text-box replacement/deletion matches normalized visible text exactly rather than searching raw XML.
 - `template`: explicit required/removable/protected/replaceable/repeatable/conditional policy plus advisory instruction, conditional, freeform, and unresolved-field suggestions with evidence and confidence. Suggestions never mutate or protect content automatically.
 - `page`: one rendered page with dimensions, content bounds, vertical occupancy, density/readability metrics, and document-wide-scanned target linkage. The response reports matched/returned/truncated target counts. Inline SVG is opt-in; the default returns its byte length and SHA-256.
 - `quality`: structural, semantic, submission-readiness, actual rendered-layout findings, and explicit visual-policy findings. Use `profile="submission"` when the artifact is meant to be submitted.
@@ -111,7 +111,7 @@ On cancellation or failed validation, call `editor_hwpx_discard`.
 - `search`: bounded exact text matches with target locations and surrounding context.
 - `fields`: bounded field inventory with stable IDs, names, values, and duplicate-name occurrence order.
 - `security`: hidden-text, prompt-injection, and Unicode-deception evidence with explicit severities.
-- `history`: revision-bound mutation receipts and before/after semantic digests.
+- `history`: revision-bound mutation receipts and before/after semantic digests covering text, fields, tables, styles, objects, metadata, page definitions, headers/footers, and footnotes.
 - `capabilities`: the current nine-tool lifecycle, inspection views, live command catalog, and integrated capability families.
 
 All list-like views use opaque revision-bound cursors. Do not alter a cursor or reuse it after a revision change.
@@ -133,7 +133,7 @@ Every `render-cell-clip` issue includes renderer provenance and, when the curren
 
 `templatePolicy` is explicit and revision-scoped. `protectedLocations` block writes before mutation. `requiredLocations` must be nonblank in review; `instructionLocations` must be absent from a submission; `freeformLocations` declare extensible body regions; and `allowedUnresolvedLocations` documents intentional exceptions. `requiredTableIds`, `removableTableIds`, `repeatableTableIds`, and `conditionalTableIds` classify table intent without freezing every table. `requiredImageNames` and `replaceableImageNames` control asset preservation. Contradictory roles are rejected as `template_policy_conflict`. HWPX `deleteTable` removes only the exact inspected `<hp:tbl>` subtree, qualifies only that measured structural-reference loss, preserves the rest of the package, and verifies the exact reopened table count. Unclassified baseline loss remains a warning so a template is neither frozen wholesale nor silently destroyed.
 
-An image command can use `assetRef={documentId,imageName}` while both HWP/HWPX sessions are open. The gateway reads the exact inventoried source bytes and records SHA-256, length, MIME, source, and target in `resourceTransfers`. `format.apply` can use `styleRef={documentId,location,scope}` to transfer measured properties rather than unsafe source-local style IDs.
+Image mutation accepts either `bytesBase64` or `assetRef`; server-local `filePath` and in-process `bytes` are not part of the public command contract. An image command can use `assetRef={documentId,imageName}` while both HWP/HWPX sessions are open. The gateway reads the exact inventoried source bytes and records SHA-256, length, MIME, source, and target in `resourceTransfers`. `format.apply` can use `styleRef={documentId,location,scope}` to transfer measured properties rather than unsafe source-local style IDs. Measured fractional HWP units are normalized to the target contract; unsupported values are omitted before mutation and reported as `transferredFields`/`omittedFields` in the transfer receipt.
 
 Review renders each current page once, reports clipping plus page/font/line/image/content-bound/occupancy metrics, and reuses that evidence. `profile="submission"` additionally blocks unresolved placeholders, dummy identifiers, explicit required blanks, explicit instruction remnants, and paper/page-anchored floating-image flow risks. The optional `visualPolicy` is the single place to declare editorial layout expectations: `allowedTextColors` (default black), `failOnColoredText`, `failOnImageFlow`, `failOnSparsePages`/`minVerticalOccupancy`, `requireChapterPageBreak`, `requireHeadingKeepWithNext`, `expectedBodyFont`, `expectedBodyFontSizePt`, and `failOnStyleVariance`. `expectations` verifies semantic outcomes such as page/table counts, source format, required or forbidden text, and exact field values. `securityPolicy` controls whether hidden text, prompt-injection evidence, or Unicode deception blocks finalization. Colored text and image geometry are warnings in structural review but become submission errors by default; heading/style rules become errors only when explicitly enabled. A verified HWPX save/export must repeat the exact profile, visual policy, expectations, and security policy accepted by the current-revision review; a mismatch fails closed with `quality_profile_required`, `quality_visual_policy_required`, or `quality_agent_policy_required`. MCP responses always return `svgByteLength` and `svgSha256`; `includeSvg=true` additionally returns the exact inline SVG without removing that evidence. Requested pages that do not exist are returned in `unavailablePages` with or without baseline comparison instead of being silently omitted or fabricated.
 
@@ -141,11 +141,18 @@ Review renders each current page once, reports clipping plus page/font/line/imag
 
 - Cursor integrity and revision failures: `invalid_cursor`, `cursor_query_mismatch`, `stale_cursor`.
 - Artifact type/hash failures: `artifact_format_mismatch`, `artifact_hash_mismatch`.
+- Atomic command identity failures: `duplicate_command_id`.
+- Image input failures: `HWPX_IMAGE_FORMAT_UNSUPPORTED`, `HWPX_IMAGE_MIME_MISMATCH`.
+- Exact text-box selector failures: `HWPX_TEXTBOX_NOT_FOUND`.
 - Template classification failures: `template_policy_conflict`, `template_required_table`, `template_required_image`, `template_protected_region`.
 - Finalization precondition failures: `quality_check_required`, `quality_profile_required`, `quality_visual_policy_required`, `quality_agent_policy_required`.
 - Bounded fitting failures retain engine codes such as `HWPX_AUTOFIT_PAGE_CONSTRAINT_EXCEEDED` and `HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION` instead of collapsing to `tool_execution_failed`.
 
 Every failed edit is atomic: revision, live-source bytes, and previously active template policy remain unchanged.
+
+## Executable exhaustive red-team gate
+
+`npm.cmd run test:hwpx-mcp-red-team` starts an isolated latest-source gateway on an ephemeral loopback port, calls the real Streamable HTTP `/mcp` endpoint, and closes it in `finally`. The gate asserts exact coverage of all nine lifecycle tools, all 15 inspection views, and every operation in the live command catalog. It also exercises HWP and HWPX, nested image and shape formatting, exact text-box replacement/deletion, cross-document `assetRef`/`styleRef`, table and paragraph location invalidation, stale revisions, missing inspection preconditions, duplicate command IDs, MIME conflicts, template protection, atomic rollback, policy-bound review/save, PDF artifact transport, hash-bound artifact read/delete, and save/reopen evidence. The PDF renderer is injected in this contract test; native operating-system PDF readiness remains covered separately by `hwpx-native-pdf.test.mjs`.
 
 ## Fine-grained formatting and structure
 

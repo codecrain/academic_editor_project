@@ -9,7 +9,7 @@ import {
   validateHwpxCommands,
 } from '../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
 import { renderHwpxPdf } from '../../editor_hwpx/scripts/hwpx-native-pdf.mjs';
-import { formatCatalogFields } from '../../editor_hwpx/scripts/hwpx-format-contract.mjs';
+import { formatCatalogFields, projectMeasuredFormatProperties } from '../../editor_hwpx/scripts/hwpx-format-contract.mjs';
 
 const hwpxAdapter = Object.freeze({
   format: 'hwpx',
@@ -37,6 +37,7 @@ const hwpxAdapter = Object.freeze({
   formatPropertyNames(sourceFormat, scope) {
     return formatCatalogFields(sourceFormat)[scope] || [];
   },
+  projectMeasuredFormatProperties,
 });
 
 export { hwpxAdapter };

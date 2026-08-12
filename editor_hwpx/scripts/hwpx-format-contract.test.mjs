@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { FORMAT_SCOPES, assertFormatSourceSupport, normalizeFormatProperties } from './hwpx-format-contract.mjs';
+import {
+  FORMAT_SCOPES,
+  assertFormatSourceSupport,
+  normalizeFormatProperties,
+  projectMeasuredFormatProperties,
+} from './hwpx-format-contract.mjs';
 
 const validCases = [
   ['character', { bold: true }],
@@ -68,4 +73,16 @@ test('format contract source-gates proven HWPX serializer gaps', () => {
   );
   assert.doesNotThrow(() => assertFormatSourceSupport('paragraph', { keepWithNext: true }, 'hwp'));
   assert.doesNotThrow(() => assertFormatSourceSupport('paragraph', { alignment: 'center' }, 'hwpx'));
+});
+
+test('measured style projection rounds native fractional units and omits invalid fields', () => {
+  assert.deepEqual(projectMeasuredFormatProperties('paragraph', {
+    alignment: 'justify',
+    spacingBefore: 26.7,
+    paraLevel: 99,
+    unknownMeasuredField: 1,
+  }, ['alignment', 'spacingBefore', 'paraLevel']), {
+    properties: { alignment: 'justify', spacingBefore: 27 },
+    omittedFields: ['paraLevel'],
+  });
 });

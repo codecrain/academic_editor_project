@@ -1058,8 +1058,10 @@ Response:
 
 ```json
 {
-  "images": [{ "name": "BinData/image1.PNG", "byteLength": 156855 }],
-  "pictures": [],
+  "images": [{ "name": "BinData/image1.PNG", "byteLength": 156855, "mimeType": "image/png" }],
+  "pictures": [{ "id": "pic_0", "name": "BinData/image1.PNG", "native": { "section": 0, "paragraph": 3, "control": 0 } }],
+  "shapes": [{ "id": "shape_0", "text": "Approval", "native": { "section": 0, "paragraph": 7, "control": 1 } }],
+  "textBoxes": [{ "id": "textbox_0", "text": "Approval", "shapeId": "shape_0" }],
   "charts": []
 }
 ```
@@ -1075,13 +1077,15 @@ Replace an existing package image:
 }
 ```
 
-Accepted byte sources:
+Canonical HWPX image sources:
 
 ```text
-bytes
 bytesBase64
-filePath
+assetRef={documentId,imageName}
 ```
+
+Server-local `filePath` and in-process `bytes` are implementation details and
+are not accepted by the public HWPX command catalog.
 
 The replacement bytes must have a complete PNG, JPEG, GIF, BMP, EMF, or WMF
 signature matching the existing package filename extension. An optional
@@ -1110,13 +1114,6 @@ The command creates a unique `word/media` package entry, document relationship,
 and drawing ID, then optionally inserts a caption paragraph. Its precondition is
 `target_inspect`; callers should calculate positive EMU dimensions before apply.
 
-Aliases:
-
-```text
-object.replaceImage
-chart.replaceImage
-```
-
 Generate a simple PNG and replace an existing PNG entry:
 
 ```json
@@ -1137,30 +1134,19 @@ Generate a simple PNG and replace an existing PNG entry:
 }
 ```
 
-Aliases:
-
-```text
-object.generateAndReplace
-chart.generateAndReplace
-```
-
-HWPX-only remove text box/shape by text:
+HWPX-only exact visible-text replacement or deletion for text boxes:
 
 ```json
 {
-  "commandId": "remove-template-guide",
-  "op": "object.deleteTextBoxByText",
-  "section": 0,
-  "texts": ["template guide text"]
+  "commandId": "replace-template-guide",
+  "op": "object.replaceTextBoxText",
+  "replacements": [{ "find": "template guide text", "replaceWith": "Final note" }]
 }
 ```
 
-Aliases:
-
-```text
-object.deleteByText
-shape.deleteByText
-```
+`object.deleteTextBoxByText` accepts `texts` with the same exact-match rule.
+Every selector must match at least one inventoried text box or the atomic batch
+fails with `HWPX_TEXTBOX_NOT_FOUND`.
 
 Chart rule:
 - If `objectGraph.charts` is empty and `objectGraph.images` contains PNGs, chart-looking content is embedded as images.

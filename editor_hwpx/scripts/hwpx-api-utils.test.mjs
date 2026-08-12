@@ -918,7 +918,7 @@ test('HWPX API image.insertAfterParagraph uses the package-preserving path and r
   session.commandsBatch([{
     op: 'image.insertAfterParagraph',
     target: { paragraph: { section: 0, number: 0 } },
-    bytes: png,
+    bytesBase64: png.toString('base64'),
     mimeType: 'image/png',
     caption: '그림 1. 검증 이미지',
   }]);
@@ -1071,7 +1071,7 @@ test('HWPX API image.replace can update an embedded package image and reopen', a
       commandId: 'replace-image-with-same-bytes',
       op: 'image.replace',
       imageName: firstImage.name,
-      bytes: imageBytes,
+      bytesBase64: imageBytes.toString('base64'),
     },
   ]);
 

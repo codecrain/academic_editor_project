@@ -1783,19 +1783,39 @@ function resolveObjectTarget(command, kind) {
   if ([sectionIndex, paragraphIndex, controlIndex].some(value => value === null)) {
     throw structuralError('HWPX_OBJECT_TARGET_INVALID', `${kind} formatting requires inspected native section, paragraph, and control indices.`, { target });
   }
-  return { kind, sectionIndex, paragraphIndex, controlIndex };
+  const rawCellPath = native.cellPath ?? target.cellPath;
+  const cellPath = Array.isArray(rawCellPath) ? rawCellPath.map((item, index) => {
+    const controlIndexValue = firstSpecifiedInteger(item.controlIndex, item.controlIdx);
+    const cellIndex = firstSpecifiedInteger(item.cellIndex, item.cellIdx);
+    const cellParaIndex = firstSpecifiedInteger(item.cellParaIndex, item.cellParaIdx, 0);
+    if ([controlIndexValue, cellIndex, cellParaIndex].some((value) => value === null)) {
+      throw structuralError(
+        'HWPX_OBJECT_TARGET_INVALID',
+        `${kind} formatting cellPath[${index}] requires nonnegative control, cell, and cell-paragraph indices.`,
+        { target },
+      );
+    }
+    return { controlIndex: controlIndexValue, cellIndex, cellParaIndex };
+  }) : null;
+  return { kind, sectionIndex, paragraphIndex, controlIndex, ...(cellPath ? { cellPath } : {}) };
 }
 
 function applyObjectProperties(doc, command, scope, methodName) {
   const target = resolveObjectTarget(command, scope);
-  const method = requireMethod(doc, methodName);
   const properties = normalizeFormatProperties(scope, command.properties);
-  const native = parseNativeResult(method(
-    target.sectionIndex,
-    target.paragraphIndex,
-    target.controlIndex,
-    JSON.stringify(properties),
-  ), methodName);
+  const nestedImage = scope === 'image' && Array.isArray(target.cellPath);
+  const resolvedMethodName = nestedImage ? 'setCellPicturePropertiesByPath' : methodName;
+  const method = requireMethod(doc, resolvedMethodName);
+  const args = nestedImage
+    ? [
+      target.sectionIndex,
+      target.paragraphIndex,
+      JSON.stringify(target.cellPath),
+      target.controlIndex,
+      JSON.stringify(properties),
+    ]
+    : [target.sectionIndex, target.paragraphIndex, target.controlIndex, JSON.stringify(properties)];
+  const native = parseNativeResult(method(...args), resolvedMethodName);
   return {
     ...structuralResult(command, native, target),
     expectedFormat: { scope, properties },

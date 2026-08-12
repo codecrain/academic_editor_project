@@ -1600,6 +1600,7 @@ function projectDocumentSummary(json) {
   }));
   return {
     sourceFormat: json.sourceFormat,
+    metadata: json.metadata,
     pageCount: json.pageCount,
     ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
     ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
@@ -1843,11 +1844,19 @@ function evaluateHwpxExpectations(json, expectations = null) {
 function hwpxSemanticDigest(json) {
   const semantic = {
     sourceFormat: json.sourceFormat,
+    metadata: json.metadata,
     pageCount: json.pageCount,
     paragraphs: (json.blocks ?? []).map(block => [block.id, block.text, block.styleFingerprint?.hash]),
-    tables: (json.tables ?? []).map(table => [table.id, table.dims, (table.cells ?? []).map(cell => [cell.cellIndex, cell.text, cell.styleFingerprint?.hash])]),
+    tables: (json.tables ?? []).map(table => [
+      table.id,
+      table.dims,
+      table.layout,
+      (table.cells ?? []).map(cell => [cell.cellIndex, cell.text, cell.style, cell.styleFingerprint?.hash]),
+    ]),
+    styleGraph: json.styleGraph,
+    layoutGraph: json.layoutGraph,
     fields: (json.fields ?? []).map(field => [field.fieldId, field.name, field.value]),
-    images: (json.objectGraph?.images ?? []).map(image => [image.name, image.sha256]),
+    objects: json.objectGraph,
   };
   return sha256(Buffer.from(stableJson(semantic), 'utf8'));
 }
@@ -2315,8 +2324,12 @@ async function resolveCrossDocumentResources(state, targetDocumentId, commands) 
       }[scope];
       const transferableFields = new Set(hwpxAdapter.formatPropertyNames(targetRecord?.sourceFormat, scope)
         .filter((field) => portableFields.has(field)));
-      const properties = Object.fromEntries(Object.entries(sourceProperties)
-        .filter(([field, value]) => transferableFields.has(field) && value !== undefined && value !== null));
+      const projected = hwpxAdapter.projectMeasuredFormatProperties(
+        scope,
+        sourceProperties,
+        [...transferableFields],
+      );
+      const properties = projected.properties;
       if (!Object.keys(properties).length) {
         throw new EditorContractError('style_ref_unavailable', `The source target exposes no target-format-safe ${scope} properties.`, 422);
       }
@@ -2330,6 +2343,8 @@ async function resolveCrossDocumentResources(state, targetDocumentId, commands) 
         scope,
         sourceLocation: location,
         sourceFingerprint: sourceTarget.styleFingerprint?.hash ?? null,
+        transferredFields: Object.keys(properties),
+        omittedFields: projected.omittedFields,
       });
       continue;
     }
@@ -3217,6 +3232,20 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     if (!Array.isArray(commands)) {
       sendJson(res, 400, { ok: false, message: 'commands/apply requires commands or ops array.' });
       return true;
+    }
+    if (fmt === 'hwpx') {
+      const commandIds = commands.map((command) => String(command?.commandId ?? '').trim());
+      const duplicateCommandIds = [...new Set(commandIds.filter((commandId, index) => (
+        commandId && commandIds.indexOf(commandId) !== index
+      )))];
+      if (duplicateCommandIds.length) {
+        throw new EditorContractError(
+          'duplicate_command_id',
+          `editor_hwpx_edit commandId values must be unique within an atomic batch: ${duplicateCommandIds.join(', ')}.`,
+          422,
+          { duplicateCommandIds },
+        );
+      }
     }
     let resourceTransfers = [];
     if (fmt === 'hwpx' && commands.some((command) => command?.assetRef || command?.styleRef)) {

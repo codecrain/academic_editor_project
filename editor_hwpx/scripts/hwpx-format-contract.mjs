@@ -305,6 +305,33 @@ function normalizeFormatProperties(scope, properties, { resolveFontId } = {}) {
   return normalized;
 }
 
+function projectMeasuredFormatProperties(scope, properties, allowedFields = []) {
+  const contract = FORMAT_SCOPES[scope];
+  if (!contract || !properties || typeof properties !== 'object' || Array.isArray(properties)) {
+    return { properties: {}, omittedFields: [] };
+  }
+  const allowed = new Set(allowedFields);
+  const projected = {};
+  const omittedFields = [];
+  for (const [field, rawValue] of Object.entries(properties)) {
+    if (!allowed.has(field) || rawValue === undefined || rawValue === null) continue;
+    const rule = contract[field];
+    let value = rawValue;
+    if (rule?.type === 'number' && rule.integer && Number.isFinite(Number(value))) {
+      value = Math.round(Number(value));
+    } else if (rule?.type === 'array' && Array.isArray(value)) {
+      value = value.map((item) => Number.isFinite(Number(item)) ? Math.round(Number(item)) : item);
+    }
+    try {
+      normalizeFormatProperties(scope, { [field]: value }, { resolveFontId: () => 0 });
+      projected[field] = value;
+    } catch {
+      omittedFields.push(field);
+    }
+  }
+  return { properties: projected, omittedFields };
+}
+
 function formatCatalogFields(sourceFormat = '') {
   return Object.fromEntries(Object.entries(FORMAT_SCOPES).map(([scope, fields]) => [
     scope,
@@ -334,4 +361,5 @@ export {
   formatCatalogFields,
   formatError,
   normalizeFormatProperties,
+  projectMeasuredFormatProperties,
 };

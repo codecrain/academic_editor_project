@@ -810,19 +810,37 @@ function readPackageObjects(inputBytes) {
       .map((name) => ({ name, xml: entries.get(name)?.toString('utf8') ?? '' }));
     const pictures = sectionXml.flatMap(({ name, xml }) => {
       const pics = [];
+      const containers = findAllBlocks(xml, 'container');
       const re = /<hp:pic\b[\s\S]*?<\/hp:pic>/g;
       let match;
       while ((match = re.exec(xml))) {
         pics.push({
-          id: `pic_${pics.length}`,
           sectionFile: name,
           byteOffset: match.index,
           binItemIDRef: firstMatch(match[0], /\bbinaryItemIDRef="([^"]+)"/, null),
           zOrder: firstMatch(match[0], /\bzOrder="([^"]+)"/, null),
+          instanceId: integerAttribute(match[0].match(/<hp:pic\b[^>]*>/)?.[0] ?? '', 'instid'),
+          insideContainer: containers.some((container) => match.index > container.start && match.index < container.end),
         });
       }
       return pics;
-    });
+    }).map((picture, index) => ({ id: `pic_${index}`, ...picture }));
+    const packageShapes = sectionXml.flatMap(({ name, xml }) => {
+      const section = Number(name.match(/section(\d+)\.xml$/i)?.[1] ?? 0);
+      return findBlocks(xml, 'rect').map((block) => {
+        const openingTag = block.xml.match(/<hp:rect\b[^>]*>/)?.[0] ?? '';
+        return {
+          section,
+          sectionFile: name,
+          byteOffset: block.start,
+          instanceId: integerAttribute(openingTag, 'instid'),
+          shapeObjectId: integerAttribute(openingTag, 'id'),
+          zOrder: integerAttribute(openingTag, 'zOrder'),
+          text: xmlVisibleText(block.xml),
+          hasTextBox: /<hp:drawText\b/.test(block.xml),
+        };
+      });
+    }).map((shape, index) => ({ id: `shape_${index}`, type: 'rect', ...shape }));
     return {
       images: names.filter((name) => /^BinData\/.+\.(bmp|gif|jpg|jpeg|png|wmf|emf)$/i.test(name))
         .map((name) => ({
@@ -838,24 +856,110 @@ function readPackageObjects(inputBytes) {
         })),
       pictures,
       charts: sectionXml.flatMap(({ name, xml }) => [...xml.matchAll(/<hp:chart\b[\s\S]*?<\/hp:chart>/g)]
-        .map((match, index) => ({ id: `chart_${index}`, sectionFile: name, byteOffset: match.index }))),
+        .map((match) => ({ sectionFile: name, byteOffset: match.index })))
+        .map((chart, index) => ({ id: `chart_${index}`, ...chart })),
+      shapes: packageShapes,
+      textBoxes: packageShapes.filter((shape) => shape.hasTextBox).map((shape, index) => ({
+        id: `textbox_${index}`,
+        shapeId: shape.id,
+        section: shape.section,
+        sectionFile: shape.sectionFile,
+        byteOffset: shape.byteOffset,
+        instanceId: shape.instanceId,
+        text: shape.text,
+      })),
       sections: names.filter((name) => /^Contents\/section\d+\.xml$/i.test(name)),
       xmlFiles: names.filter((name) => /\.xml$/i.test(name)),
       binaryFiles: names.filter((name) => /^BinData\//i.test(name)),
     };
   } catch {
-    return { images: [], sections: [], xmlFiles: [], binaryFiles: [] };
+    return { images: [], pictures: [], charts: [], shapes: [], textBoxes: [], sections: [], xmlFiles: [], binaryFiles: [] };
   }
 }
 
 function readNativePictureObjects(doc) {
   const pictures = [];
   const images = [];
+  const shapesByTarget = new Map();
+  const pictureTargetKeys = new Set();
+  for (let pageIndex = 0; pageIndex < doc.pageCount(); pageIndex += 1) {
+    const layout = tryJson(() => doc.getPageControlLayout(pageIndex));
+    for (const control of layout?.controls || []) {
+      const section = Number(control.secIdx);
+      const paragraph = Number(control.parentParaIdx ?? control.paraIdx);
+      const controlIndex = Number(control.controlIdx);
+      if (![section, paragraph, controlIndex].every(Number.isInteger) || control.type === 'table') continue;
+      const cellPath = Array.isArray(control.cellPath) ? control.cellPath.map((item) => ({
+        controlIndex: Number(item.controlIndex ?? item.controlIdx),
+        cellIndex: Number(item.cellIndex ?? item.cellIdx),
+        cellParaIndex: Number(item.cellParaIndex ?? item.cellParaIdx ?? 0),
+      })) : null;
+      const key = `${section}:${paragraph}:${controlIndex}:${cellPath ? stableStringify(cellPath) : ''}`;
+      const native = { section, paragraph, control: controlIndex, ...(cellPath ? { cellPath } : {}) };
+      const placement = {
+        pageHint: pageIndex + 1,
+        bounds: stripUndefined({ x: control.x, y: control.y, width: control.w, height: control.h }),
+        native,
+      };
+      if (control.type === 'image') {
+        if (pictureTargetKeys.has(key)) continue;
+        pictureTargetKeys.add(key);
+        const id = `pic_native_${pictures.length}`;
+        const properties = cellPath
+          ? tryJson(() => doc.getCellPicturePropertiesByPath(section, paragraph, JSON.stringify(cellPath), controlIndex))
+          : tryJson(() => doc.getPictureProperties(section, paragraph, controlIndex));
+        pictures.push({
+          id,
+          section,
+          paragraph,
+          control: controlIndex,
+          ...placement,
+          properties,
+          allowedActions: ['object.format'],
+        });
+        const cellPathJson = cellPath ? JSON.stringify(cellPath) : '';
+        const imageBytes = (() => {
+          try {
+            const bytes = doc.getControlImageData(section, paragraph, cellPathJson, controlIndex);
+            return bytes?.length ? Buffer.from(bytes) : null;
+          } catch {
+            return null;
+          }
+        })();
+        if (imageBytes) {
+          const mimeType = (() => {
+            try { return doc.getControlImageMime(section, paragraph, cellPathJson, controlIndex) || null; } catch { return null; }
+          })();
+          images.push({
+            name: id,
+            byteLength: imageBytes.length,
+            sha256: createHash('sha256').update(imageBytes).digest('hex'),
+            mimeType,
+            pictureId: id,
+          });
+        }
+        continue;
+      }
+      const candidate = {
+        id: '',
+        type: String(control.type || 'shape'),
+        ...placement,
+        properties: tryJson(() => doc.getShapeProperties(section, paragraph, controlIndex)),
+      };
+      const previous = shapesByTarget.get(key);
+      if (!previous || previous.type === 'group' && candidate.type !== 'group') {
+        shapesByTarget.set(key, candidate);
+      }
+    }
+  }
   for (let section = 0; section < doc.getSectionCount(); section += 1) {
     for (let paragraph = 0; paragraph < doc.getParagraphCount(section); paragraph += 1) {
       for (let control = 0; control < 32; control += 1) {
         const properties = tryJson(() => doc.getPictureProperties(section, paragraph, control));
         if (!properties) continue;
+        const key = `${section}:${paragraph}:${control}:`;
+        if (pictureTargetKeys.has(key)) continue;
+        pictureTargetKeys.add(key);
         const id = `pic_native_${pictures.length}`;
         let imageBytes = null;
         try {
@@ -875,6 +979,7 @@ function readNativePictureObjects(doc) {
           pageHint: null,
           properties,
           native: { section, paragraph, control },
+          allowedActions: ['object.format'],
         });
         if (imageBytes) {
           images.push({
@@ -888,17 +993,31 @@ function readNativePictureObjects(doc) {
       }
     }
   }
+  const shapes = [...shapesByTarget.values()].map((shape, index) => ({ ...shape, id: `shape_native_${index}` }));
   return {
     images,
     pictures,
     charts: [],
     equations: [],
     textBoxes: [],
-    shapes: [],
+    shapes,
     sections: [],
     xmlFiles: [],
     binaryFiles: images.map((image) => image.name),
   };
+}
+
+function readNativeFootnotes(doc) {
+  const footnotes = [];
+  for (let section = 0; section < doc.getSectionCount(); section += 1) {
+    for (let paragraph = 0; paragraph < doc.getParagraphCount(section); paragraph += 1) {
+      for (let control = 0; control < 32; control += 1) {
+        const value = tryJson(() => doc.getFootnoteInfo(section, paragraph, control));
+        if (value?.ok) footnotes.push({ section, paragraph, control, ...value });
+      }
+    }
+  }
+  return footnotes;
 }
 
 function stableStringify(value) {
@@ -1824,13 +1943,31 @@ function replaceParagraphTextPreservingControlsXml(paragraphXml, text) {
   return paragraphXml.replace(/(<hp:p\b[^>]*>)/, `$1${run}`);
 }
 
+function normalizeObjectText(value) {
+  return String(value ?? '').replace(/\r\n?/g, '\n');
+}
+
+function rectTextBoxes(sectionXml) {
+  return findBlocks(sectionXml, 'rect')
+    .filter((block) => /<hp:drawText\b/.test(block.xml))
+    .map((block) => ({ ...block, text: normalizeObjectText(xmlVisibleText(block.xml)) }));
+}
+
+function exactRectTextMatchCounts(sectionXml, texts) {
+  const counts = new Map(normalizeTextList(texts).map((value) => [normalizeObjectText(value), 0]));
+  for (const block of rectTextBoxes(sectionXml)) {
+    if (counts.has(block.text)) counts.set(block.text, counts.get(block.text) + 1);
+  }
+  return counts;
+}
+
 function removeRectTextBoxesByText(sectionXml, texts) {
-  const targets = normalizeTextList(texts);
-  if (!targets.length) {
+  const targets = new Set(normalizeTextList(texts).map((value) => normalizeObjectText(value)));
+  if (targets.size === 0) {
     return sectionXml;
   }
   let next = sectionXml;
-  const rects = findBlocks(next, 'rect').filter((block) => targets.some((text) => block.xml.includes(escapeXmlText(text))));
+  const rects = rectTextBoxes(next).filter((block) => targets.has(block.text));
   for (const rect of rects.sort((a, b) => b.start - a.start)) {
     next = `${next.slice(0, rect.start)}${next.slice(rect.end)}`;
   }
@@ -1843,26 +1980,41 @@ function replaceRectTextBoxText(sectionXml, replacements) {
     return sectionXml;
   }
   let next = sectionXml;
-  const rects = findBlocks(next, 'rect');
+  const rects = rectTextBoxes(next);
   const patches = [];
   for (const rect of rects) {
     let rectXml = rect.xml;
-    let changed = false;
-    for (const replacement of changes) {
-      const find = String(replacement.find ?? replacement.text ?? '').trim();
-      if (!find || !rectXml.includes(escapeXmlText(find))) {
-        continue;
-      }
-      const replaceWith = escapeXmlText(replacement.replaceWith ?? replacement.value ?? replacement.newText ?? '');
-      rectXml = rectXml.replaceAll(`>${escapeXmlText(find)}<`, `>${replaceWith}<`);
-      changed = true;
-    }
-    if (changed) {
-      patches.push({ start: rect.start, end: rect.end, xml: rectXml });
-    }
+    const replacement = changes.find((item) => (
+      normalizeObjectText(item.find ?? item.text) === rect.text
+    ));
+    if (!replacement) continue;
+    const replaceWith = escapeXmlText(normalizeObjectText(
+      replacement.replaceWith ?? replacement.value ?? replacement.newText ?? '',
+    ));
+    let wroteReplacement = false;
+    rectXml = rectXml.replace(/(<hp:t\b[^>]*>)[\s\S]*?(<\/hp:t>)/g, (_, open, close) => {
+      if (wroteReplacement) return `${open}${close}`;
+      wroteReplacement = true;
+      return `${open}${replaceWith}${close}`;
+    });
+    assert.ok(wroteReplacement, 'Matched text-box shape did not contain a writable hp:t node.');
+    patches.push({ start: rect.start, end: rect.end, xml: rectXml });
   }
   for (const patch of patches.sort((a, b) => b.start - a.start)) {
     next = `${next.slice(0, patch.start)}${patch.xml}${next.slice(patch.end)}`;
+  }
+  return next;
+}
+
+function previewObjectSectionXml(inputBytes, section, shapePatches = [], textBoxPatches = []) {
+  const sectionXml = readZip(inputBytes).get(`Contents/section${section}.xml`)?.toString('utf8');
+  assert.ok(sectionXml, `Contents/section${section}.xml not found`);
+  let next = sectionXml;
+  for (const patch of shapePatches.filter((item) => Number(item.section) === Number(section))) {
+    next = removeRectTextBoxesByText(next, patch.texts);
+  }
+  for (const patch of textBoxPatches.filter((item) => Number(item.section) === Number(section))) {
+    next = replaceRectTextBoxText(next, patch.replacements);
   }
   return next;
 }
@@ -2264,11 +2416,23 @@ function imagePackageFormat(bytes, declaredMimeType) {
   else if (bytes[0] === 0xFF && bytes[1] === 0xD8) extension = 'jpg';
   else if (bytes.subarray(0, 3).toString('ascii') === 'GIF') extension = 'gif';
   else if (bytes.subarray(0, 2).toString('ascii') === 'BM') extension = 'bmp';
-  assert.ok(extension, 'image.replaceInCell supports PNG, JPEG, GIF, and BMP bytes');
+  if (!extension) {
+    throw structuralBatchError(
+      'HWPX_IMAGE_FORMAT_UNSUPPORTED',
+      'HWPX image commands support PNG, JPEG, GIF, and BMP raster bytes.',
+      { declaredMimeType: mime || null },
+    );
+  }
   const expectedMime = extension === 'jpg' ? 'image/jpeg' : `image/${extension}`;
   if (mime) {
     const normalized = mime === 'image/jpg' ? 'image/jpeg' : mime;
-    assert.equal(normalized, expectedMime, 'image.replaceInCell MIME type must match the binary signature');
+    if (normalized !== expectedMime) {
+      throw structuralBatchError(
+        'HWPX_IMAGE_MIME_MISMATCH',
+        'The declared image MIME type does not match the binary signature.',
+        { declaredMimeType: normalized, detectedMimeType: expectedMime },
+      );
+    }
   }
   return { extension, mediaType: expectedMime };
 }
@@ -2663,9 +2827,16 @@ function verifyExpectedFormat(session, target, result) {
       target.sectionIndex, target.paragraphIndex, target.controlIndex,
     ));
   } else if (expected.scope === 'image' && target.kind === 'image') {
-    properties = tryJson(() => session.doc.getPictureProperties(
-      target.sectionIndex, target.paragraphIndex, target.controlIndex,
-    ));
+    properties = Array.isArray(target.cellPath)
+      ? tryJson(() => session.doc.getCellPicturePropertiesByPath(
+        target.sectionIndex,
+        target.paragraphIndex,
+        JSON.stringify(target.cellPath),
+        target.controlIndex,
+      ))
+      : tryJson(() => session.doc.getPictureProperties(
+        target.sectionIndex, target.paragraphIndex, target.controlIndex,
+      ));
   } else if (expected.scope === 'shape' && target.kind === 'shape') {
     properties = tryJson(() => session.doc.getShapeProperties(
       target.sectionIndex, target.paragraphIndex, target.controlIndex,
@@ -2856,11 +3027,18 @@ export function verifyStructuralTarget(session, target, result = null) {
     return;
   }
   if (target.kind === 'image') {
-    const properties = tryJson(() => session.doc.getPictureProperties(
-      target.sectionIndex,
-      target.paragraphIndex,
-      target.controlIndex,
-    ));
+    const properties = Array.isArray(target.cellPath)
+      ? tryJson(() => session.doc.getCellPicturePropertiesByPath(
+        target.sectionIndex,
+        target.paragraphIndex,
+        JSON.stringify(target.cellPath),
+        target.controlIndex,
+      ))
+      : tryJson(() => session.doc.getPictureProperties(
+        target.sectionIndex,
+        target.paragraphIndex,
+        target.controlIndex,
+      ));
     if (!properties) {
       throw structuralBatchError(
         'HWPX_CREATED_TARGET_MISSING',
@@ -3269,13 +3447,28 @@ export class HwpxApiSession {
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
     const tables = annotateTablePictureSlots(this.inputBytes, [...nativeTables, ...nestedTables]);
     const styleGraph = readStyleGraph(this.doc);
+    const sectionCount = this.doc.getSectionCount();
+    const pageDefinitions = Array.from({ length: sectionCount }, (_, section) => ({
+      section,
+      pageDef: tryJson(() => this.doc.getPageDef(section)),
+    }));
+    const headerFooters = Array.from({ length: sectionCount }, (_, section) => (
+      [true, false].flatMap((isHeader) => [0, 1, 2].map((applyTo) => ({
+        section,
+        isHeader,
+        applyTo,
+        value: tryJson(() => this.doc.getHeaderFooter(section, isHeader, applyTo)),
+      })))
+    )).flat().filter((item) => item.value?.exists);
     const objectGraph = isZipPackage(this.inputBytes)
       ? readPackageObjects(this.inputBytes)
       : readNativePictureObjects(this.doc);
+    const footnotes = readNativeFootnotes(this.doc);
     const editableTargets = buildEditableTargets(sections, tables);
     const json = {
       revision: this.revision,
       sourceFormat: this.doc.getSourceFormat(),
+      metadata: isZipPackage(this.inputBytes) ? readHwpxDocumentMetadata(this.inputBytes) : null,
       pageCount: this.doc.pageCount(),
       sections,
       blocks,
@@ -3283,6 +3476,9 @@ export class HwpxApiSession {
       styleGraph,
       layoutGraph: {
         pageCount: this.doc.pageCount(),
+        pageDefinitions,
+        headerFooters,
+        footnotes,
         tables: tables.map((table) => ({
           id: table.id,
           section: table.section,
@@ -3331,9 +3527,51 @@ export class HwpxApiSession {
   }
 
   objectInventory() {
-    const objects = isZipPackage(this.inputBytes)
-      ? readPackageObjects(this.inputBytes)
-      : readNativePictureObjects(this.doc);
+    const nativeObjects = readNativePictureObjects(this.doc);
+    const objects = (() => {
+      if (!isZipPackage(this.inputBytes)) return nativeObjects;
+      const packageObjects = readPackageObjects(this.inputBytes);
+      let nativePictureIndex = 0;
+      const pictures = packageObjects.pictures.map((picture) => {
+        const native = picture.insideContainer ? null : nativeObjects.pictures[nativePictureIndex++];
+        return native ? {
+          ...picture,
+          pageHint: native.pageHint,
+          bounds: native.bounds,
+          native: native.native,
+          properties: native.properties,
+          allowedActions: ['image.cloneToCell', 'object.format'],
+        } : { ...picture, allowedActions: ['image.cloneToCell'] };
+      });
+      const nativeShapesByInstance = new Map(nativeObjects.shapes
+        .filter((shape) => Number.isInteger(shape.properties?.instanceId))
+        .map((shape) => [Number(shape.properties.instanceId), shape]));
+      const matchedNativeShapeIds = new Set();
+      const shapes = packageObjects.shapes.map((shape) => {
+        const native = nativeShapesByInstance.get(Number(shape.shapeObjectId));
+        if (native) matchedNativeShapeIds.add(native.id);
+        return native ? {
+          ...shape,
+          type: native.type === 'group' ? shape.type : native.type,
+          pageHint: native.pageHint,
+          bounds: native.bounds,
+          native: native.native,
+          properties: native.properties,
+        } : shape;
+      });
+      shapes.push(...nativeObjects.shapes.filter((shape) => !matchedNativeShapeIds.has(shape.id)));
+      const shapeById = new Map(shapes.map((shape) => [shape.id, shape]));
+      const textBoxes = packageObjects.textBoxes.map((textBox) => {
+        const shape = shapeById.get(textBox.shapeId);
+        return shape ? {
+          ...textBox,
+          pageHint: shape.pageHint,
+          bounds: shape.bounds,
+          native: shape.native,
+        } : textBox;
+      });
+      return { ...packageObjects, pictures, shapes, textBoxes };
+    })();
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
     return {
       ...objects,
@@ -4185,6 +4423,14 @@ export class HwpxApiSession {
           const tableXml = extractTableXmlFromPackageEntries(readZip(working.inputBytes), table);
           allowedStructuralReferenceLosses = inspectHwpxStructuralReferencesXml(tableXml);
         }
+        if (isZipPackage(working.inputBytes)
+          && entry.op === 'paragraph.structure'
+          && sourceOp.action === 'mergePrevious') {
+          allowedStructuralReferenceLosses = {
+            objectCounts: { p: 1 },
+            binaryReferenceCounts: {},
+          };
+        }
         const structuralOp = {
           ...sourceOp,
           opId: commandId(sourceOp, opIndex),
@@ -4757,12 +5003,53 @@ export class HwpxApiSession {
         results.push({ opId: op.opId, ok: true, target: op.imageName, action: 'image.generateAndReplace', byteLength: bytes.length });
       } else if (op.op === 'object.deleteTextBoxByText') {
         assert.ok(op.texts?.length, 'object.deleteTextBoxByText requires texts.');
-        this.shapePatches.push({ section: op.section ?? 0, texts: op.texts, opId: op.opId });
-        results.push({ opId: op.opId, ok: true, action: 'object.deleteTextBoxByText', section: op.section ?? 0, textCount: op.texts.length });
+        const section = op.section ?? 0;
+        const preview = previewObjectSectionXml(this.inputBytes, section, this.shapePatches, this.textBoxPatches);
+        const matchCounts = exactRectTextMatchCounts(preview, op.texts);
+        const missing = [...matchCounts].filter(([, count]) => count === 0).map(([text]) => text);
+        if (missing.length) {
+          throw structuralBatchError(
+            'HWPX_TEXTBOX_NOT_FOUND',
+            'object.deleteTextBoxByText requires every exact visible-text selector to match an inventoried text box.',
+            { section, missing },
+          );
+        }
+        const matchedTextBoxCount = [...matchCounts.values()].reduce((sum, count) => sum + count, 0);
+        this.shapePatches.push({ section, texts: op.texts, opId: op.opId });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'object.deleteTextBoxByText',
+          section,
+          selectorCount: op.texts.length,
+          matchedTextBoxCount,
+        });
       } else if (op.op === 'object.replaceTextBoxText') {
         assert.ok(op.replacements?.length, 'object.replaceTextBoxText requires replacements.');
-        this.textBoxPatches.push({ section: op.section ?? 0, replacements: op.replacements, opId: op.opId });
-        results.push({ opId: op.opId, ok: true, action: 'object.replaceTextBoxText', section: op.section ?? 0, replacementCount: op.replacements.length });
+        const section = op.section ?? 0;
+        let preview = previewObjectSectionXml(this.inputBytes, section, this.shapePatches, this.textBoxPatches);
+        let matchedTextBoxCount = 0;
+        for (const replacement of op.replacements) {
+          const matchCount = exactRectTextMatchCounts(preview, [replacement.find]).get(normalizeObjectText(replacement.find)) ?? 0;
+          if (matchCount === 0) {
+            throw structuralBatchError(
+              'HWPX_TEXTBOX_NOT_FOUND',
+              'object.replaceTextBoxText requires every exact visible-text selector to match an inventoried text box.',
+              { section, missing: [replacement.find] },
+            );
+          }
+          matchedTextBoxCount += matchCount;
+          preview = replaceRectTextBoxText(preview, [replacement]);
+        }
+        this.textBoxPatches.push({ section, replacements: op.replacements, opId: op.opId });
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'object.replaceTextBoxText',
+          section,
+          replacementCount: op.replacements.length,
+          matchedTextBoxCount,
+        });
       } else {
         throw new Error(`unsupported HWPX API op: ${op.op}`);
       }

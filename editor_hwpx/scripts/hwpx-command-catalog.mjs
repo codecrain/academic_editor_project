@@ -434,7 +434,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       rows: 'Split row count.', columns: 'Split column count.',
       side: 'before or after for insertion.', equalRowHeight: 'Use equal split row heights.', mergeFirst: 'Merge an existing span before splitting.',
     },
-    example: { op: 'table.structure', target: { tableId: 'tbl_0' }, action: 'mergeCells', startRow: 0, startColumn: 0, endRow: 0, endColumn: 2 },
+    example: { op: 'table.structure', target: { tableId: 'tbl_0', cell: { number: 0 } }, action: 'mergeCells', startRow: 0, startColumn: 0, endRow: 0, endColumn: 2 },
     notes: ['Runs alone because it invalidates table-cell locations.'],
   }),
   command({
@@ -587,13 +587,11 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'image',
     description: 'Replace bytes of an existing package image discovered by object_inventory.',
     required: ['imageName'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
+    anyOf: [['bytesBase64', 'assetRef']],
     precondition: 'object_inventory',
     fields: {
       imageName: 'Exact package image name.',
       bytesBase64: 'Base64-encoded image bytes.',
-      bytes: 'Trusted in-process bytes only.',
-      filePath: 'Trusted same-host file path only.',
       assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Optional declared image MIME type.',
     },
@@ -605,14 +603,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Insert a bounded image after an inspected paragraph using safe inline paragraph flow by default.',
     required: ['target'],
     optional: ['assetRef', 'mimeType', 'width', 'height', 'altText', 'caption'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
+    anyOf: [['bytesBase64', 'assetRef']],
     precondition: 'target_inspect',
     execution: 'preserve-package-adapter',
     fields: {
       target: locationField,
       bytesBase64: 'Base64-encoded image bytes.',
-      bytes: 'Trusted in-process binary input only.',
-      filePath: 'Trusted same-host file input only.',
       assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Declared image MIME type matching the bytes.',
       width: 'Optional width in HWP units.',
@@ -634,13 +630,11 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Replace the single existing picture in an inspected table cell without rewriting document structure.',
     required: ['target'],
     optional: ['assetRef', 'mimeType'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
+    anyOf: [['bytesBase64', 'assetRef']],
     precondition: 'target_inspect',
     fields: {
       target: 'Exact inspected table-cell location containing one picture slot.',
       bytesBase64: 'Base64-encoded image bytes.',
-      bytes: 'Trusted in-process binary input only.',
-      filePath: 'Trusted same-host file input only.',
       assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Declared image MIME type matching the bytes.',
     },
@@ -1237,6 +1231,15 @@ function validateHwpxCommands(commands) {
       && (!Array.isArray(value.replacements) || value.replacements.length === 0
         || value.replacements.some((item) => typeof item?.find !== 'string' || !item.find || typeof item?.replaceWith !== 'string'))) {
       throw new Error('object.replaceTextBoxText replacements must contain nonempty find strings and string replaceWith values.');
+    }
+    if (entry.op === 'object.replaceTextBoxText') {
+      const normalizedFinds = value.replacements.map((item) => item.find.replace(/\r\n?/g, '\n'));
+      if (new Set(normalizedFinds).size !== normalizedFinds.length) {
+        throw new Error('object.replaceTextBoxText replacements must use unique find strings.');
+      }
+      if (value.replacements.some((item) => item.find.replace(/\r\n?/g, '\n') === item.replaceWith.replace(/\r\n?/g, '\n'))) {
+        throw new Error('object.replaceTextBoxText replacements must change the visible text.');
+      }
     }
     for (const target of commandInspectionTargets(value, entry, index)) {
       if (!target.key) {
