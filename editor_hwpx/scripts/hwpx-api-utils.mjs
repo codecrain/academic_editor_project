@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 import initHwpx, { HwpDocument } from '@rhwp/core';
 import {
-  buildListText as coreBuildListText,
   commandId as coreCommandId,
   commandKey as coreCommandKey,
   commandLocation as coreCommandLocation,
@@ -21,24 +20,44 @@ import {
 } from '../../editor_common/document-api-core.mjs';
 import {
   classifyHwpxCommands,
+  inspectHwpxStructuralReferencesXml,
   overlayPreservedEntries,
   qualifyHwpxCandidate,
   restoreExportOmittedEmbeddedEntries,
 } from './hwpx-package-policy.mjs';
 import {
+  HWPX_PACKAGE_ONLY_OPS,
   resolveHwpxCommand,
   validateHwpxCommands,
 } from './hwpx-command-catalog.mjs';
 import { applyHwpxStructuralCommand } from './hwpx-structural-commands.mjs';
+import { assertFormatSourceSupport } from './hwpx-format-contract.mjs';
 import { applyTrackedReplacement } from './hwpx-tracked-changes.mjs';
 import { crc32, createZip, readZip } from './hwpx-zip.mjs';
+import {
+  analyzeSvgCellClipping,
+  analyzeSvgPageMetrics,
+  svgHasVisibleContent,
+} from '../../editor_server/svg-render-evidence.mjs';
 
 export { createZip, readZip } from './hwpx-zip.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 
+const PATCH_COLLECTIONS = Object.freeze([
+  'cellPatches', 'paragraphPatches', 'paragraphInsertPatches', 'paragraphDeletePatches',
+  'tableRowInsertPatches', 'tableSizePatches', 'cellSizePatches',
+  'pictureClonePatches', 'pictureInsertPatches', 'pictureReferencePatches',
+  'packagePatches', 'shapePatches', 'textBoxPatches', 'trackedChangePatches',
+]);
+
 let hwpxReady = null;
+
+function isZipPackage(bytesLike) {
+  const bytes = Buffer.from(bytesLike);
+  return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b;
+}
 
 export async function initHwpxRuntime() {
   globalThis.measureTextWidth ??= (_font, text) => {
@@ -289,13 +308,56 @@ function readCellText(doc, table, cellIndex) {
   const paragraphs = [];
   for (let cellPara = 0; cellPara < paraCount; cellPara += 1) {
     const len = doc.getCellParagraphLength(table.section, table.para, table.control, cellIndex, cellPara);
+    const paragraphFormat = tryJson(() => doc.getCellParaPropertiesAt(
+      table.section, table.para, table.control, cellIndex, cellPara, 0,
+    ));
+    const characterFormat = len > 0
+      ? tryJson(() => doc.getCellCharPropertiesAt(
+        table.section, table.para, table.control, cellIndex, cellPara, 0,
+      ))
+      : null;
+    const text = doc.getTextInCell(table.section, table.para, table.control, cellIndex, cellPara, 0, len);
+    const measuredStyle = { paragraph: paragraphFormat, text: characterFormat };
     paragraphs.push({
       index: cellPara,
       length: len,
-      text: doc.getTextInCell(table.section, table.para, table.control, cellIndex, cellPara, 0, len),
+      text,
+      paragraphFormat,
+      characterFormat,
+      hierarchy: measuredParagraphHierarchy(paragraphFormat, text),
+      styleFingerprint: styleFingerprint(measuredStyle),
     });
   }
   return paragraphs;
+}
+
+function measuredParagraphHierarchy(paragraphFormat, text = '') {
+  if (!paragraphFormat || typeof paragraphFormat !== 'object') return null;
+  const leading = String(text || '').match(/^[\t ]*/)?.[0] || '';
+  const candidates = {
+    outlineType: paragraphFormat.outlineType,
+    outlineLevel: paragraphFormat.outlineLevel ?? paragraphFormat.headingLevel ?? paragraphFormat.level,
+    headType: paragraphFormat.headType,
+    paraLevel: paragraphFormat.paraLevel,
+    numberingId: paragraphFormat.numberingId,
+    marginLeft: paragraphFormat.marginLeft ?? paragraphFormat.leftMargin,
+    marginRight: paragraphFormat.marginRight ?? paragraphFormat.rightMargin,
+    indent: paragraphFormat.indent ?? paragraphFormat.firstLineIndent,
+    leadingSpaces: [...leading].filter(character => character === ' ').length,
+    leadingTabs: [...leading].filter(character => character === '\t').length,
+    alignment: paragraphFormat.alignment,
+    lineSpacing: paragraphFormat.lineSpacing,
+    spacingBefore: paragraphFormat.spacingBefore,
+    spacingAfter: paragraphFormat.spacingAfter,
+    keepWithNext: paragraphFormat.keepWithNext,
+    keepLines: paragraphFormat.keepLines,
+    pageBreakBefore: paragraphFormat.pageBreakBefore,
+    paraShapeId: paragraphFormat.paraShapeId ?? paragraphFormat.paraPrIDRef,
+  };
+  const measured = Object.fromEntries(Object.entries(candidates).filter(([, value]) => (
+    value !== undefined && value !== null && value !== ''
+  )));
+  return Object.keys(measured).length ? measured : null;
 }
 
 function numberOrNull(value) {
@@ -337,13 +399,21 @@ function estimateTextCapacity(style, bbox) {
   const height = numberOrNull(cell.height) ?? numberOrNull(bbox?.height) ?? 0;
   const fontSize = numberOrNull(text.fontSize) ?? 1000;
   const lineSpacingRatio = Math.max(1, (numberOrNull(paragraph.lineSpacing) ?? 160) / 100);
-  const leftMargin = numberOrNull(cell.leftMargin) ?? numberOrNull(cell.marginLeft) ?? 0;
-  const rightMargin = numberOrNull(cell.rightMargin) ?? numberOrNull(cell.marginRight) ?? 0;
-  const topMargin = numberOrNull(cell.topMargin) ?? numberOrNull(cell.marginTop) ?? 0;
-  const bottomMargin = numberOrNull(cell.bottomMargin) ?? numberOrNull(cell.marginBottom) ?? 0;
+  const leftMargin = numberOrNull(cell.leftMargin) ?? numberOrNull(cell.marginLeft)
+    ?? numberOrNull(cell.paddingLeft) ?? 0;
+  const rightMargin = numberOrNull(cell.rightMargin) ?? numberOrNull(cell.marginRight)
+    ?? numberOrNull(cell.paddingRight) ?? 0;
+  const topMargin = numberOrNull(cell.topMargin) ?? numberOrNull(cell.marginTop)
+    ?? numberOrNull(cell.paddingTop) ?? 0;
+  const bottomMargin = numberOrNull(cell.bottomMargin) ?? numberOrNull(cell.marginBottom)
+    ?? numberOrNull(cell.paddingBottom) ?? 0;
   const innerWidth = Math.max(0, width - leftMargin - rightMargin);
   const innerHeight = Math.max(0, height - topMargin - bottomMargin);
-  const charWidth = Math.max(360, fontSize * 0.52);
+  // HWPX documents handled here are predominantly Korean.  Treating every
+  // glyph as a half-em Latin character made the old capacity estimate roughly
+  // twice as optimistic and allowed visibly clipped cells to finalize.  This
+  // remains a planning estimate; final acceptance uses rendered clip evidence.
+  const charWidth = Math.max(600, fontSize * 0.92);
   const lineHeight = Math.max(900, fontSize * lineSpacingRatio);
   const maxCharsPerLine = innerWidth > 0 ? Math.max(4, Math.floor(innerWidth / charWidth)) : null;
   const maxLines = innerHeight > 0 ? Math.max(1, Math.floor(innerHeight / lineHeight)) : null;
@@ -365,6 +435,14 @@ function estimateTextCapacity(style, bbox) {
   };
 }
 
+function estimatedWrappedLineCount(text, capacity) {
+  const maxCharsPerLine = Number(capacity?.maxCharsPerLine || 0);
+  if (!maxCharsPerLine) return null;
+  return String(text ?? '').split('\n').reduce((sum, line) => (
+    sum + Math.max(1, Math.ceil(visualTextUnits(line) / maxCharsPerLine))
+  ), 0);
+}
+
 function wrapLine(line, maxCharsPerLine) {
   return coreWrapLine(line, maxCharsPerLine);
 }
@@ -373,8 +451,55 @@ function fitTextToCapacity(text, capacity, options = {}) {
   return coreFitTextToCapacity(text, capacity, options);
 }
 
-function buildListText(items, options = {}) {
-  return coreBuildListText(items, options);
+function normalizedTableDimensions(dims = {}) {
+  const rows = Number(dims.rows ?? dims.rowCount);
+  const columns = Number(dims.cols ?? dims.columns ?? dims.columnCount ?? dims.colCount);
+  return {
+    rows: Number.isFinite(rows) ? rows : null,
+    columns: Number.isFinite(columns) ? columns : null,
+  };
+}
+
+function tableIdentityFingerprint(table = {}) {
+  const dimensions = normalizedTableDimensions(table.dims);
+  return coreHashString(coreStableStringify({
+    dimensions,
+    cellCount: Number(table.dims?.cellCount ?? table.cells?.length ?? 0),
+  }));
+}
+
+function matchBaselineTables(baselineTables = [], currentTables = [], ignoredBaselineIds = new Set()) {
+  const currentByFingerprint = new Map();
+  for (const table of currentTables) {
+    const fingerprint = tableIdentityFingerprint(table);
+    if (!currentByFingerprint.has(fingerprint)) currentByFingerprint.set(fingerprint, []);
+    currentByFingerprint.get(fingerprint).push(table);
+  }
+  const matched = new Map();
+  const claimed = new Set();
+  for (const baselineTable of baselineTables) {
+    if (ignoredBaselineIds.has(baselineTable.id)) continue;
+    const candidates = currentByFingerprint.get(tableIdentityFingerprint(baselineTable)) ?? [];
+    const currentTable = candidates.find(item => !claimed.has(item));
+    if (currentTable) {
+      matched.set(baselineTable, currentTable);
+      claimed.add(currentTable);
+    }
+  }
+  for (const baselineTable of baselineTables) {
+    if (ignoredBaselineIds.has(baselineTable.id) || matched.has(baselineTable)) continue;
+    const currentTable = currentTables.find(item =>
+      !claimed.has(item) && item.id === baselineTable.id);
+    if (currentTable) {
+      matched.set(baselineTable, currentTable);
+      claimed.add(currentTable);
+    }
+  }
+  return matched;
+}
+
+function imageLogicalReference(imageName) {
+  return String(imageName ?? '').split('/').at(-1)?.replace(/\.[^.]+$/, '') ?? '';
 }
 
 function readTable(doc, section, para, control, tableIndex, tableOrderInParagraph, cellGlobalStart) {
@@ -413,8 +538,6 @@ function readTable(doc, section, para, control, tableIndex, tableOrderInParagrap
         'table.writeCell',
         'table.writeRichCell',
         'table.applyCellStyle',
-        'list.writeBullets',
-        'list.applyNumbering',
         'style.clone',
         'style.applyText',
         'paragraph.applyStyle',
@@ -518,6 +641,7 @@ function packageTableId(section, paragraph, tableXml, ordinal) {
 }
 
 function discoverNestedPackageTables(inputBytes) {
+  if (!isZipPackage(inputBytes)) return [];
   const entries = readZip(inputBytes);
   const tables = [];
   let cellGlobalStart = 0;
@@ -566,8 +690,6 @@ function discoverNestedPackageTables(inputBytes) {
               'table.writeCell',
               'table.writeRichCell',
               'table.applyCellStyle',
-              'list.writeBullets',
-              'list.applyNumbering',
               'style.clone',
               'style.applyText',
               'paragraph.applyStyle',
@@ -636,6 +758,12 @@ function readPackageObjects(inputBytes) {
           name,
           byteLength: entries.get(name)?.length ?? 0,
           sha256: createHash('sha256').update(entries.get(name) ?? Buffer.alloc(0)).digest('hex'),
+          mimeType: (() => {
+            const extension = name.split('.').pop()?.toLowerCase();
+            if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
+            if (['png', 'gif', 'bmp', 'wmf', 'emf'].includes(extension)) return `image/${extension}`;
+            return null;
+          })(),
         })),
       pictures,
       charts: sectionXml.flatMap(({ name, xml }) => [...xml.matchAll(/<hp:chart\b[\s\S]*?<\/hp:chart>/g)]
@@ -647,6 +775,59 @@ function readPackageObjects(inputBytes) {
   } catch {
     return { images: [], sections: [], xmlFiles: [], binaryFiles: [] };
   }
+}
+
+function readNativePictureObjects(doc) {
+  const pictures = [];
+  const images = [];
+  for (let section = 0; section < doc.getSectionCount(); section += 1) {
+    for (let paragraph = 0; paragraph < doc.getParagraphCount(section); paragraph += 1) {
+      for (let control = 0; control < 32; control += 1) {
+        const properties = tryJson(() => doc.getPictureProperties(section, paragraph, control));
+        if (!properties) continue;
+        const id = `pic_native_${pictures.length}`;
+        let imageBytes = null;
+        try {
+          const bytes = doc.getControlImageData(section, paragraph, '', control);
+          if (bytes?.length) imageBytes = Buffer.from(bytes);
+        } catch {
+          imageBytes = null;
+        }
+        const mimeType = (() => {
+          try { return doc.getControlImageMime(section, paragraph, '', control) || null; } catch { return null; }
+        })();
+        pictures.push({
+          id,
+          section,
+          paragraph,
+          control,
+          pageHint: null,
+          properties,
+          native: { section, paragraph, control },
+        });
+        if (imageBytes) {
+          images.push({
+            name: id,
+            byteLength: imageBytes.length,
+            sha256: createHash('sha256').update(imageBytes).digest('hex'),
+            mimeType,
+            pictureId: id,
+          });
+        }
+      }
+    }
+  }
+  return {
+    images,
+    pictures,
+    charts: [],
+    equations: [],
+    textBoxes: [],
+    shapes: [],
+    sections: [],
+    xmlFiles: [],
+    binaryFiles: images.map((image) => image.name),
+  };
 }
 
 function stableStringify(value) {
@@ -716,10 +897,12 @@ function buildEditableTargets(sections, tables) {
       .map((paragraph) => ({
       id: paragraph.id,
       kind: 'paragraph',
-      location: { paragraph: { section: paragraph.section, number: paragraph.para } },
+       location: { paragraph: { section: paragraph.section, number: paragraph.para } },
+       flow: { section: paragraph.section, paragraph: paragraph.para, order: 0 },
       currentText: paragraph.text,
       textLength: paragraph.text.length,
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
+      styleFingerprint: paragraph.styleFingerprint,
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle'],
       }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
       id: cell.id,
@@ -729,7 +912,12 @@ function buildEditableTargets(sections, tables) {
       textLength: cell.text.length,
       layout: cell.layout,
       styleFingerprint: cell.styleFingerprint,
-      table: { id: table.id, dims: table.dims },
+       table: { id: table.id, dims: table.dims },
+       flow: {
+         section: table.section,
+         paragraph: table.para,
+         order: Number(table.tableOrderInParagraph ?? 0) + 1,
+       },
       cell: {
         cellIndex: cell.cellIndex,
         row: cell.row,
@@ -1389,6 +1577,17 @@ function replaceCellTextXml(cellXml, text, options = {}) {
   }
   const subList = extractSubList(cellXml);
   const paragraphs = findBlocks(subList.inner, 'p');
+  const cellSizeTag = cellXml.match(/<hp:cellSz\b[^>]*\/>/)?.[0] ?? '';
+  const cellMarginTag = cellXml.match(/<hp:cellMargin\b[^>]*\/>/)?.[0] ?? '';
+  const cellWidth = integerAttribute(cellSizeTag, 'width');
+  const cellInnerWidth = cellWidth === null
+    ? null
+    : Math.max(
+      1,
+      cellWidth
+        - (integerAttribute(cellMarginTag, 'left', 0) ?? 0)
+        - (integerAttribute(cellMarginTag, 'right', 0) ?? 0),
+    );
   const lines = String(text ?? '').split('\n');
   const logicalLines = lines.length ? lines : [''];
   let cursor = null;
@@ -1421,6 +1620,10 @@ function replaceCellTextXml(cellXml, text, options = {}) {
         cursor = cloned.nextVertPos;
         return cloned.xml;
       }
+    }
+    if (cellInnerWidth !== null && template.horzSize > cellInnerWidth) {
+      template.horzSize = cellInnerWidth;
+      template.lineSeg = setTagAttribute(template.lineSeg, 'horzsize', cellInnerWidth);
     }
     const built = buildParagraphXml(line, template, cursor);
     cursor = built.nextVertPos;
@@ -1855,7 +2058,113 @@ function extractCellXmlFromPackage(inputBytes, table, cellIndex, packageEntries 
   return cellXml.xml;
 }
 
+function deleteTableFromHwpxPackage(inputBytes, table) {
+  const entries = readZip(inputBytes);
+  const sectionName = `Contents/section${table.section}.xml`;
+  const sectionXml = entries.get(sectionName)?.toString('utf8');
+  assert.ok(sectionXml, `${sectionName} not found`);
+  const paragraph = findTopLevelParagraphs(sectionXml)[table.para];
+  assert.ok(paragraph, `paragraph XML index not found: ${table.para}`);
+  const tableBlock = table.packageOnly
+    ? findAllBlocks(paragraph.xml, 'tbl').find((block, ordinal) =>
+      packageTableId(table.section, table.para, block.xml, ordinal) === table.id)
+    : findBlocks(paragraph.xml, 'tbl')[table.tableOrderInParagraph];
+  assert.ok(tableBlock, `table XML index not found: ${table.id}`);
+  const nextParagraph = `${paragraph.xml.slice(0, tableBlock.start)}${paragraph.xml.slice(tableBlock.end)}`;
+  const nextSection = `${sectionXml.slice(0, paragraph.start)}${nextParagraph}${sectionXml.slice(paragraph.end)}`;
+  entries.set(sectionName, Buffer.from(nextSection));
+  const candidateBytes = createZip([...entries.entries()]);
+  const allowedStructuralReferenceLosses = inspectHwpxStructuralReferencesXml(tableBlock.xml);
+  const qualification = qualifyHwpxCandidate(inputBytes, candidateBytes, {
+    allowedStructuralReferenceLosses,
+  });
+  const committedBytes = overlayPreservedEntries(inputBytes, candidateBytes, qualification);
+  return {
+    bytes: committedBytes,
+    qualification,
+    allowedStructuralReferenceLosses,
+  };
+}
+
+function renderedLayoutSnapshot(session) {
+  const pages = Array.from({ length: session.doc.pageCount() }, (_value, pageIndex) => {
+    const svg = session.doc.renderPageSvg(pageIndex);
+    const metrics = analyzeSvgPageMetrics(svg);
+    const lowOccupancy = metrics.sparseContent === true
+      || (Number.isFinite(metrics.verticalOccupancy)
+        && metrics.verticalOccupancy < 0.12
+        && Number(metrics.textCharacters || 0) < 180);
+    return {
+      page: pageIndex + 1,
+      nonBlank: svgHasVisibleContent(svg),
+      lowOccupancy,
+      clipCount: analyzeSvgCellClipping(svg).issues.length,
+    };
+  });
+  return {
+    pageCount: pages.length,
+    blankPageCount: pages.filter((page) => page.nonBlank !== true).length,
+    lowOccupancyPageCount: pages.filter((page) => page.lowOccupancy).length,
+    clipCount: pages.reduce((sum, page) => sum + page.clipCount, 0),
+    pages,
+  };
+}
+
+function autoFitLayoutBudget(ops) {
+  const commands = ops.filter((op) => resolveHwpxCommand(op)?.op === 'table.autoFit');
+  const minimum = (field, fallback) => Math.min(...commands.map((command) => (
+    command[field] === undefined ? fallback : Number(command[field])
+  )));
+  return {
+    maxPageGrowth: minimum('maxPageGrowth', 1),
+    maxBlankPageGrowth: minimum('maxBlankPageGrowth', 0),
+    maxLowOccupancyGrowth: minimum('maxLowOccupancyGrowth', 0),
+  };
+}
+
+function explicitCellParagraphIndex(command) {
+  const target = command.target ?? command.location ?? {};
+  const direct = target.native ?? {};
+  return target.cellParagraphIndex
+    ?? target.cellParaIndex
+    ?? target.cellPara
+    ?? direct.cellParagraphIndex
+    ?? direct.cellParaIndex
+    ?? direct.cellPara;
+}
+
+function assertAutoFitLayoutRegression(baseline, candidate, budget) {
+  const delta = {
+    pageGrowth: candidate.pageCount - baseline.pageCount,
+    blankPageGrowth: candidate.blankPageCount - baseline.blankPageCount,
+    lowOccupancyGrowth: candidate.lowOccupancyPageCount - baseline.lowOccupancyPageCount,
+    clipGrowth: candidate.clipCount - baseline.clipCount,
+  };
+  if (delta.clipGrowth > 0) {
+    throw structuralBatchError(
+      'HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION',
+      'The auto-fit candidate introduced rendered table-cell clipping after reopen.',
+      { baseline, candidate, delta, budget },
+    );
+  }
+  if (delta.pageGrowth > budget.maxPageGrowth
+    || delta.blankPageGrowth > budget.maxBlankPageGrowth
+    || delta.lowOccupancyGrowth > budget.maxLowOccupancyGrowth) {
+    throw structuralBatchError(
+      'HWPX_AUTOFIT_PAGINATION_REGRESSION',
+      'The auto-fit candidate exceeded the explicit document-level pagination budget.',
+      { baseline, candidate, delta, budget },
+    );
+  }
+}
+
 function annotateTablePictureSlots(inputBytes, tables) {
+  if (!isZipPackage(inputBytes)) {
+    for (const table of tables) {
+      for (const cell of table.cells) cell.pictureCount = 0;
+    }
+    return tables;
+  }
   const entries = readZip(inputBytes);
   for (const table of tables) {
     try {
@@ -2101,7 +2410,44 @@ function clearCellWithApi(doc, table, cellIndex) {
   }
 }
 
-function setCellTextWithApi(doc, table, cellIndex, text) {
+function captureCellParagraphTemplate(doc, table, cellIndex, paragraphIndex) {
+  const paragraph = tryJson(() => doc.getCellParaPropertiesAt(
+    table.section, table.para, table.control, cellIndex, paragraphIndex,
+  ));
+  const character = tryJson(() => doc.getCellCharPropertiesAt(
+    table.section, table.para, table.control, cellIndex, paragraphIndex, 0,
+  ));
+  const namedStyle = tryJson(() => doc.getCellStyleAt(
+    table.section, table.para, table.control, cellIndex, paragraphIndex,
+  ));
+  return { paragraph, character, namedStyle };
+}
+
+function restoreCellParagraphTemplate(doc, table, cellIndex, paragraphIndex, template) {
+  if (!template) return;
+  const styleId = Number(template.namedStyle?.id);
+  const paraShapeId = Number(template.paragraph?.paraShapeId);
+  const charShapeId = Number(template.character?.charShapeId);
+  if (![styleId, paraShapeId, charShapeId].every((value) => Number.isInteger(value) && value >= 0)) {
+    throw structuralBatchError(
+      'HWP_CELL_PARAGRAPH_TEMPLATE_UNAVAILABLE',
+      'The selected HWP cell paragraph template does not expose stable style identifiers.',
+      { cellIndex, paragraphIndex, styleId, paraShapeId, charShapeId },
+    );
+  }
+  parseResult(doc.applyCellStyleIds(
+    table.section, table.para, table.control, cellIndex, paragraphIndex,
+    styleId, paraShapeId, charShapeId,
+  ), 'applyCellStyleIds');
+}
+
+function setCellTextWithApi(doc, table, cellIndex, text, options = {}) {
+  const originalParagraphCount = doc.getCellParagraphCount(
+    table.section, table.para, table.control, cellIndex,
+  );
+  const originalTemplates = Array.from({ length: originalParagraphCount }, (_value, paragraphIndex) => (
+    captureCellParagraphTemplate(doc, table, cellIndex, paragraphIndex)
+  ));
   clearCellWithApi(doc, table, cellIndex);
   const lines = String(text ?? '').split('\n');
   lines.forEach((line, index) => {
@@ -2111,6 +2457,17 @@ function setCellTextWithApi(doc, table, cellIndex, text) {
     }
     if (line) {
       parseResult(doc.insertTextInCell(table.section, table.para, table.control, cellIndex, index, 0, line), 'insertTextInCell');
+    }
+    const explicitTemplateIndex = options.paragraphTemplateIndices?.[index];
+    const templateIndex = explicitTemplateIndex === null
+      ? null
+      : Number.isInteger(Number(explicitTemplateIndex))
+        ? Number(explicitTemplateIndex)
+        : Math.min(index, Math.max(0, originalTemplates.length - 1));
+    if (templateIndex !== null) {
+      restoreCellParagraphTemplate(
+        doc, table, cellIndex, index, originalTemplates[templateIndex] ?? originalTemplates.at(-1),
+      );
     }
   });
 }
@@ -2141,6 +2498,15 @@ function structuralBatchError(code, message, details = {}) {
   return error;
 }
 
+function equivalentExactValue(actual, expected) {
+  if (actual === expected) return true;
+  if ((Array.isArray(actual) && Array.isArray(expected))
+    || (actual && expected && typeof actual === 'object' && typeof expected === 'object')) {
+    return coreStableStringify(actual) === coreStableStringify(expected);
+  }
+  return false;
+}
+
 function verifyExpectedRunStyle(target, result, propertiesAt) {
   if (!result?.expectedRunStyle || !result?.expectedRunRange) return;
   const expected = result.expectedRunStyle;
@@ -2148,6 +2514,11 @@ function verifyExpectedRunStyle(target, result, propertiesAt) {
   const offsets = [...new Set([range.start, Math.max(range.start, range.end - 1)])];
   const aliases = {
     fontSizePt: ['fontSize', value => Number(value) * 100, value => value],
+    color: [
+      'textColor',
+      value => String(value).toLowerCase(),
+      value => String(value).toLowerCase(),
+    ],
     textColor: [
       'textColor',
       value => String(value).toLowerCase(),
@@ -2160,8 +2531,9 @@ function verifyExpectedRunStyle(target, result, propertiesAt) {
       const identity = value => value;
       const [actualField, expectedTransform, actualTransform] =
         aliases[field] ?? [field, identity, identity];
-      if (!properties
-        || actualTransform(properties[actualField]) !== expectedTransform(expectedValue)) {
+      const transformedExpected = expectedTransform(expectedValue);
+      const transformedActual = properties ? actualTransform(properties[actualField]) : undefined;
+      if (!properties || !equivalentExactValue(transformedActual, transformedExpected)) {
         throw structuralBatchError(
           'HWPX_CREATED_TARGET_MISMATCH',
           'Structural run formatting did not survive reopening exactly.',
@@ -2169,12 +2541,65 @@ function verifyExpectedRunStyle(target, result, propertiesAt) {
             target,
             offset,
             field,
-            expected: expectedTransform(expectedValue),
+            expected: transformedExpected,
             actual: properties?.[actualField],
           },
         );
       }
     }
+  }
+}
+
+function equivalentFormatValue(actual, expected, scope, field) {
+  if (scope === 'paragraph' && typeof expected === 'number') {
+    const divisors = {
+      indent: 150, marginLeft: 150, marginRight: 150,
+      spacingBefore: 75, spacingAfter: 75,
+    };
+    if (divisors[field]) {
+      return Math.abs(Number(actual) - Math.round((expected / divisors[field]) * 10) / 10) < 0.01;
+    }
+  }
+  if (typeof expected === 'number') return Number(actual) === expected;
+  return equivalentExactValue(actual, expected);
+}
+
+function verifyExpectedFormat(session, target, result) {
+  const expected = result?.expectedFormat;
+  if (!expected) return;
+  let properties = null;
+  if (expected.scope === 'paragraph' && target.kind === 'paragraph') {
+    properties = tryJson(() => session.doc.getParaPropertiesAt(target.sectionIndex, target.paragraphIndex));
+  } else if (expected.scope === 'paragraph' && target.kind === 'cell') {
+    properties = tryJson(() => session.doc.getCellParaPropertiesAt(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+      target.cellIndex, target.cellParagraphIndex,
+    ));
+  } else if (expected.scope === 'cell' && target.kind === 'cell') {
+    properties = tryJson(() => session.doc.getCellProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, target.cellIndex,
+    ));
+  } else if (expected.scope === 'table' && target.kind === 'table') {
+    properties = tryJson(() => session.doc.getTableProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ));
+  } else if (expected.scope === 'image' && target.kind === 'image') {
+    properties = tryJson(() => session.doc.getPictureProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ));
+  } else if (expected.scope === 'shape' && target.kind === 'shape') {
+    properties = tryJson(() => session.doc.getShapeProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ));
+  }
+  const mismatch = !properties || Object.entries(expected.properties)
+    .find(([field, value]) => !equivalentFormatValue(properties[field], value, expected.scope, field));
+  if (mismatch) {
+    throw structuralBatchError(
+      'HWPX_CREATED_TARGET_MISMATCH',
+      'Direct formatting did not survive reopening exactly.',
+      { target, scope: expected.scope, mismatch, properties },
+    );
   }
 }
 
@@ -2249,6 +2674,7 @@ export function verifyStructuralTarget(session, target, result = null) {
       target.paragraphIndex,
       offset,
     ));
+    verifyExpectedFormat(session, target, result);
     return;
   }
   if (target.kind === 'table' || target.kind === 'tableCaption') {
@@ -2262,6 +2688,19 @@ export function verifyStructuralTarget(session, target, result = null) {
         'A structural table target was not found after reopening the candidate.',
         { target },
       );
+    }
+    if (result?.expectedTableDimensions) {
+      const dimensions = tryJson(() => session.doc.getTableDimensions(
+        target.sectionIndex, target.paragraphIndex, target.controlIndex,
+      ));
+      const mismatch = Object.entries(result.expectedTableDimensions)
+        .filter(([, value]) => value !== undefined)
+        .find(([field, value]) => Number(dimensions?.[field]) !== Number(value));
+      if (mismatch) {
+        throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Table structure dimensions did not survive reopening.', {
+          target, expected: result.expectedTableDimensions, dimensions, mismatch,
+        });
+      }
     }
     if (target.kind === 'tableCaption') {
       const properties = tryJson(() => session.doc.getTableProperties(
@@ -2315,6 +2754,26 @@ export function verifyStructuralTarget(session, target, result = null) {
         );
       }
     }
+    verifyExpectedFormat(session, target, result);
+    return;
+  }
+  if (target.kind === 'deletedTable') {
+    if (Number.isInteger(result?.expectedTableCount)) {
+      const actualTableCount = discoverTables(session.doc).length;
+      if (actualTableCount !== result.expectedTableCount) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'Deleted table count did not survive reopening.',
+          { target, expectedTableCount: result.expectedTableCount, actualTableCount },
+        );
+      }
+      return;
+    }
+    const table = discoverTables(session.doc).find(item =>
+      item.section === target.sectionIndex
+      && item.para === target.paragraphIndex
+      && item.control === target.controlIndex);
+    if (table) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Deleted table still exists after reopening.', { target });
     return;
   }
   if (target.kind === 'image') {
@@ -2330,6 +2789,56 @@ export function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
+    if (result?.expectedImageSha256) {
+      const bytes = tryJson(() => session.doc.getControlImageData(
+        target.sectionIndex,
+        target.paragraphIndex,
+        '',
+        target.controlIndex,
+      ));
+      const imageBytes = bytes?.length ? Buffer.from(bytes) : null;
+      const actualSha256 = imageBytes ? createHash('sha256').update(imageBytes).digest('hex') : null;
+      const mimeType = tryJson(() => session.doc.getControlImageMime(
+        target.sectionIndex,
+        target.paragraphIndex,
+        '',
+        target.controlIndex,
+      ));
+      if (!imageBytes || imageBytes.length !== result.expectedImageByteLength
+        || actualSha256 !== result.expectedImageSha256
+        || (result.expectedImageMimeType && mimeType !== result.expectedImageMimeType)) {
+        throw structuralBatchError(
+          'HWPX_IMAGE_ASSET_MISMATCH',
+          'Inserted image bytes or MIME type did not survive save and reopen exactly.',
+          {
+            target,
+            expectedSha256: result.expectedImageSha256,
+            actualSha256,
+            expectedByteLength: result.expectedImageByteLength,
+            actualByteLength: imageBytes?.length ?? null,
+            expectedMimeType: result.expectedImageMimeType,
+            actualMimeType: mimeType,
+          },
+        );
+      }
+    }
+    verifyExpectedFormat(session, target, result);
+    return;
+  }
+  if (target.kind === 'shape') {
+    const properties = tryJson(() => session.doc.getShapeProperties(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+    ));
+    if (!properties) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural shape target was not found after reopening the candidate.',
+        { target },
+      );
+    }
+    verifyExpectedFormat(session, target, result);
     return;
   }
   if (target.kind === 'section') {
@@ -2463,6 +2972,39 @@ export function verifyStructuralTarget(session, target, result = null) {
       target.cellParagraphIndex,
       offset,
     ));
+    verifyExpectedFormat(session, target, result);
+    if (result?.expectedCellHeight !== undefined) {
+      const properties = tryJson(() => session.doc.getCellProperties(
+        target.sectionIndex,
+        target.paragraphIndex,
+        target.controlIndex,
+        target.cellIndex,
+      ));
+      if (!properties || Number(properties.height) < Number(result.expectedCellHeight)) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'An auto-fitted table-cell row did not preserve its requested height after reopening.',
+          {
+            target,
+            expectedCellHeight: result.expectedCellHeight,
+            cellHeight: properties?.height,
+          },
+        );
+      }
+    }
+    if (result?.expectedPictureCount !== undefined) {
+      const table = session.readJson().tables.find((item) => item.section === target.sectionIndex
+        && item.para === target.paragraphIndex
+        && item.control === target.controlIndex);
+      const pictureCount = Number(table?.cells?.[target.cellIndex]?.pictureCount || 0);
+      if (pictureCount !== Number(result.expectedPictureCount)) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A cloned table-cell picture did not survive reopening exactly.',
+          { target, expectedPictureCount: result.expectedPictureCount, pictureCount },
+        );
+      }
+    }
     return;
   }
   if (target.kind === 'documentMetadata') {
@@ -2511,16 +3053,34 @@ function verifyStructuralCommit(session, results) {
   }
 }
 
-function materializeStructuralTrial(session) {
+function materializeStructuralTrial(session, allowedStructuralReferenceLosses = null) {
   if (typeof session.doc.reflowLinesegs === 'function') {
     session.doc.reflowLinesegs();
+  }
+  if (!isZipPackage(session.inputBytes)) {
+    const candidateBytes = Buffer.from(session.doc.exportHwp());
+    const reopened = new HwpxApiSession(candidateBytes, { saveMode: 'hwp-export' });
+    return {
+      reopened,
+      qualification: {
+        ok: reopened.doc.getSourceFormat() === session.doc.getSourceFormat(),
+        sourceFormat: session.doc.getSourceFormat(),
+        outputFormat: reopened.doc.getSourceFormat(),
+        formatPreserved: reopened.doc.getSourceFormat() === session.doc.getSourceFormat(),
+        changedEntries: [],
+        createdEntries: [],
+        copiedEntries: [],
+      },
+    };
   }
   const candidateBytes = Buffer.from(session.doc.exportHwpx());
   const restored = restoreExportOmittedEmbeddedEntries(
     session.inputBytes,
     candidateBytes,
   );
-  const qualification = qualifyHwpxCandidate(session.inputBytes, restored.bytes);
+  const qualification = qualifyHwpxCandidate(session.inputBytes, restored.bytes, {
+    allowedStructuralReferenceLosses,
+  });
   qualification.restoredEntries = restored.restoredEntries;
   const committedBytes = overlayPreservedEntries(
     session.inputBytes,
@@ -2538,25 +3098,36 @@ export class HwpxApiSession {
     this.inputBytes = Buffer.from(inputBytes);
     assertSupportedHwpxPackage(this.inputBytes);
     this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
-    this.revision = 1;
-    this.saveMode = options.saveMode ?? 'preserve-package';
-    this.cellPatches = [];
-    this.paragraphPatches = [];
-    this.paragraphInsertPatches = [];
-    this.paragraphDeletePatches = [];
-    this.tableRowInsertPatches = [];
-    this.tableSizePatches = [];
-    this.cellSizePatches = [];
-    this.pictureClonePatches = [];
-    this.pictureInsertPatches = [];
-    this.pictureReferencePatches = [];
-    this.packagePatches = [];
-    this.shapePatches = [];
-    this.textBoxPatches = [];
-    this.trackedChangePatches = [];
+    this.revision = Math.max(1, Number(options.initialRevision || 1));
+    this.saveMode = options.saveMode ?? (isZipPackage(this.inputBytes) ? 'preserve-package' : 'hwp-export');
+    this.analysisCache = null;
+    this.resetPendingPatches();
+  }
+
+  invalidateAnalysisCache() {
+    this.analysisCache = null;
+  }
+
+  resetPendingPatches() {
+    for (const key of PATCH_COLLECTIONS) this[key] = [];
+  }
+
+  hasPendingPatches() {
+    return PATCH_COLLECTIONS.some(key => this[key].length > 0);
+  }
+
+  adoptCommittedBytes(bytes) {
+    this.inputBytes = Buffer.from(bytes);
+    this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
+    this.resetPendingPatches();
+    this.revision += 1;
+    this.invalidateAnalysisCache();
   }
 
   exportJson() {
+    if (!this.hasPendingPatches() && this.analysisCache?.revision === this.revision) {
+      return this.analysisCache.json;
+    }
     const sections = [];
     const blocks = [];
     for (let section = 0; section < this.doc.getSectionCount(); section += 1) {
@@ -2565,8 +3136,39 @@ export class HwpxApiSession {
       for (let para = 0; para < paragraphCount; para += 1) {
         const text = readBodyParagraphText(this.doc, section, para);
         const id = `s${section}_p${para}`;
-        paragraphs.push({ id, section, para, text, native: { section, para } });
-        blocks.push({ id, kind: 'paragraph', text, native: { section, paragraph: para } });
+        const style = tryJson(() => this.paragraphStyleIds({ paragraph: { section, number: para } })) || {};
+        const paragraphFormat = tryJson(() => this.doc.getParaPropertiesAt(section, para));
+        const characterFormat = text.length > 0
+          ? tryJson(() => this.doc.getCharPropertiesAt(section, para, 0))
+          : null;
+        const measuredStyle = { ids: style, paragraph: paragraphFormat, text: characterFormat };
+        const paragraphFingerprint = {
+          hash: hashString(stableStringify({ kind: 'paragraph', ...measuredStyle })),
+          basis: { kind: 'paragraph', ...measuredStyle },
+        };
+        paragraphs.push({
+          id,
+          section,
+          para,
+          text,
+          style,
+          paragraphFormat,
+          characterFormat,
+          hierarchy: measuredParagraphHierarchy(paragraphFormat, text),
+          styleFingerprint: paragraphFingerprint,
+          native: { section, para },
+        });
+        blocks.push({
+          id,
+          kind: 'paragraph',
+          text,
+          style,
+          paragraphFormat,
+          characterFormat,
+          hierarchy: measuredParagraphHierarchy(paragraphFormat, text),
+          styleFingerprint: paragraphFingerprint,
+          native: { section, paragraph: para },
+        });
       }
       sections.push({ section, paragraphCount, paragraphs });
     }
@@ -2575,9 +3177,11 @@ export class HwpxApiSession {
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
     const tables = annotateTablePictureSlots(this.inputBytes, [...nativeTables, ...nestedTables]);
     const styleGraph = readStyleGraph(this.doc);
-    const objectGraph = readPackageObjects(this.inputBytes);
+    const objectGraph = isZipPackage(this.inputBytes)
+      ? readPackageObjects(this.inputBytes)
+      : readNativePictureObjects(this.doc);
     const editableTargets = buildEditableTargets(sections, tables);
-    return {
+    const json = {
       revision: this.revision,
       sourceFormat: this.doc.getSourceFormat(),
       pageCount: this.doc.pageCount(),
@@ -2601,6 +3205,10 @@ export class HwpxApiSession {
       fields: tryJson(() => this.doc.getFieldList()) ?? [],
       warnings: tryJson(() => this.doc.getValidationWarnings()) ?? null,
     };
+    if (!this.hasPendingPatches()) {
+      this.analysisCache = { revision: this.revision, json };
+    }
+    return json;
   }
 
   readJson() {
@@ -2615,8 +3223,25 @@ export class HwpxApiSession {
     return this.exportJson().editableTargets;
   }
 
+  pageHintFromRect(rect) {
+    if (!rect || !Number.isFinite(Number(rect.y))) return null;
+    const pageCount = Math.max(1, Number(this.doc.pageCount()) || 1);
+    const reportedPageIndex = Math.max(0, Number(rect.pageIndex) || 0);
+    const pageInfo = tryJson(() => this.doc.getPageInfo(Math.min(reportedPageIndex, pageCount - 1)));
+    const pageHeight = Number(pageInfo?.height || 0);
+    const flowPageIndex = pageHeight > 0 ? Math.floor(Math.max(0, Number(rect.y)) / pageHeight) : 0;
+    return Math.min(pageCount, Math.max(reportedPageIndex, flowPageIndex) + 1);
+  }
+
+  paragraphPageHint(section, paragraph) {
+    const rect = tryJson(() => this.doc.getCursorRect(section, paragraph, 0));
+    return this.pageHintFromRect(rect);
+  }
+
   objectInventory() {
-    const objects = readPackageObjects(this.inputBytes);
+    const objects = isZipPackage(this.inputBytes)
+      ? readPackageObjects(this.inputBytes)
+      : readNativePictureObjects(this.doc);
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
     return {
       ...objects,
@@ -2628,6 +3253,34 @@ export class HwpxApiSession {
         dims: table.dims,
       })),
     };
+  }
+
+  readAsset(imageName) {
+    const name = String(imageName || '').trim();
+    assert.ok(name, 'imageName is required');
+    if (isZipPackage(this.inputBytes)) {
+      const bytes = readZip(this.inputBytes).get(name);
+      assert.ok(bytes?.length, `embedded image not found: ${name}`);
+      const extension = name.split('.').pop()?.toLowerCase();
+      const mimeType = extension === 'jpg' || extension === 'jpeg'
+        ? 'image/jpeg'
+        : ['png', 'gif', 'bmp', 'wmf', 'emf'].includes(extension) ? `image/${extension}` : null;
+      return {
+        name,
+        bytes: Buffer.from(bytes),
+        byteLength: bytes.length,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        mimeType,
+      };
+    }
+    const inventory = readNativePictureObjects(this.doc);
+    const image = inventory.images.find((item) => item.name === name);
+    assert.ok(image, `embedded image not found: ${name}`);
+    const picture = inventory.pictures.find((item) => item.id === image.pictureId);
+    assert.ok(picture, `placed picture not found for image: ${name}`);
+    const bytes = this.doc.getControlImageData(picture.section, picture.paragraph, '', picture.control);
+    assert.ok(bytes?.length, `embedded image bytes unavailable: ${name}`);
+    return { ...image, bytes: Buffer.from(bytes) };
   }
 
   findTable(predicate) {
@@ -2670,9 +3323,12 @@ export class HwpxApiSession {
     if (location.tableId || location.table || location.cell || location.tableCell) {
       const table = this.tableFromLocation(location);
       const cell = this.cellFromLocation(table, location);
+      const pageHint = this.pageHintFromRect(table.layout?.bbox)
+        ?? this.paragraphPageHint(table.section, table.para);
       return {
         kind: 'cell',
         id: cell.id,
+        ...(pageHint ? { pageHint } : {}),
         location: cell.location,
         currentText: cell.text,
         table: {
@@ -2680,6 +3336,11 @@ export class HwpxApiSession {
           dims: table.dims,
           native: table.native,
           layout: table.layout,
+        },
+        flow: {
+          section: table.section,
+          paragraph: table.para,
+          order: Number(table.tableOrderInParagraph ?? 0) + 1,
         },
         cell,
         style: cell.style,
@@ -2692,18 +3353,29 @@ export class HwpxApiSession {
     assert.ok(paragraph !== undefined, `paragraph location is incomplete: ${JSON.stringify(location)}`);
     const text = readBodyParagraphText(this.doc, section, paragraph);
     const style = this.paragraphStyleIds({ paragraph: { section, number: paragraph } });
+    const paragraphFormat = tryJson(() => this.doc.getParaPropertiesAt(section, paragraph));
+    const characterFormat = text.length > 0
+      ? tryJson(() => this.doc.getCharPropertiesAt(section, paragraph, 0))
+      : null;
+    const measuredStyle = { ids: style, paragraph: paragraphFormat, text: characterFormat };
+    const pageHint = this.paragraphPageHint(section, paragraph);
     return {
       kind: 'paragraph',
       id: `s${section}_p${paragraph}`,
+      ...(pageHint ? { pageHint } : {}),
       location: { paragraph: { section, number: paragraph } },
+      flow: { section, paragraph, order: 0 },
       currentText: text,
       textLength: text.length,
       style,
+      paragraphFormat,
+      characterFormat,
+      hierarchy: measuredParagraphHierarchy(paragraphFormat, text),
       styleFingerprint: {
-        hash: hashString(stableStringify({ kind: 'paragraph', style })),
-        basis: { kind: 'paragraph', style },
+        hash: hashString(stableStringify({ kind: 'paragraph', ...measuredStyle })),
+        basis: { kind: 'paragraph', ...measuredStyle },
       },
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle', 'list.applyNumbering'],
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle'],
       native: { section, paragraph },
     };
   }
@@ -2725,12 +3397,14 @@ export class HwpxApiSession {
   }
 
   cellTemplateParagraphXml(location) {
+    if (!isZipPackage(this.inputBytes)) return '';
     const table = this.tableFromLocation(location);
     const cell = this.cellFromLocation(table, location);
     return firstCellParagraphXml(extractCellXmlFromPackage(this.inputBytes, table, cell.cellIndex));
   }
 
   paragraphTemplateXml(location) {
+    if (!isZipPackage(this.inputBytes)) return null;
     if (location?.tableId || location?.table || location?.cell || location?.tableCell) {
       return this.cellTemplateParagraphXml(location);
     }
@@ -2738,6 +3412,36 @@ export class HwpxApiSession {
   }
 
   paragraphStyleIds(location) {
+    if (!isZipPackage(this.inputBytes)) {
+      if (location?.tableId || location?.table || location?.cell || location?.tableCell) {
+        const table = this.tableFromLocation(location);
+        const cell = this.cellFromLocation(table, location);
+        const paragraphIndex = Number(location.cellParagraphIndex ?? location.cellParaIndex ?? 0);
+        const paragraph = tryJson(() => this.doc.getCellParaPropertiesAt(
+          table.section, table.para, table.control, cell.cellIndex, paragraphIndex, 0,
+        ));
+        const text = tryJson(() => this.doc.getCellCharPropertiesAt(
+          table.section, table.para, table.control, cell.cellIndex, paragraphIndex, 0,
+        ));
+        const namedStyle = tryJson(() => this.doc.getCellStyleAt(
+          table.section, table.para, table.control, cell.cellIndex, paragraphIndex,
+        ));
+        return stripUndefined(normalizeStyleIds({
+          paraShapeId: paragraph?.paraShapeId,
+          styleId: namedStyle?.id,
+          charShapeId: text?.charShapeId,
+        }));
+      }
+      const { section, paragraph } = normalizeParagraphLocation(location);
+      const paragraphProperties = tryJson(() => this.doc.getParaPropertiesAt(section, paragraph));
+      const characterProperties = tryJson(() => this.doc.getCharPropertiesAt(section, paragraph, 0));
+      const namedStyle = tryJson(() => this.doc.getStyleAt(section, paragraph));
+      return stripUndefined(normalizeStyleIds({
+        paraShapeId: paragraphProperties?.paraShapeId,
+        styleId: namedStyle?.id,
+        charShapeId: characterProperties?.charShapeId,
+      }));
+    }
     if (location?.tableId || location?.table || location?.cell || location?.tableCell) {
       return paragraphStyleIdsFromXml(this.cellTemplateParagraphXml(location));
     }
@@ -2747,6 +3451,12 @@ export class HwpxApiSession {
   cellOuterStyle(location) {
     const table = this.tableFromLocation(location);
     const cell = this.cellFromLocation(table, location);
+    if (!isZipPackage(this.inputBytes)) {
+      const properties = tryJson(() => this.doc.getCellProperties(
+        table.section, table.para, table.control, cell.cellIndex,
+      ));
+      return normalizeCellStyle(properties || {});
+    }
     return cellOuterStyleFromXml(extractCellXmlFromPackage(this.inputBytes, table, cell.cellIndex));
   }
 
@@ -2934,6 +3644,7 @@ export class HwpxApiSession {
         count: Number(command.count),
         templateRow: Number(command.templateRow),
         clearText: command.clearText !== false,
+        extendBoundarySpans: command.extendBoundarySpans === true,
       }];
     }
 
@@ -2959,44 +3670,23 @@ export class HwpxApiSession {
       }];
     }
 
+    if (key === 'tableautofit') {
+      return [{
+        ...command,
+        opId,
+        op: 'autoFitCell',
+        target: command.target ?? command.location,
+        minHeight: command.minHeight === undefined ? undefined : Number(command.minHeight),
+        extraPadding: command.extraPadding === undefined ? undefined : Number(command.extraPadding),
+      }];
+    }
+
     if (key === 'replacetext' || key === 'textreplace') {
       return [{ ...command, opId, op: 'replaceText', text }];
     }
 
     if (key === 'textreplacetracked' || key === 'replacetracked') {
       return [{ ...command, opId, op: 'replaceTracked', text }];
-    }
-
-    if (key === 'listwritebullets' || key === 'listwrite' || key === 'listapplynumbering' || key === 'paragraphapplynumbering') {
-      const listText = buildListText(command.items ?? command.content?.items ?? text, {
-        ...command,
-        numbered: command.numbered ?? key.includes('numbering'),
-      });
-      const hasCellTarget = tableId || location.cell || location.tableCell || command.cell || command.tableCell;
-      if (hasCellTarget) {
-        return [{
-          ...command,
-          opId,
-          op: 'setCellText',
-          target: {
-            tableId,
-            native: location.native,
-            tableCell: normalizeCellReference(command.cell ?? location.cell ?? location.tableCell ?? command.tableCell ?? location.native),
-          },
-          text: listText,
-          styleSource: command.styleSource ?? command.cloneStyleFrom ?? command.sourceLocation,
-          styleIds: command.styleIds ?? command.style ?? command.format,
-        }];
-      }
-      return [{
-        ...command,
-        opId,
-        op: 'replaceParagraphText',
-        target: { native: normalizeParagraphLocation(location) },
-        text: listText,
-        styleSource: command.styleSource ?? command.cloneStyleFrom ?? command.sourceLocation,
-        styleIds: command.styleIds ?? command.style ?? command.format,
-      }];
     }
 
     if (key === 'layoutfittext') {
@@ -3144,12 +3834,66 @@ export class HwpxApiSession {
 
   commandsBatch(ops) {
     validateHwpxCommands(ops);
+    const sourceFormat = isZipPackage(this.inputBytes) ? 'hwpx' : 'hwp';
+    for (const op of ops) {
+      const entry = resolveHwpxCommand(op);
+      if (entry?.op === 'format.apply' || entry?.op === 'object.format') {
+        assertFormatSourceSupport(op.scope, op.properties, sourceFormat);
+      }
+      const paragraphScopedCellFormat = (
+        (entry?.op === 'format.apply' && ['character', 'paragraph'].includes(op.scope))
+        || ['setRunStyle', 'setParagraphStyle', 'applyStyle', 'paragraph.applyStyle'].includes(entry?.op)
+      );
+      if (paragraphScopedCellFormat) {
+        const location = commandLocation(op);
+        const isCellTarget = location?.tableId !== undefined
+          || location?.cell !== undefined
+          || location?.tableCell !== undefined
+          || location?.cellIndex !== undefined
+          || location?.native?.cellIndex !== undefined;
+        if (isCellTarget && explicitCellParagraphIndex(op) === undefined) {
+          const table = this.tableFromLocation(location);
+          const cell = this.cellFromLocation(table, location);
+          if ((cell.paragraphs?.length ?? 1) > 1) {
+            throw structuralBatchError(
+              'HWPX_CELL_PARAGRAPH_INDEX_REQUIRED',
+              'Character or paragraph formatting of a multi-paragraph cell requires an explicit cellParagraphIndex.',
+              {
+                tableId: table.id,
+                cellIndex: cell.cellIndex,
+                paragraphCount: cell.paragraphs.length,
+              },
+            );
+          }
+        }
+      }
+    }
+    if (!isZipPackage(this.inputBytes)) {
+      const unsupported = ops
+        .map(op => resolveHwpxCommand(op)?.op ?? op?.op)
+        .filter(op => HWPX_PACKAGE_ONLY_OPS.has(op));
+      if (unsupported.length) {
+        const error = new Error(
+          `The source is binary HWP and these commands require HWPX package XML: ${[...new Set(unsupported)].join(', ')}. Use native setRunStyle/setParagraphStyle/applyStyle commands, insert a new image, or explicitly convert the document before using package-only commands.`,
+        );
+        error.code = 'HWP_COMMAND_REQUIRES_HWPX_PACKAGE';
+        error.details = { unsupported: [...new Set(unsupported)] };
+        throw error;
+      }
+    }
+    if (ops.every(op => resolveHwpxCommand(op)?.op === 'layout.fitText')) {
+      const trial = new HwpxApiSession(this.inputBytes, { saveMode: this.saveMode });
+      const trialResult = trial.commandsBatchUnsafe(ops);
+      return { revision: this.revision, results: trialResult.results };
+    }
     const locationChangingOps = ops.filter((op) => [
       'text.deleteParagraphs',
       'table.insertRows',
+      'table.structure',
+      'paragraph.structure',
     ].includes(resolveHwpxCommand(op)?.op));
     if (locationChangingOps.length > 0 && ops.length !== 1) {
-      const error = new Error('text.deleteParagraphs and table.insertRows must run alone because they invalidate paragraph and table-cell locations.');
+      const error = new Error('Location-changing paragraph and table structure commands must run alone because they invalidate inspected targets.');
       error.code = 'HWPX_LOCATION_CHANGING_BATCH_UNSUPPORTED';
       throw error;
     }
@@ -3169,97 +3913,165 @@ export class HwpxApiSession {
         workingBytes = Buffer.from(trial.save().bytes);
         results.push(...trialResult.results);
       }
-      this.inputBytes = workingBytes;
-      this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
-      this.cellPatches = [];
-      this.paragraphPatches = [];
-      this.paragraphInsertPatches = [];
-      this.paragraphDeletePatches = [];
-      this.tableRowInsertPatches = [];
-      this.tableSizePatches = [];
-      this.cellSizePatches = [];
-      this.pictureClonePatches = [];
-      this.pictureInsertPatches = [];
-      this.pictureReferencePatches = [];
-      this.packagePatches = [];
-      this.shapePatches = [];
-      this.textBoxPatches = [];
-      this.trackedChangePatches = [];
-      this.revision += 1;
+      this.adoptCommittedBytes(workingBytes);
       return { revision: this.revision, results };
     }
-    const classification = classifyHwpxCommands(ops);
+    const packageClassification = classifyHwpxCommands(ops);
+    const hwpSource = !isZipPackage(this.inputBytes);
+    const structuralReasons = [...packageClassification.reasons];
+    if (hwpSource && ops.some(op => (
+      (resolveHwpxCommand(op)?.op ?? op?.op) === 'image.insertAfterParagraph'
+    ))) {
+      structuralReasons.push('image.insertAfterParagraph');
+    }
+    const classification = {
+      mode: structuralReasons.length > 0 ? 'structural-export' : 'patch-safe',
+      reasons: structuralReasons,
+    };
     if (classification.mode === 'structural-export') {
       return this.commandsStructuralBatch(ops, classification);
     }
+    const verifiesAutoFitClipping = ops.some(sourceOp =>
+      resolveHwpxCommand(sourceOp)?.op === 'table.autoFit');
+    const baselineAutoFitLayout = verifiesAutoFitClipping ? renderedLayoutSnapshot(this) : null;
+    const autoFitBudget = verifiesAutoFitClipping ? autoFitLayoutBudget(ops) : null;
     const trial = new HwpxApiSession(this.inputBytes, { saveMode: this.saveMode });
     const trialResult = trial.commandsBatchUnsafe(ops);
     const committed = trial.save();
-    this.inputBytes = Buffer.from(committed.bytes);
-    this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
-    this.cellPatches = [];
-    this.paragraphPatches = [];
-    this.paragraphInsertPatches = [];
-    this.paragraphDeletePatches = [];
-    this.tableRowInsertPatches = [];
-    this.tableSizePatches = [];
-    this.cellSizePatches = [];
-    this.pictureClonePatches = [];
-    this.pictureInsertPatches = [];
-    this.pictureReferencePatches = [];
-    this.packagePatches = [];
-    this.shapePatches = [];
-    this.textBoxPatches = [];
-    this.trackedChangePatches = [];
-    this.revision += 1;
+    if (verifiesAutoFitClipping) {
+      const reopened = new HwpxApiSession(committed.bytes, { saveMode: this.saveMode });
+      assertAutoFitLayoutRegression(
+        baselineAutoFitLayout,
+        renderedLayoutSnapshot(reopened),
+        autoFitBudget,
+      );
+    }
+    this.adoptCommittedBytes(committed.bytes);
     return { revision: this.revision, results: trialResult.results };
   }
 
   commandsStructuralBatch(ops, classification = classifyHwpxCommands(ops)) {
-    const normalizedOps = ops.flatMap((op, index) => this.normalizeCommand(op, index));
+    const verifiesAutoFitClipping = ops.some(sourceOp =>
+      resolveHwpxCommand(sourceOp)?.op === 'table.autoFit');
+    const baselineAutoFitLayout = verifiesAutoFitClipping ? renderedLayoutSnapshot(this) : null;
+    const autoFitBudget = verifiesAutoFitClipping ? autoFitLayoutBudget(ops) : null;
     let working = new HwpxApiSession(this.inputBytes, {
-      saveMode: 'preserve-package',
+      saveMode: this.saveMode,
     });
     let structuralDirty = false;
+    let allowedStructuralReferenceLosses = null;
     const results = [];
     const qualifications = [];
 
     const flushStructural = () => {
       if (!structuralDirty) return;
-      const materialized = materializeStructuralTrial(working);
+      const materialized = materializeStructuralTrial(
+        working,
+        allowedStructuralReferenceLosses,
+      );
       qualifications.push(materialized.qualification);
       working = materialized.reopened;
       structuralDirty = false;
+      allowedStructuralReferenceLosses = null;
     };
 
-    for (const op of normalizedOps) {
-      if (classifyHwpxCommands([op]).mode === 'structural-export') {
-        const entry = resolveHwpxCommand(op);
+    for (const [opIndex, sourceOp] of ops.entries()) {
+      const entry = resolveHwpxCommand(sourceOp);
+      const hwpSource = !isZipPackage(working.inputBytes);
+      if (!hwpSource && entry?.op === 'table.structure' && sourceOp.action === 'deleteTable') {
+        flushStructural();
+        const before = working.exportJson();
+        const location = commandLocation(sourceOp);
+        const tableId = location?.tableId;
+        const table = before.tables.find(item => item.id === tableId);
+        assert.ok(table, `deleteTable target table not found: ${tableId || '(missing tableId)'}`);
+        const deleted = deleteTableFromHwpxPackage(working.inputBytes, table);
+        qualifications.push(deleted.qualification);
+        working = new HwpxApiSession(deleted.bytes, { saveMode: 'preserve-package' });
+        results.push({
+          opId: commandId(sourceOp, opIndex),
+          op: entry.op,
+          changed: 1,
+          target: {
+            kind: 'deletedTable',
+            sectionIndex: table.section,
+            paragraphIndex: table.para,
+            controlIndex: table.control,
+          },
+          createdTargets: [],
+          native: { ok: true, method: 'package-table-delete' },
+          expectedTableCount: before.tables.length - 1,
+        });
+        continue;
+      }
+      const packageStructural = entry
+        && classifyHwpxCommands([{ ...sourceOp, op: entry.op }]).mode === 'structural-export';
+      const useStructuralAdapter = entry && (
+        (packageStructural && (entry.op !== 'appendParagraph' || hwpSource))
+        || (hwpSource && entry.op === 'image.insertAfterParagraph')
+      );
+      if (useStructuralAdapter) {
+        const before = working.exportJson();
+        if (isZipPackage(working.inputBytes)
+          && entry.op === 'table.structure'
+          && sourceOp.action === 'deleteTable') {
+          const location = commandLocation(sourceOp);
+          const tableId = location?.tableId;
+          const table = before.tables.find(item => item.id === tableId);
+          assert.ok(table, `deleteTable target table not found: ${tableId || '(missing tableId)'}`);
+          const tableXml = extractTableXmlFromPackageEntries(readZip(working.inputBytes), table);
+          allowedStructuralReferenceLosses = inspectHwpxStructuralReferencesXml(tableXml);
+        }
         const structuralOp = {
-          ...op,
-          op: entry?.normalizeAs ?? entry?.op ?? op.op,
+          ...sourceOp,
+          opId: commandId(sourceOp, opIndex),
+          op: entry.normalizeAs ?? entry.op,
         };
         const result = applyHwpxStructuralCommand(working.doc, structuralOp, {
-          before: working.exportJson(),
+          before,
         });
-        results.push({ ...result, opId: op.opId });
+        working.invalidateAnalysisCache();
+        results.push({ ...result, opId: structuralOp.opId });
         structuralDirty = true;
         continue;
       }
 
       flushStructural();
-      const patchResult = working.commandsBatchUnsafe([op]);
-      results.push(...patchResult.results);
-      const sourceBytes = Buffer.from(working.inputBytes);
-      const saved = working.save();
-      qualifications.push(qualifyHwpxCandidate(sourceBytes, saved.bytes));
-      working = new HwpxApiSession(saved.bytes, {
-        saveMode: 'preserve-package',
-      });
+      for (const normalizedOp of working.normalizeCommand(sourceOp, opIndex)) {
+        const patchResult = working.commandsBatchUnsafe([normalizedOp]);
+        results.push(...patchResult.results);
+        const sourceBytes = Buffer.from(working.inputBytes);
+        const sourceFormat = working.doc.getSourceFormat();
+        const saved = working.save();
+        if (isZipPackage(sourceBytes)) {
+          qualifications.push(qualifyHwpxCandidate(sourceBytes, saved.bytes));
+        } else {
+          const reopened = new HwpDocument(new Uint8Array(saved.bytes));
+          qualifications.push({
+            ok: reopened.getSourceFormat() === sourceFormat,
+            sourceFormat,
+            outputFormat: reopened.getSourceFormat(),
+            formatPreserved: reopened.getSourceFormat() === sourceFormat,
+            changedEntries: [],
+            createdEntries: [],
+            copiedEntries: [],
+          });
+        }
+        working = new HwpxApiSession(saved.bytes, {
+          saveMode: isZipPackage(saved.bytes) ? 'preserve-package' : 'hwp-export',
+        });
+      }
     }
     flushStructural();
 
     verifyStructuralCommit(working, results);
+    if (verifiesAutoFitClipping) {
+      assertAutoFitLayoutRegression(
+        baselineAutoFitLayout,
+        renderedLayoutSnapshot(working),
+        autoFitBudget,
+      );
+    }
     const validation = working.validationReport(working.doc);
     const qualification = {
       ok: qualifications.length > 0
@@ -3274,23 +4086,7 @@ export class HwpxApiSession {
       copiedEntries: qualifications.flatMap(item => item.copiedEntries ?? []),
     };
 
-    this.inputBytes = Buffer.from(working.inputBytes);
-    this.doc = new HwpDocument(new Uint8Array(this.inputBytes));
-    this.cellPatches = [];
-    this.paragraphPatches = [];
-    this.paragraphInsertPatches = [];
-    this.paragraphDeletePatches = [];
-    this.tableRowInsertPatches = [];
-    this.tableSizePatches = [];
-    this.cellSizePatches = [];
-    this.pictureClonePatches = [];
-    this.pictureInsertPatches = [];
-    this.pictureReferencePatches = [];
-    this.packagePatches = [];
-    this.shapePatches = [];
-    this.textBoxPatches = [];
-    this.trackedChangePatches = [];
-    this.revision += 1;
+    this.adoptCommittedBytes(working.inputBytes);
     return {
       revision: this.revision,
       results,
@@ -3314,7 +4110,11 @@ export class HwpxApiSession {
         const paragraphStyleIds = op.paragraphStyleIds?.map((item) => (
           item === null ? null : mergeStyleIds(styleIds, item)
         ));
-        if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, text);
+        if (!table.packageOnly) {
+          setCellTextWithApi(this.doc, table, cell.cellIndex, text, {
+            paragraphTemplateIndices: op.paragraphTemplateIndices,
+          });
+        }
         this.cellPatches.push({
           section: table.section,
           para: table.para,
@@ -3364,13 +4164,59 @@ export class HwpxApiSession {
         }
         for (const [section, paras] of bySection) {
           assert.ok(this.doc.getParagraphCount(section) - paras.length >= 1, 'text.deleteParagraphs must leave at least one paragraph in each section');
-          this.paragraphDeletePatches.push({ section, paras, opId: op.opId });
+          if (isZipPackage(this.inputBytes)) {
+            this.paragraphDeletePatches.push({ section, paras, opId: op.opId });
+          } else {
+            for (const para of [...new Set(paras)].sort((a, b) => b - a)) {
+              parseResult(this.doc.deleteParagraph(section, para), 'deleteParagraph');
+            }
+            this.paragraphDeletePatches.push({ section, paras: [], opId: op.opId });
+          }
         }
         results.push({ opId: op.opId, ok: true, action: 'text.deleteParagraphs', paragraphCount: op.locations.length });
       } else if (op.op === 'insertTableRows') {
         const table = this.tableFromLocation(op.target);
         assert.ok(op.rowIndex >= 0 && op.rowIndex <= table.dims.rowCount, `table.insertRows rowIndex out of range: ${op.rowIndex}`);
         assert.ok(op.templateRow >= 0 && op.templateRow < table.dims.rowCount, `table.insertRows templateRow out of range: ${op.templateRow}`);
+        if (!isZipPackage(this.inputBytes)) {
+          const adjacentTemplate = op.templateRow === op.rowIndex
+            || op.templateRow === op.rowIndex - 1;
+          assert.ok(
+            adjacentTemplate,
+            'HWP table.insertRows requires templateRow to be adjacent to rowIndex so native insertion can preserve the selected row style exactly.',
+          );
+          for (let index = 0; index < op.count; index += 1) {
+            const dimensions = tryJson(() => this.doc.getTableDimensions(
+              table.section, table.para, table.control,
+            ));
+            const rowCount = Number(dimensions?.rows ?? dimensions?.rowCount ?? table.dims.rowCount + index);
+            const insertAtStart = op.rowIndex === 0;
+            const insertAtEnd = op.rowIndex >= rowCount;
+            const referenceRow = insertAtStart ? 0 : insertAtEnd ? rowCount - 1 : op.rowIndex;
+            parseResult(this.doc.insertTableRow(
+              table.section,
+              table.para,
+              table.control,
+              referenceRow,
+              insertAtEnd || (!insertAtStart && op.templateRow === op.rowIndex - 1),
+            ), 'insertTableRow');
+          }
+          if (op.clearText !== false) {
+            const dimensions = tryJson(() => this.doc.getTableDimensions(
+              table.section, table.para, table.control,
+            ));
+            const cellCount = Number(dimensions?.cellCount ?? 0);
+            for (let cellIndex = 0; cellIndex < cellCount; cellIndex += 1) {
+              const info = tryJson(() => this.doc.getCellInfo(
+                table.section, table.para, table.control, cellIndex,
+              ));
+              const row = Number(info?.row);
+              if (row >= op.rowIndex && row < op.rowIndex + op.count) {
+                clearCellWithApi(this.doc, table, cellIndex);
+              }
+            }
+          }
+        }
         this.tableRowInsertPatches.push({
           section: table.section,
           para: table.para,
@@ -3394,6 +4240,35 @@ export class HwpxApiSession {
         });
       } else if (op.op === 'setTableSize') {
         const table = this.tableFromLocation(op.target);
+        if (!isZipPackage(this.inputBytes)) {
+          const tableProperties = tryJson(() => this.doc.getTableProperties(
+            table.section, table.para, table.control,
+          ));
+          const dimensions = tryJson(() => this.doc.getTableDimensions(
+            table.section, table.para, table.control,
+          ));
+          const currentWidth = Number(tableProperties?.tableWidth || 0);
+          const currentHeight = Number(tableProperties?.tableHeight || 0);
+          assert.ok(currentWidth > 0 && currentHeight > 0, 'getTableProperties returned no HWP table geometry');
+          const updates = [];
+          for (let cellIndex = 0; cellIndex < Number(dimensions?.cellCount || 0); cellIndex += 1) {
+            const properties = tryJson(() => this.doc.getCellProperties(
+              table.section, table.para, table.control, cellIndex,
+            ));
+            assert.ok(properties, `getCellProperties returned no HWP cell geometry: ${cellIndex}`);
+            const update = { cellIdx: cellIndex };
+            if (op.width !== undefined) {
+              update.widthDelta = Math.round(Number(properties.width || 0) * (op.width / currentWidth - 1));
+            }
+            if (op.height !== undefined) {
+              update.heightDelta = Math.round(Number(properties.height || 0) * (op.height / currentHeight - 1));
+            }
+            updates.push(update);
+          }
+          parseResult(this.doc.resizeTableCells(
+            table.section, table.para, table.control, JSON.stringify(updates),
+          ), 'resizeTableCells');
+        }
         this.tableSizePatches.push({
           section: table.section,
           para: table.para,
@@ -3414,6 +4289,18 @@ export class HwpxApiSession {
       } else if (op.op === 'setCellSize') {
         const table = this.tableFromLocation(op.target);
         const cell = this.cellFromLocation(table, op.target);
+        if (!isZipPackage(this.inputBytes)) {
+          const properties = tryJson(() => this.doc.getCellProperties(
+            table.section, table.para, table.control, cell.cellIndex,
+          ));
+          assert.ok(properties, 'getCellProperties returned no HWP cell geometry');
+          const update = { cellIdx: cell.cellIndex };
+          if (op.width !== undefined) update.widthDelta = op.width - Number(properties.width || 0);
+          if (op.height !== undefined) update.heightDelta = op.height - Number(properties.height || 0);
+          parseResult(this.doc.resizeTableCells(
+            table.section, table.para, table.control, JSON.stringify([update]),
+          ), 'resizeTableCells');
+        }
         this.cellSizePatches.push({
           section: table.section,
           para: table.para,
@@ -3431,6 +4318,34 @@ export class HwpxApiSession {
           target: cell.id,
           width: op.width,
           height: op.height,
+        });
+      } else if (op.op === 'autoFitCell') {
+        const table = this.tableFromLocation(op.target);
+        const measured = applyHwpxStructuralCommand(this.doc, {
+          ...op,
+          op: 'table.autoFit',
+        }, { before: this.exportJson() });
+        const desiredHeight = Number(measured.expectedCellHeight || 0);
+        for (const update of measured.native?.updates || []) {
+          this.cellSizePatches.push({
+            section: table.section,
+            para: table.para,
+            tableOrderInParagraph: table.tableOrderInParagraph,
+            xmlTableId: table.packageOnly ? table.id : null,
+            cellIndex: Number(update.cellIdx),
+            height: desiredHeight,
+            opId: op.opId,
+          });
+        }
+        results.push({
+          opId: op.opId,
+          ok: true,
+          action: 'table.autoFit',
+          target: measured.target,
+          changed: measured.native?.updates?.length || 0,
+          expectedCellHeight: desiredHeight,
+          measuredContentHeight: measured.measuredContentHeight,
+          previousCellHeight: measured.previousCellHeight,
         });
       } else if (op.op === 'image.cloneToCell') {
         const table = this.tableFromLocation(op.target);
@@ -3458,6 +4373,7 @@ export class HwpxApiSession {
           action: 'image.cloneToCell',
           target: cell.id,
           sourcePictureId: op.sourcePictureId,
+          expectedPictureCount: Number(cell.pictureCount || 0) + 1,
         });
       } else if (op.op === 'replaceText') {
         const { section, para } = op.target.native;
@@ -3721,13 +4637,75 @@ export class HwpxApiSession {
             });
           }
         }
+        const maxLines = cell.layout?.capacity?.maxLines;
+        const requiredLines = estimatedWrappedLineCount(cell.text, cell.layout?.capacity);
+        const explicitParagraphs = String(cell.text ?? '').split('\n').length;
+        if (maxLines && requiredLines && requiredLines > maxLines) {
+          issues.push({
+            severity: 'warning',
+            code: 'cell-content-clipped',
+            message: 'Estimated line capacity suggests that cell content may be clipped; confirm with rendered-layout evidence.',
+            location: cell.location,
+            explicitParagraphs,
+            requiredLines,
+            maxLines,
+            requiredHeight: Math.ceil(requiredLines * Number(cell.layout.capacity.basis?.lineHeight || 0)),
+            availableHeight: Number(cell.layout.capacity.basis?.innerHeight || 0),
+          });
+        }
       }
     }
     if (options.baselineJson) {
-      const currentCells = new Map(json.tables.flatMap((table) => table.cells.map((cell) => [cell.id, cell])));
-      for (const baselineTable of options.baselineJson.tables ?? []) {
+      if (Number(options.baselineJson.pageCount) !== Number(json.pageCount)) {
+        issues.push({
+          severity: 'warning',
+          code: 'page-count-changed',
+          message: 'The rendered page count changed from the opened source. Confirm that the pagination change is intentional.',
+          before: Number(options.baselineJson.pageCount),
+          after: Number(json.pageCount),
+          delta: Number(json.pageCount) - Number(options.baselineJson.pageCount),
+        });
+      }
+      const baselineTables = options.baselineJson.tables ?? [];
+      const deletedTableIds = new Set(options.deletedTableIds ?? []);
+      const matchedTables = matchBaselineTables(baselineTables, json.tables ?? [], deletedTableIds);
+      const requiredTableIds = new Set(options.templatePolicy?.requiredTableIds || []);
+      const removableTableIds = new Set(options.templatePolicy?.removableTableIds || []);
+      for (const baselineTable of baselineTables) {
+        const currentTable = deletedTableIds.has(baselineTable.id)
+          ? null
+          : matchedTables.get(baselineTable);
+        if (!currentTable) {
+          if (!removableTableIds.has(baselineTable.id)) {
+            issues.push({
+              severity: requiredTableIds.has(baselineTable.id) ? 'error' : 'warning',
+              code: requiredTableIds.has(baselineTable.id) ? 'required-table-missing' : 'unclassified-table-missing',
+              message: requiredTableIds.has(baselineTable.id)
+                ? 'A table marked required by the template policy is missing.'
+                : 'An unclassified baseline table is missing; classify it as removable or required.',
+              tableId: baselineTable.id,
+            });
+          }
+          continue;
+        }
+        const baselineDimensions = normalizedTableDimensions(baselineTable.dims);
+        const currentDimensions = normalizedTableDimensions(currentTable.dims);
+        if ((baselineDimensions.rows !== null && currentDimensions.rows !== null
+            && baselineDimensions.rows !== currentDimensions.rows)
+          || (baselineDimensions.columns !== null && currentDimensions.columns !== null
+            && baselineDimensions.columns !== currentDimensions.columns)) {
+          issues.push({
+            severity: 'warning',
+            code: 'table-dimensions-changed',
+            message: 'Table dimensions changed from the opened source. Confirm that this template change is intentional.',
+            tableId: baselineTable.id,
+            before: baselineTable.dims,
+            after: currentTable.dims,
+          });
+        }
         for (const baselineCell of baselineTable.cells ?? []) {
-          const currentCell = currentCells.get(baselineCell.id);
+          const currentCell = currentTable.cells?.find(cell =>
+            Number(cell.cellIndex) === Number(baselineCell.cellIndex));
           if (currentCell && baselineCell.styleFingerprint?.hash && currentCell.styleFingerprint?.hash
             && baselineCell.styleFingerprint.hash !== currentCell.styleFingerprint.hash) {
             issues.push({
@@ -3740,6 +4718,66 @@ export class HwpxApiSession {
             });
           }
         }
+      }
+      const currentImages = new Map((json.objectGraph?.images || []).map((image) => [image.name, image]));
+      const baselinePictures = options.baselineJson.objectGraph?.pictures ?? [];
+      const currentPictures = json.objectGraph?.pictures ?? [];
+      const requiredImageNames = new Set(options.templatePolicy?.requiredImageNames || []);
+      const replaceableImageNames = new Set(options.templatePolicy?.replaceableImageNames || []);
+      for (const baselineImage of options.baselineJson.objectGraph?.images ?? []) {
+        const currentImage = currentImages.get(baselineImage.name);
+        if (!currentImage) {
+          issues.push({
+            severity: requiredImageNames.has(baselineImage.name) ? 'error' : 'warning',
+            code: requiredImageNames.has(baselineImage.name) ? 'required-image-missing' : 'unclassified-image-missing',
+            message: requiredImageNames.has(baselineImage.name)
+              ? 'An embedded image marked required by the template policy is missing.'
+              : 'An unclassified baseline image is missing; classify it as replaceable or required.',
+            imageName: baselineImage.name,
+            beforeSha256: baselineImage.sha256,
+          });
+        } else if (baselineImage.sha256 && currentImage.sha256 && baselineImage.sha256 !== currentImage.sha256
+          && !replaceableImageNames.has(baselineImage.name)) {
+          const required = requiredImageNames.has(baselineImage.name);
+          issues.push({
+            severity: required ? 'error' : 'info',
+            code: required ? 'required-image-bytes-changed' : 'image-bytes-changed',
+            message: required
+              ? 'An embedded image marked required changed bytes from the opened source.'
+              : 'Embedded image bytes changed from the opened source.',
+            imageName: baselineImage.name,
+            beforeSha256: baselineImage.sha256,
+            afterSha256: currentImage.sha256,
+          });
+        }
+        if (requiredImageNames.has(baselineImage.name)) {
+          const logicalReference = imageLogicalReference(baselineImage.name);
+          const beforePlacementCount = baselinePictures.filter(picture =>
+            String(picture.binItemIDRef ?? picture.binaryItemIDRef ?? '') === logicalReference).length;
+          const afterPlacementCount = currentPictures.filter(picture =>
+            String(picture.binItemIDRef ?? picture.binaryItemIDRef ?? '') === logicalReference).length;
+          if (afterPlacementCount < beforePlacementCount) {
+            issues.push({
+              severity: 'error',
+              code: 'required-image-placement-missing',
+              message: 'One or more placements of an image marked required disappeared.',
+              imageName: baselineImage.name,
+              before: beforePlacementCount,
+              after: afterPlacementCount,
+            });
+          }
+        }
+      }
+      const baselinePictureCount = Number(options.baselineJson.objectGraph?.pictures?.length || 0);
+      const currentPictureCount = Number(json.objectGraph?.pictures?.length || 0);
+      if (currentPictureCount < baselinePictureCount) {
+        issues.push({
+          severity: 'warning',
+          code: 'baseline-picture-count-decreased',
+          message: 'One or more placed picture objects disappeared from the document.',
+          before: baselinePictureCount,
+          after: currentPictureCount,
+        });
       }
     }
     return {
@@ -3763,6 +4801,19 @@ export class HwpxApiSession {
   }
 
   save() {
+    if (this.saveMode === 'hwp-export') {
+      if (!this.hasPendingPatches()) {
+        return {
+          bytes: Buffer.from(this.inputBytes),
+          revision: this.revision,
+          validation: this.validationReport(new HwpDocument(new Uint8Array(this.inputBytes))),
+        };
+      }
+      const saved = Buffer.from(this.doc.exportHwp());
+      const reopened = new HwpDocument(new Uint8Array(saved));
+      this.revision += 1;
+      return { bytes: saved, revision: this.revision, validation: this.validationReport(reopened) };
+    }
     if (this.saveMode === 'rhwp-export') {
       if (typeof this.doc.reflowLinesegs === 'function') {
         this.doc.reflowLinesegs();
@@ -3796,12 +4847,7 @@ export class HwpxApiSession {
       };
     }
 
-    if (!this.cellPatches.length && !this.paragraphPatches.length
-      && !this.paragraphInsertPatches.length && !this.paragraphDeletePatches.length
-      && !this.tableRowInsertPatches.length && !this.tableSizePatches.length && !this.cellSizePatches.length
-      && !this.pictureClonePatches.length && !this.pictureInsertPatches.length
-      && !this.pictureReferencePatches.length && !this.packagePatches.length
-      && !this.shapePatches.length && !this.textBoxPatches.length) {
+    if (!this.hasPendingPatches()) {
       return {
         bytes: Buffer.from(this.inputBytes),
         revision: this.revision,

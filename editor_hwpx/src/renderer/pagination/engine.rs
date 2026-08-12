@@ -857,7 +857,9 @@ impl Paginator {
                     } else {
                         0.0
                     };
-                    (effective_sb + outer_top + tac_seg_total + post_text_h + sa).min(para_height)
+                    // Preserve the measured inline-table height even when the
+                    // source line segment only describes the host text line.
+                    effective_sb + outer_top + tac_seg_total + post_text_h + sa
                 } else {
                     para_height
                 };

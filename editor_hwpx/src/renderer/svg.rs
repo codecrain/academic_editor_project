@@ -15,7 +15,7 @@ pub(crate) use super::image_resolver::{
 use super::pua_oldhangul::map_pua_old_hangul;
 use super::render_tree::{
     BoundingBox, FormObjectNode, ImageNode, PageBackgroundImage, PageRenderTree, RenderNode,
-    RenderNodeType, ShapeTransform, LEGACY_IMAGE_WATERMARK_OPACITY,
+    RenderNodeType, ShapeTransform, TableNode, LEGACY_IMAGE_WATERMARK_OPACITY,
     REAL_PICTURE_WATERMARK_FILL_OPACITY, REAL_PICTURE_WATERMARK_PAGE_OPACITY,
 };
 use super::{
@@ -100,6 +100,8 @@ pub struct SvgRenderer {
     pub font_paths: Vec<std::path::PathBuf>,
     /// 사용된 폰트별 codepoint 수집 (font_family → codepoints)
     font_codepoints: std::collections::HashMap<String, std::collections::HashSet<char>>,
+    /// Current table ancestry used to attach semantic provenance to cell clips.
+    active_tables: Vec<TableNode>,
 }
 
 /// 디버그 오버레이용 문단 경계 정보
@@ -171,6 +173,7 @@ impl SvgRenderer {
             font_embed_mode: FontEmbedMode::None,
             font_paths: Vec::new(),
             font_codepoints: std::collections::HashMap::new(),
+            active_tables: Vec::new(),
         }
     }
 
@@ -249,6 +252,13 @@ impl SvgRenderer {
         if !node.visible {
             return;
         }
+
+        let entered_table = if let RenderNodeType::Table(table) = &node.node_type {
+            self.active_tables.push(table.clone());
+            true
+        } else {
+            false
+        };
 
         match &node.node_type {
             RenderNodeType::Page(page) => {
@@ -539,12 +549,26 @@ impl SvgRenderer {
             }
             RenderNodeType::TableCell(ref tc) if tc.clip => {
                 let clip_id = format!("cell-clip-{}", node.id);
+                let table = self.active_tables.last();
+                let section = table
+                    .and_then(|value| value.section_index)
+                    .map_or(-1_i64, |value| value as i64);
+                let paragraph = table
+                    .and_then(|value| value.para_index)
+                    .map_or(-1_i64, |value| value as i64);
+                let control = table
+                    .and_then(|value| value.control_index)
+                    .map_or(-1_i64, |value| value as i64);
+                let cell_index = tc.model_cell_index.map_or(-1_i64, |value| value as i64);
                 self.defs.push(format!(
-                    "<clipPath id=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n",
-                    clip_id, node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
+                    "<clipPath id=\"{}\" data-section=\"{}\" data-paragraph=\"{}\" data-control=\"{}\" data-cell-index=\"{}\" data-row=\"{}\" data-column=\"{}\"><rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"/></clipPath>\n",
+                    clip_id, section, paragraph, control, cell_index, tc.row, tc.col,
+                    node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                 ));
-                self.output
-                    .push_str(&format!("<g clip-path=\"url(#{})\">", clip_id));
+                self.output.push_str(&format!(
+                    "<g clip-path=\"url(#{})\" data-section=\"{}\" data-paragraph=\"{}\" data-control=\"{}\" data-cell-index=\"{}\" data-row=\"{}\" data-column=\"{}\">",
+                    clip_id, section, paragraph, control, cell_index, tc.row, tc.col,
+                ));
             }
             RenderNodeType::TextBox => {
                 let clip_id = format!("textbox-clip-{}", node.id);
@@ -732,6 +756,9 @@ impl SvgRenderer {
         }
 
         // 도형 변환 그룹 종료
+        if entered_table {
+            self.active_tables.pop();
+        }
         self.close_shape_transform(&node.node_type);
 
         // 조판부호 개체 마커 (붉은색 대괄호) — 조판부호 ON일 때만

@@ -222,10 +222,9 @@ const ops = [
   cellOp('summary-title', tables.tbl_1, 0, 1, '< 2025년 기부·답례품 실적 분석보고서 요약 >'),
   {
     commandId: 'summary-body',
-    op: 'list.writeBullets',
+    op: 'table.writeCell',
     location: { tableId: tables.tbl_1.id, cell: { row: 2, column: 0 } },
-    marker: '·',
-    items: summaryText.split('\n').map((line) => line.replace(/^·\s*/, '')),
+    text: summaryText,
     fit: true,
     fitOptions: { maxCharsPerLine: 78, truncate: false },
   },
@@ -294,7 +293,7 @@ assert.equal(saved.validation.tables.length, before.tables.length);
 
 const report = {
   ok: true,
-  method: 'HwpxApiSession readJson -> apply(text.replaceParagraph,table.writeCell,list.writeBullets,paragraph.applyStyle,table.applyCellStyle) -> preserve-package save',
+  method: 'HwpxApiSession readJson -> apply(text.replaceParagraph,table.writeCell,paragraph.applyStyle,table.applyCellStyle) -> preserve-package save',
   inputPath,
   outputPath: actualOutputPath,
   requestedOutputPath: outputPath,

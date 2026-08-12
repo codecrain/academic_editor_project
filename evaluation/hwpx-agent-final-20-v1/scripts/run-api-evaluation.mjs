@@ -539,48 +539,51 @@ try {
       mcpDocumentId = mcpOpened.documentId;
       mcpRevision = mcpOpened.revision;
       for (const op of catalogOps) {
-        const catalog = await mcp('editor_hwpx_command_catalog', { op });
+        const catalog = await mcp('editor_hwpx_inspect', {
+          documentId: mcpDocumentId,
+          view: 'catalog',
+          op,
+        });
         if (catalog.commandCount !== 1) throw new Error(`MCP catalog mismatch for ${op}`);
       }
       if (locations.length) {
-        await mcp('editor_hwpx_target_inspect', {
+        await mcp('editor_hwpx_inspect', {
           documentId: mcpDocumentId,
+          view: 'target',
           locations,
         });
       }
       if (needsInventory) {
-        await mcp('editor_hwpx_object_inventory', { documentId: mcpDocumentId });
+        await mcp('editor_hwpx_inspect', { documentId: mcpDocumentId, view: 'objects' });
       }
-      const mcpApplied = await mcp('editor_hwpx_apply', {
+      const mcpApplied = await mcp('editor_hwpx_edit', {
         documentId: mcpDocumentId,
         baseRevision: mcpOpened.revision,
-        commands: scenario.oracle.commandTemplates,
+        commands: scenario.oracle.commandTemplates.map((command, index) => ({
+          ...command,
+          commandId: command.commandId || `evaluation-${scenario.id}-${index + 1}`,
+        })),
       });
       mcpRevision = mcpApplied.revision;
-      const mcpQuality = await mcp('editor_hwpx_quality_check', {
+      const mcpPages = renderPagesForScenario(scenario, ordinal);
+      const mcpReview = await mcp('editor_hwpx_review', {
         documentId: mcpDocumentId,
         baseRevision: mcpApplied.revision,
+        ...(mcpPages.length ? { pages: mcpPages } : {}),
+        includeBaseline: mcpPages.length > 0,
       });
-      if (mcpQuality.ok !== true) throw new Error('MCP quality check did not pass');
-      const mcpPages = renderPagesForScenario(scenario, ordinal);
-      if (mcpPages.length) {
-        const mcpRendered = await mcp('editor_hwpx_render_pages', {
-          documentId: mcpDocumentId,
-          baseRevision: mcpApplied.revision,
-          pages: mcpPages,
-          includeBaseline: true,
-        });
-        if (!mcpPages.every((page) => (
-          mcpRendered.baseline?.pages?.some((entry) => entry.page === page && entry.nonBlank)
-          && mcpRendered.current?.pages?.some((entry) => entry.page === page && entry.nonBlank)
-        ))) {
-          throw new Error('MCP render verification returned a blank or missing page');
-        }
+      if (mcpReview.ok !== true) throw new Error('MCP review did not pass');
+      if (mcpPages.length && !mcpPages.every((page) => (
+        mcpReview.render?.baseline?.pages?.some((entry) => entry.page === page && entry.nonBlank)
+        && mcpReview.render?.current?.pages?.some((entry) => entry.page === page && entry.nonBlank)
+      ))) {
+        throw new Error('MCP review returned a blank or missing comparison page');
       }
-      mcpArtifact = await mcp('editor_hwpx_save_source', {
+      mcpArtifact = await mcp('editor_hwpx_save', {
         documentId: mcpDocumentId,
         baseRevision: mcpApplied.revision,
         filename: scenario.target.outputFilename,
+        mode: 'verified',
       });
       mcpDocumentId = '';
       const mcpRead = await mcp('editor_hwpx_artifact_read', {

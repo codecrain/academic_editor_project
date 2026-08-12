@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto';
+
+import { normalizeFormatProperties } from './hwpx-format-contract.mjs';
+
 function structuralError(code, message, details = {}) {
   const error = new Error(message);
   error.code = code;
@@ -165,13 +169,14 @@ function publicParagraphTarget(sectionIndex, paragraphIndex, offset = 0) {
   };
 }
 
-function structuralResult(command, native, target, createdTargets = []) {
+function structuralResult(command, native, target, createdTargets = [], evidence = {}) {
   return {
     op: command.op,
     changed: 1,
     target,
     createdTargets,
     native,
+    ...evidence,
   };
 }
 
@@ -584,7 +589,7 @@ function resolveHwpxTableTarget(command, context) {
       { target },
     );
   }
-  return { sectionIndex, paragraphIndex, controlIndex };
+  return { kind: 'table', sectionIndex, paragraphIndex, controlIndex };
 }
 
 function applyCreateTable(doc, command, context) {
@@ -854,8 +859,8 @@ function applyInsertTableCaption(doc, command, context) {
       cleared: clearedNative,
       text: textNative,
     }, {
-      kind: 'tableCaption',
       ...table,
+      kind: 'tableCaption',
     }, []),
     expectedCaptionText: command.text,
   };
@@ -991,7 +996,12 @@ function sniffImage(bytes, declaredMimeType, filePath) {
       { extension },
     );
   }
-  return { extension, width, height };
+  return {
+    extension,
+    width,
+    height,
+    mimeType: extension === 'jpg' ? 'image/jpeg' : `image/${extension}`,
+  };
 }
 
 function inspectedPageImageBounds(doc, target) {
@@ -1064,6 +1074,8 @@ function applyInsertImage(doc, command, context) {
     );
   }
   const insertPicture = requireMethod(doc, 'insertPicture');
+  const setPictureProperties = requireMethod(doc, 'setPictureProperties');
+  const getPictureProperties = requireMethod(doc, 'getPictureProperties');
   const requestedParagraphIndex = target.paragraphIndex + 1;
   if (nonNegativeInteger(requestedParagraphIndex) === null) {
     throw structuralError(
@@ -1104,6 +1116,39 @@ function applyInsertImage(doc, command, context) {
     paragraphIndex: pictureNative.paraIdx,
     controlIndex: pictureNative.controlIdx,
   };
+  const placement = normalizeFormatProperties('image', {
+    treatAsChar: true,
+    textWrap: 'TopAndBottom',
+    vertRelTo: 'Para',
+    vertAlign: 'Top',
+    horzRelTo: 'Para',
+    horzAlign: 'Center',
+    vertOffset: 0,
+    horzOffset: 0,
+    allowOverlap: false,
+    restrictInPage: true,
+    keepWithAnchor: true,
+    width: fitted.width,
+    height: fitted.height,
+  });
+  const placementNative = parseNativeResult(setPictureProperties(
+    createdTarget.sectionIndex,
+    createdTarget.paragraphIndex,
+    createdTarget.controlIndex,
+    JSON.stringify(placement),
+  ), 'setPictureProperties');
+  const actualPlacement = parseNativeObject(getPictureProperties(
+    createdTarget.sectionIndex,
+    createdTarget.paragraphIndex,
+    createdTarget.controlIndex,
+  ), 'getPictureProperties');
+  if (actualPlacement.treatAsChar !== true) {
+    throw structuralError(
+      'HWPX_IMAGE_PLACEMENT_VERIFICATION_FAILED',
+      'The inserted image did not persist safe inline paragraph flow.',
+      { createdTarget, requestedPlacement: placement, actualPlacement },
+    );
+  }
   const createdTargets = [createdTarget];
   let captionNative = null;
   if (command.caption !== undefined) {
@@ -1136,8 +1181,18 @@ function applyInsertImage(doc, command, context) {
   return structuralResult(command, {
     paragraph: paragraphNative,
     picture: pictureNative,
+    placement: placementNative,
+    actualPlacement,
     caption: captionNative,
-  }, createdTarget, createdTargets);
+  }, createdTarget, createdTargets, {
+    expectedImageSha256: createHash('sha256').update(bytes).digest('hex'),
+    expectedImageByteLength: bytes.length,
+    expectedImageMimeType: image.mimeType,
+    expectedImageDimensions: { width: image.width, height: image.height },
+    expectedPlacedDimensions: fitted,
+    requestedPlacement: placement,
+    verifiedInlinePlacement: true,
+  });
 }
 
 function applyPageSetup(doc, command) {
@@ -1346,145 +1401,35 @@ function applyInsertFootnote(doc, command, context) {
   };
 }
 
-const CHARACTER_STYLE_KEYS = new Set([
-  'bold',
-  'italic',
-  'underline',
-  'strikethrough',
-  'fontSize',
-  'fontId',
-  'textColor',
-  'shadeColor',
-  'underlineType',
-  'underlineColor',
-  'outlineType',
-  'shadowType',
-  'shadowColor',
-  'shadowOffsetX',
-  'shadowOffsetY',
-  'strikeColor',
-  'subscript',
-  'superscript',
-  'emboss',
-  'engrave',
-  'emphasisDot',
-  'underlineShape',
-  'strikeShape',
-  'kerning',
-  'fontIds',
-  'ratios',
-  'spacings',
-  'relativeSizes',
-  'charOffsets',
-]);
-
-const PARAGRAPH_STYLE_KEYS = new Set([
-  'alignment',
-  'lineSpacing',
-  'lineSpacingType',
-  'indent',
-  'marginLeft',
-  'marginRight',
-  'spacingBefore',
-  'spacingAfter',
-  'headType',
-  'paraLevel',
-  'numberingId',
-  'widowOrphan',
-  'keepWithNext',
-  'keepLines',
-  'pageBreakBefore',
-  'fontLineHeight',
-  'borderSpacing',
-]);
-
 function normalizeCharacterStyle(doc, style) {
-  if (!style || typeof style !== 'object' || Array.isArray(style)) {
-    throw structuralError('HWPX_RUN_STYLE_INVALID', 'A character style object is required.');
-  }
-  const normalized = {};
-  for (const [key, value] of Object.entries(style)) {
-    if (CHARACTER_STYLE_KEYS.has(key)) normalized[key] = value;
-  }
-  if (style.fontSizePt !== undefined) {
-    const points = Number(style.fontSizePt);
-    if (!Number.isFinite(points) || points <= 0) {
-      throw structuralError(
-        'HWPX_RUN_STYLE_INVALID',
-        'fontSizePt must be a positive number.',
-      );
-    }
-    normalized.fontSize = Math.round(points * 100);
-  }
-  if (style.color !== undefined) normalized.textColor = style.color;
-  if (style.fontFamily !== undefined) {
-    if (typeof style.fontFamily !== 'string' || style.fontFamily.trim().length === 0) {
-      throw structuralError(
-        'HWPX_RUN_STYLE_INVALID',
-        'fontFamily must be a nonblank string.',
-      );
-    }
-    const findOrCreateFontId = requireMethod(doc, 'findOrCreateFontId');
-    const fontId = findOrCreateFontId(style.fontFamily.trim());
-    if (!Number.isInteger(fontId) || fontId < 0 || fontId > 0xFFFF) {
-      throw structuralError(
-        'HWPX_ENGINE_RESULT_INVALID',
-        'findOrCreateFontId returned an invalid font ID.',
-        { fontId },
-      );
-    }
-    normalized.fontId = fontId;
-  }
-  if (Object.keys(normalized).length === 0) {
-    throw structuralError(
-      'HWPX_RUN_STYLE_INVALID',
-      'The character style does not contain any supported RHWP property.',
-    );
-  }
-  return normalized;
+  return normalizeFormatProperties('character', style, {
+    resolveFontId(name) {
+      const findOrCreateFontId = requireMethod(doc, 'findOrCreateFontId');
+      const fontId = findOrCreateFontId(name);
+      if (!Number.isInteger(fontId) || fontId < 0 || fontId > 0xFFFF) {
+        throw structuralError('HWPX_ENGINE_RESULT_INVALID', 'findOrCreateFontId returned an invalid font ID.', { fontId });
+      }
+      return fontId;
+    },
+  });
 }
 
 function normalizeParagraphStyle(style) {
-  if (!style || typeof style !== 'object' || Array.isArray(style)) {
-    throw structuralError(
-      'HWPX_PARAGRAPH_STYLE_INVALID',
-      'A paragraph style object is required.',
-    );
-  }
-  const normalized = {};
-  for (const [key, value] of Object.entries(style)) {
-    if (PARAGRAPH_STYLE_KEYS.has(key)) normalized[key] = value;
-  }
-  if (style.align !== undefined) normalized.alignment = style.align;
-  const marginMap = {
-    left: 'marginLeft',
-    right: 'marginRight',
-  };
-  for (const [publicName, nativeName] of Object.entries(marginMap)) {
-    if (style.margins?.[publicName] !== undefined) {
-      normalized[nativeName] = style.margins[publicName];
-    }
-  }
-  if (Object.keys(normalized).length === 0) {
-    throw structuralError(
-      'HWPX_PARAGRAPH_STYLE_INVALID',
-      'The paragraph style does not contain any supported RHWP property.',
-    );
-  }
-  return normalized;
+  return normalizeFormatProperties('paragraph', style);
 }
 
 function splitNamedStyleProperties(doc, properties) {
   const charCandidate = {};
   const paraCandidate = {};
   for (const [key, value] of Object.entries(properties ?? {})) {
-    if (CHARACTER_STYLE_KEYS.has(key)
-      || ['fontSizePt', 'color', 'fontFamily'].includes(key)) {
+    try {
+      normalizeFormatProperties('character', { [key]: value }, { resolveFontId: () => 0 });
       charCandidate[key] = value;
-    }
-    if (PARAGRAPH_STYLE_KEYS.has(key) || ['align', 'margins'].includes(key)) {
+    } catch {}
+    try {
+      normalizeFormatProperties('paragraph', { [key]: value });
       paraCandidate[key] = value;
-    }
+    } catch {}
   }
   const charProperties = Object.keys(charCandidate).length > 0
     ? normalizeCharacterStyle(doc, charCandidate)
@@ -1814,9 +1759,327 @@ function applyParagraphStyle(doc, command, context) {
       JSON.stringify(style),
     ];
   const native = parseNativeResult(applyFormat(...args), methodName);
-  return structuralResult(command, native, cellTarget
-    ? target
-    : publicParagraphTarget(target.sectionIndex, target.paragraphIndex));
+  return {
+    ...structuralResult(command, native, cellTarget
+      ? target
+      : publicParagraphTarget(target.sectionIndex, target.paragraphIndex)),
+    expectedFormat: { scope: 'paragraph', properties: style },
+  };
+}
+
+function resolveObjectTarget(command, kind) {
+  const target = command.target ?? command.location ?? {};
+  const native = target.native && typeof target.native === 'object' ? target.native : target;
+  const sectionIndex = firstSpecifiedInteger(native.sectionIndex, native.section, target.sectionIndex, target.section);
+  const paragraphIndex = firstSpecifiedInteger(
+    native.paragraphIndex, native.paragraph, native.para,
+    target.paragraphIndex, target.paragraph, target.para,
+  );
+  const controlIndex = firstSpecifiedInteger(
+    native.controlIndex, native.control, native.controlIdx,
+    target.controlIndex, target.control, target.controlIdx,
+  );
+  if ([sectionIndex, paragraphIndex, controlIndex].some(value => value === null)) {
+    throw structuralError('HWPX_OBJECT_TARGET_INVALID', `${kind} formatting requires inspected native section, paragraph, and control indices.`, { target });
+  }
+  return { kind, sectionIndex, paragraphIndex, controlIndex };
+}
+
+function applyObjectProperties(doc, command, scope, methodName) {
+  const target = resolveObjectTarget(command, scope);
+  const method = requireMethod(doc, methodName);
+  const properties = normalizeFormatProperties(scope, command.properties);
+  const native = parseNativeResult(method(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    JSON.stringify(properties),
+  ), methodName);
+  return {
+    ...structuralResult(command, native, target),
+    expectedFormat: { scope, properties },
+  };
+}
+
+function applyFormat(doc, command, context) {
+  const scope = String(command.scope ?? '');
+  if (scope === 'character') {
+    return applyRunStyle(doc, { ...command, style: command.properties }, context);
+  }
+  if (scope === 'paragraph') {
+    return applyParagraphStyle(doc, { ...command, style: command.properties }, context);
+  }
+  if (scope === 'cell') {
+    const target = resolveHwpxCellTarget(command, context);
+    const properties = normalizeFormatProperties(scope, command.properties);
+    const native = parseNativeResult(requireMethod(doc, 'setCellProperties')(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      target.cellIndex,
+      JSON.stringify(properties),
+    ), 'setCellProperties');
+    return {
+      ...structuralResult(command, native, target),
+      expectedFormat: { scope, properties },
+    };
+  }
+  if (scope === 'table') {
+    const target = resolveHwpxTableTarget(command, context);
+    const properties = normalizeFormatProperties(scope, command.properties);
+    const native = parseNativeResult(requireMethod(doc, 'setTableProperties')(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      JSON.stringify(properties),
+    ), 'setTableProperties');
+    return {
+      ...structuralResult(command, native, target),
+      expectedFormat: { scope, properties },
+    };
+  }
+  throw structuralError('HWPX_FORMAT_SCOPE_INVALID', `Unsupported format.apply scope: ${scope}.`);
+}
+
+function boundedIndex(value, label, maximum = 65535) {
+  const result = nonNegativeInteger(value);
+  if (result === null || result > maximum) {
+    throw structuralError('HWPX_STRUCTURE_ARGUMENT_INVALID', `${label} must be an integer from 0 through ${maximum}.`, { value });
+  }
+  return result;
+}
+
+function applyTableStructure(doc, command, context) {
+  const target = resolveHwpxTableTarget(command, context);
+  const action = String(command.action ?? '');
+  const args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+  let native;
+  if (action === 'insertRow') {
+    native = parseNativeResult(requireMethod(doc, 'insertTableRow')(
+      ...args, boundedIndex(command.row, 'row'), command.side !== 'before',
+    ), 'insertTableRow');
+  } else if (action === 'insertColumn') {
+    native = parseNativeResult(requireMethod(doc, 'insertTableColumn')(
+      ...args, boundedIndex(command.column, 'column'), command.side !== 'before',
+    ), 'insertTableColumn');
+  } else if (action === 'deleteRow') {
+    native = parseNativeResult(requireMethod(doc, 'deleteTableRow')(
+      ...args, boundedIndex(command.row, 'row'),
+    ), 'deleteTableRow');
+  } else if (action === 'deleteColumn') {
+    native = parseNativeResult(requireMethod(doc, 'deleteTableColumn')(
+      ...args, boundedIndex(command.column, 'column'),
+    ), 'deleteTableColumn');
+  } else if (action === 'mergeCells') {
+    native = parseNativeResult(requireMethod(doc, 'mergeTableCells')(
+      ...args,
+      boundedIndex(command.startRow, 'startRow'),
+      boundedIndex(command.startColumn, 'startColumn'),
+      boundedIndex(command.endRow, 'endRow'),
+      boundedIndex(command.endColumn, 'endColumn'),
+    ), 'mergeTableCells');
+  } else if (action === 'splitCell') {
+    native = parseNativeResult(requireMethod(doc, 'splitTableCellInto')(
+      ...args,
+      boundedIndex(command.row, 'row'),
+      boundedIndex(command.column, 'column'),
+      boundedIndex(command.rows ?? 1, 'rows'),
+      boundedIndex(command.columns ?? 1, 'columns'),
+      command.equalRowHeight !== false,
+      command.mergeFirst === true,
+    ), 'splitTableCellInto');
+  } else if (action === 'deleteTable') {
+    native = parseNativeResult(requireMethod(doc, 'deleteTableControl')(...args), 'deleteTableControl');
+    return structuralResult(command, native, { ...target, kind: 'deletedTable' });
+  } else {
+    throw structuralError('HWPX_TABLE_STRUCTURE_ACTION_INVALID', `Unsupported table.structure action: ${action}.`);
+  }
+  return {
+    ...structuralResult(command, native, target),
+    expectedTableDimensions: {
+      rowCount: native.rowCount,
+      colCount: native.colCount,
+      cellCount: native.cellCount,
+    },
+  };
+}
+
+function applyParagraphStructure(doc, command) {
+  const target = resolveHwpxTextTarget(command, { offsetRequired: false });
+  const action = String(command.action ?? '');
+  const offset = firstSpecifiedInteger(
+    command.offset, command.target?.offset, command.target?.native?.offset, 0,
+  );
+  let native;
+  if (action === 'split') {
+    native = parseNativeResult(requireMethod(doc, 'splitParagraph')(
+      target.sectionIndex, target.paragraphIndex, boundedIndex(offset, 'offset', 0xFFFF_FFFF),
+    ), 'splitParagraph', ['paraIdx']);
+    const created = publicParagraphTarget(target.sectionIndex, native.paraIdx);
+    return structuralResult(command, native, created, [created]);
+  }
+  if (action === 'mergePrevious') {
+    native = parseNativeResult(requireMethod(doc, 'mergeParagraph')(
+      target.sectionIndex, target.paragraphIndex,
+    ), 'mergeParagraph', ['paraIdx']);
+    return structuralResult(command, native, publicParagraphTarget(target.sectionIndex, native.paraIdx));
+  }
+  const methodName = action === 'pageBreak' ? 'insertPageBreak'
+    : action === 'columnBreak' ? 'insertColumnBreak'
+      : null;
+  if (!methodName) {
+    throw structuralError('HWPX_PARAGRAPH_STRUCTURE_ACTION_INVALID', `Unsupported paragraph.structure action: ${action}.`);
+  }
+  native = parseNativeResult(requireMethod(doc, methodName)(
+    target.sectionIndex, target.paragraphIndex, boundedIndex(offset, 'offset', 0xFFFF_FFFF),
+  ), methodName);
+  return structuralResult(command, native, publicParagraphTarget(target.sectionIndex, target.paragraphIndex));
+}
+
+function applyObjectFormat(doc, command) {
+  const scope = String(command.scope ?? '');
+  if (scope === 'image') return applyObjectProperties(doc, command, scope, 'setPictureProperties');
+  if (scope === 'shape') return applyObjectProperties(doc, command, scope, 'setShapeProperties');
+  throw structuralError('HWPX_FORMAT_SCOPE_INVALID', `Unsupported object.format scope: ${scope}.`);
+}
+
+function applyAutoFitTableCell(doc, command, context) {
+  const target = resolveHwpxCellTarget(command, context);
+  const getCellProperties = requireMethod(doc, 'getCellProperties');
+  const getCellParagraphCount = requireMethod(doc, 'getCellParagraphCount');
+  const getCellParagraphLength = requireMethod(doc, 'getCellParagraphLength');
+  const getCursorRectInCell = requireMethod(doc, 'getCursorRectInCell');
+  const getTableDimensions = requireMethod(doc, 'getTableDimensions');
+  const getCellInfo = requireMethod(doc, 'getCellInfo');
+  const resizeTableCells = requireMethod(doc, 'resizeTableCells');
+  const cellProperties = parseNativeObject(getCellProperties(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+  ), 'getCellProperties');
+  const paragraphCount = nonNegativeInteger(getCellParagraphCount(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+  ));
+  if (!paragraphCount) {
+    return structuralResult(command, { ok: true, unchanged: true }, target);
+  }
+  const firstRect = parseNativeObject(getCursorRectInCell(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+    0,
+    0,
+  ), 'getCursorRectInCell');
+  const lastParagraph = paragraphCount - 1;
+  const lastLength = nonNegativeInteger(getCellParagraphLength(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+    lastParagraph,
+  ));
+  const lastRect = parseNativeObject(getCursorRectInCell(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+    lastParagraph,
+    lastLength,
+  ), 'getCursorRectInCell');
+  if (Number(firstRect.pageIndex) !== Number(lastRect.pageIndex)) {
+    throw structuralError(
+      'HWPX_AUTOFIT_MULTIPAGE_MEASUREMENT_UNSUPPORTED',
+      'The cell content already spans renderer pages; split the content or table before auto-fitting.',
+      { target, firstRect, lastRect },
+    );
+  }
+  const hwpUnitsPerCssPixel = 75;
+  const measuredHeight = Math.ceil((
+    Number(lastRect.y) + Number(lastRect.height || 0) - Number(firstRect.y)
+  ) * hwpUnitsPerCssPixel);
+  if (!Number.isFinite(measuredHeight) || measuredHeight < 0) {
+    throw structuralError(
+      'HWPX_AUTOFIT_MEASUREMENT_INVALID',
+      'The renderer returned invalid cursor geometry for automatic table-cell sizing.',
+      { target, firstRect, lastRect },
+    );
+  }
+  const padding = Number(cellProperties.paddingTop || 0) + Number(cellProperties.paddingBottom || 0);
+  const extraPadding = Math.max(0, Number(command.extraPadding || 0));
+  const currentHeight = Number(cellProperties.height || 0);
+  const requestedMinimum = Math.max(0, Number(command.minHeight || 0));
+  const desiredHeight = Math.max(currentHeight, requestedMinimum, measuredHeight + padding + extraPadding);
+  const pageDef = typeof doc.getPageDef === 'function'
+    ? (() => { try { return parseNativeObject(doc.getPageDef(target.sectionIndex), 'getPageDef'); } catch { return null; } })()
+    : null;
+  const pageContentHeight = pageDef
+    ? Math.max(1, Number(pageDef.height || 0) - Number(pageDef.marginTop || 0) - Number(pageDef.marginBottom || 0))
+    : null;
+  const maximumHeight = command.maxHeight !== undefined
+    ? Number(command.maxHeight)
+    : Number.isFinite(pageContentHeight) ? Math.floor(pageContentHeight * 0.9) : null;
+  if (Number.isFinite(maximumHeight) && desiredHeight > maximumHeight) {
+    throw structuralError(
+      'HWPX_AUTOFIT_PAGE_CONSTRAINT_EXCEEDED',
+      'The measured cell requires a row taller than the allowed page-content constraint.',
+      {
+        target,
+        desiredHeight,
+        maximumHeight,
+        pageContentHeight,
+        guidance: 'Increase table width, reduce text, split the table, or explicitly raise maxHeight after review.',
+      },
+    );
+  }
+  const dimensions = parseNativeObject(getTableDimensions(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+  ), 'getTableDimensions');
+  const targetInfo = parseNativeObject(getCellInfo(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+  ), 'getCellInfo');
+  const updates = [];
+  for (let cellIndex = 0; cellIndex < Number(dimensions.cellCount || 0); cellIndex += 1) {
+    const info = parseNativeObject(getCellInfo(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      cellIndex,
+    ), 'getCellInfo');
+    if (Number(info.row) !== Number(targetInfo.row)) continue;
+    const props = parseNativeObject(getCellProperties(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      cellIndex,
+    ), 'getCellProperties');
+    const heightDelta = desiredHeight - Number(props.height || 0);
+    if (heightDelta > 0) updates.push({ cellIdx: cellIndex, heightDelta });
+  }
+  if (updates.length) {
+    parseNativeResult(resizeTableCells(
+      target.sectionIndex,
+      target.paragraphIndex,
+      target.controlIndex,
+      JSON.stringify(updates),
+    ), 'resizeTableCells');
+  }
+  return {
+    ...structuralResult(command, { ok: true, updates }, target),
+    expectedCellHeight: desiredHeight,
+    measuredContentHeight: measuredHeight,
+    previousCellHeight: currentHeight,
+    maximumCellHeight: maximumHeight,
+  };
 }
 
 const DOCUMENT_METADATA_FIELDS = [
@@ -1883,6 +2146,16 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyRunStyle(doc, command, context);
     case 'setParagraphStyle':
       return applyParagraphStyle(doc, command, context);
+    case 'format.apply':
+      return applyFormat(doc, command, context);
+    case 'object.format':
+      return applyObjectFormat(doc, command);
+    case 'table.structure':
+      return applyTableStructure(doc, command, context);
+    case 'paragraph.structure':
+      return applyParagraphStructure(doc, command);
+    case 'table.autoFit':
+      return applyAutoFitTableCell(doc, command, context);
     case 'setDocumentMetadata':
       return applyDocumentMetadata(doc, command);
     default:

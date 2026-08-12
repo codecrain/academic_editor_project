@@ -194,6 +194,36 @@ test('qualification rejects embedded object loss and caller-forged deltas', () =
       && error.details.objects.some(item =>
         item.kind === 'tc' && item.source === 2 && item.candidate === 1),
   );
+
+  const intentionalTableDelete = qualifyHwpxCandidate(
+    createZip([...tableSourceEntries]),
+    createZip([...tableCandidateEntries]),
+    {
+      allowedStructuralReferenceLosses: {
+        objectCounts: { tc: 1 },
+        binaryReferenceCounts: {},
+      },
+    },
+  );
+  assert.equal(intentionalTableDelete.ok, true);
+  assert.deepEqual(intentionalTableDelete.intentionalObjectReferenceLosses, [{
+    kind: 'tc', source: 2, candidate: 1, lost: 1, allowed: 1,
+  }]);
+
+  assert.throws(
+    () => qualifyHwpxCandidate(
+      createZip([...tableSourceEntries]),
+      createZip([...tableCandidateEntries]),
+      {
+        allowedStructuralReferenceLosses: {
+          objectCounts: { p: 99 },
+          binaryReferenceCounts: {},
+        },
+      },
+    ),
+    error => error.code === 'HWPX_PACKAGE_OBJECT_REFERENCE_LOSS'
+      && error.details.objects.some(item => item.kind === 'tc' && item.allowed === 0),
+  );
 });
 
 test('structural export restores exact source bytes only for preserved embedded relationships', () => {

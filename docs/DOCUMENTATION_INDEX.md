@@ -30,12 +30,17 @@ superseded design notes are intentionally not published as documentation.
 ## Executable sources of truth
 
 - `editor_docx/scripts/docx-command-catalog.mjs`: 31 canonical DOCX commands, including stable reference controls.
-- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 37 canonical HWPX commands.
-- `editor_pdf/scripts/pdf-command-catalog.mjs`: 6 canonical PDF commands for
+- `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 41 canonical HWPX commands.
+- `docs/HWPX_REFACTOR_RED_TEAM_20260812.md`: implementation failures, design decisions, direct-call matrix, lifecycle proof, and A/B read-only baseline for the 9-tool/41-command refactor.
+- `docs/HWPX_LIMITATIONS_IMPLEMENTATION_RED_TEAM_20260812.md`: submission semantics, template roles, full-page evidence, profile-bound finalization, native image read-back, visual-policy diagnostics, and live B/native-HWP red-team proof for contract 2.3.0.
+- `docs/HWPX_EDITOR_REPAIR_DESIGN_20260812.md`: contract 2.4.0 HWP multi-paragraph style preservation, explicit cell paragraph targeting, auto-fit pagination budgets, and exact render-clip target provenance.
+- `editor_pdf/scripts/pdf-command-catalog.mjs`: 46 canonical PDF commands for
   PDFium browser tools and transactional advanced document operations.
 - `editor_common/editor-mcp-tool-factory.mjs`: shared MCP schema factory.
-- `editor_server/editor-mcp.mjs`: 16 public MCP tools for each of DOCX, HWPX,
-  and PDF (48 total).
+- `editor_server/hwpx-mcp-contract.mjs`: single executable HWP/HWPX MCP identity,
+  tool/view/mode lists, command enum, lifecycle, and initialization guidance.
+- `editor_server/editor-mcp.mjs`: 17 DOCX, 9 HWPX, 16 PDF, and 7 Image Studio
+  public MCP tools (49 total).
 - `editor_server/editor-gateway.mjs`: shared HTTP transport, WOPI, session, and
   artifact gateway.
 - `editor_common/document-api-core.mjs`: format-neutral revision and session

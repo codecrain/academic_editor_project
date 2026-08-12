@@ -80,6 +80,40 @@ export class HwpDocument {
         }
     }
     /**
+     * 표 셀에서 계산식을 실행한다.
+     *
+     * formula: "=SUM(A1:A5)", "=A1+B2*3" 등
+     * write_result: true이면 결과를 셀에 기록
+     * Apply exact existing style identifiers to one table-cell paragraph.
+     * @param {number} sec_idx
+     * @param {number} parent_para_idx
+     * @param {number} control_idx
+     * @param {number} cell_idx
+     * @param {number} cell_para_idx
+     * @param {number} style_id
+     * @param {number} para_shape_id
+     * @param {number} char_shape_id
+     * @returns {string}
+     */
+    applyCellStyleIds(sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx, style_id, para_shape_id, char_shape_id) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.hwpdocument_applyCellStyleIds(this.__wbg_ptr, sec_idx, parent_para_idx, control_idx, cell_idx, cell_para_idx, style_id, para_shape_id, char_shape_id);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * 글자 서식을 적용한다 (본문 문단).
      * @param {number} sec_idx
      * @param {number} para_idx
@@ -1252,10 +1286,6 @@ export class HwpDocument {
         return ret;
     }
     /**
-     * 표 셀에서 계산식을 실행한다.
-     *
-     * formula: "=SUM(A1:A5)", "=A1+B2*3" 등
-     * write_result: true이면 결과를 셀에 기록
      * @param {number} section_idx
      * @param {number} parent_para_idx
      * @param {number} control_idx

@@ -13,6 +13,10 @@ export const STRUCTURAL_EXPORT_OPS = new Set([
   'applyStyle',
   'setRunStyle',
   'setParagraphStyle',
+  'format.apply',
+  'object.format',
+  'table.structure',
+  'paragraph.structure',
   'setDocumentMetadata',
   'setPageSetup',
   'setHeaderFooter',
@@ -215,26 +219,38 @@ function canonicalMediaType(value) {
   return mediaType;
 }
 
-function inspectStructuralReferences(entries) {
+export function inspectHwpxStructuralReferencesXml(xml) {
   const objectCounts = {};
   const binaryReferenceCounts = {};
+  for (const match of String(xml ?? '').matchAll(/<(?:[\w.-]+:)?([A-Za-z][\w.-]*)\b/g)) {
+    const localName = match[1].toLowerCase();
+    if (PROTECTED_XML_OBJECTS.has(localName)) {
+      objectCounts[localName] = (objectCounts[localName] ?? 0) + 1;
+    }
+  }
+  for (const match of String(xml ?? '').matchAll(/\b(?:binItemIDRef|binaryItemIDRef)="([^"]+)"/gi)) {
+    const reference = match[1];
+    binaryReferenceCounts[reference] = (binaryReferenceCounts[reference] ?? 0) + 1;
+  }
+  return { objectCounts, binaryReferenceCounts };
+}
+
+function inspectStructuralReferences(entries) {
+  const combined = { objectCounts: {}, binaryReferenceCounts: {} };
   const xmlEntries = [...entries]
     .filter(([name]) =>
       /^Contents\/(?:header|section\d+|masterpage\d+)\.xml$/i.test(name));
   for (const [, bytes] of xmlEntries) {
-    const xml = bytes.toString('utf8');
-    for (const match of xml.matchAll(/<(?:[\w.-]+:)?([A-Za-z][\w.-]*)\b/g)) {
-      const localName = match[1].toLowerCase();
-      if (PROTECTED_XML_OBJECTS.has(localName)) {
-        objectCounts[localName] = (objectCounts[localName] ?? 0) + 1;
-      }
+    const current = inspectHwpxStructuralReferencesXml(bytes.toString('utf8'));
+    for (const [kind, count] of Object.entries(current.objectCounts)) {
+      combined.objectCounts[kind] = (combined.objectCounts[kind] ?? 0) + count;
     }
-    for (const match of xml.matchAll(/\b(?:binItemIDRef|binaryItemIDRef)="([^"]+)"/gi)) {
-      const reference = match[1];
-      binaryReferenceCounts[reference] = (binaryReferenceCounts[reference] ?? 0) + 1;
+    for (const [reference, count] of Object.entries(current.binaryReferenceCounts)) {
+      combined.binaryReferenceCounts[reference]
+        = (combined.binaryReferenceCounts[reference] ?? 0) + count;
     }
   }
-  return { objectCounts, binaryReferenceCounts };
+  return combined;
 }
 
 export function classifyHwpxCommands(commands) {
@@ -364,7 +380,7 @@ export function restoreExportOmittedEmbeddedEntries(sourceBytes, candidateBytes)
   };
 }
 
-export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
+export function qualifyHwpxCandidate(sourceBytes, candidateBytes, options = {}) {
   const source = inspectHwpxPackage(sourceBytes);
   const candidate = inspectHwpxPackage(candidateBytes);
   const sourceNames = new Set(source.entries.map(entry => entry.name));
@@ -455,17 +471,27 @@ export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
     );
   }
 
+  const allowedObjectLosses = options.allowedStructuralReferenceLosses?.objectCounts ?? {};
+  const allowedBinaryReferenceLosses
+    = options.allowedStructuralReferenceLosses?.binaryReferenceCounts ?? {};
+  const intentionalObjectReferenceLosses = [];
   const lostObjectReferences = [];
   for (const [kind, sourceCount] of Object.entries(
     source.structuralReferences.objectCounts,
   )) {
     const candidateCount = candidate.structuralReferences.objectCounts[kind] ?? 0;
     if (candidateCount < sourceCount) {
-      lostObjectReferences.push({
+      const lost = sourceCount - candidateCount;
+      const allowed = Number(allowedObjectLosses[kind] ?? 0);
+      const detail = {
         kind,
         source: sourceCount,
         candidate: candidateCount,
-      });
+        lost,
+        allowed,
+      };
+      if (lost > allowed) lostObjectReferences.push(detail);
+      else intentionalObjectReferenceLosses.push(detail);
     }
   }
   for (const [reference, sourceCount] of Object.entries(
@@ -474,12 +500,18 @@ export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
     const candidateCount =
       candidate.structuralReferences.binaryReferenceCounts[reference] ?? 0;
     if (candidateCount < sourceCount) {
-      lostObjectReferences.push({
+      const lost = sourceCount - candidateCount;
+      const allowed = Number(allowedBinaryReferenceLosses[reference] ?? 0);
+      const detail = {
         kind: 'binary-reference',
         reference,
         source: sourceCount,
         candidate: candidateCount,
-      });
+        lost,
+        allowed,
+      };
+      if (lost > allowed) lostObjectReferences.push(detail);
+      else intentionalObjectReferenceLosses.push(detail);
     }
   }
   if (lostObjectReferences.length > 0) {
@@ -568,6 +600,7 @@ export function qualifyHwpxCandidate(sourceBytes, candidateBytes) {
     copiedEntries: [],
     sourceEntryCount: source.entries.length,
     candidateEntryCount: candidate.entries.length,
+    intentionalObjectReferenceLosses,
   };
 }
 

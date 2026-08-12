@@ -5228,6 +5228,33 @@ impl HwpDocument {
     ///
     /// formula: "=SUM(A1:A5)", "=A1+B2*3" 등
     /// write_result: true이면 결과를 셀에 기록
+    /// Apply exact existing style identifiers to one table-cell paragraph.
+    #[wasm_bindgen(js_name = applyCellStyleIds)]
+    pub fn apply_cell_style_ids(
+        &mut self,
+        sec_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        style_id: u32,
+        para_shape_id: u32,
+        char_shape_id: u32,
+    ) -> Result<String, JsValue> {
+        self.core
+            .apply_cell_style_ids_native(
+                sec_idx as usize,
+                parent_para_idx as usize,
+                control_idx as usize,
+                cell_idx as usize,
+                cell_para_idx as usize,
+                style_id as usize,
+                para_shape_id as usize,
+                char_shape_id as usize,
+            )
+            .map_err(|e| e.into())
+    }
+
     #[wasm_bindgen(js_name = evaluateTableFormula)]
     pub fn evaluate_table_formula(
         &mut self,

@@ -19,6 +19,14 @@ export class HwpDocument {
      */
     applyCellStyle(sec_idx: number, parent_para_idx: number, control_idx: number, cell_idx: number, cell_para_idx: number, style_id: number): string;
     /**
+     * 표 셀에서 계산식을 실행한다.
+     *
+     * formula: "=SUM(A1:A5)", "=A1+B2*3" 등
+     * write_result: true이면 결과를 셀에 기록
+     * Apply exact existing style identifiers to one table-cell paragraph.
+     */
+    applyCellStyleIds(sec_idx: number, parent_para_idx: number, control_idx: number, cell_idx: number, cell_para_idx: number, style_id: number, para_shape_id: number, char_shape_id: number): string;
+    /**
      * 글자 서식을 적용한다 (본문 문단).
      */
     applyCharFormat(sec_idx: number, para_idx: number, start_offset: number, end_offset: number, props_json: string): string;
@@ -263,12 +271,6 @@ export class HwpDocument {
      * 반환값: Numbering ID (1-based)
      */
     ensureDefaultNumbering(): number;
-    /**
-     * 표 셀에서 계산식을 실행한다.
-     *
-     * formula: "=SUM(A1:A5)", "=A1+B2*3" 등
-     * write_result: true이면 결과를 셀에 기록
-     */
     evaluateTableFormula(section_idx: number, parent_para_idx: number, control_idx: number, target_row: number, target_col: number, formula: string, write_result: boolean): string;
     /**
      * 컨트롤 객체를 HTML 문자열로 변환한다.
@@ -1547,6 +1549,7 @@ export interface InitOutput {
     readonly extractThumbnail: (a: number, b: number) => any;
     readonly hwpdocument_addBookmark: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hwpdocument_applyCellStyle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
+    readonly hwpdocument_applyCellStyleIds: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly hwpdocument_applyCharFormat: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly hwpdocument_applyCharFormatInCell: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly hwpdocument_applyEndnoteShape: (a: number, b: number, c: number, d: number) => [number, number, number, number];

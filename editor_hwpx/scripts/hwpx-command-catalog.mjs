@@ -1,3 +1,5 @@
+import { formatCatalogFields, normalizeFormatProperties } from './hwpx-format-contract.mjs';
+
 const command = ({
   op,
   category,
@@ -35,14 +37,14 @@ const command = ({
   )),
   fields: Object.freeze({
     op: `Use exactly ${op}.`,
-    commandId: 'Optional stable ID for matching command results.',
+    commandId: 'Optional stable ID for direct API callers; required by editor_hwpx_edit.',
     ...fields,
   }),
   example: Object.freeze(example),
   notes: Object.freeze([...notes]),
 });
 
-const locationField = 'Exact paragraph or table-cell location returned by target_map, target_find, or target_inspect.';
+const locationField = 'Exact paragraph or table-cell location returned by editor_hwpx_inspect(view="outline"|"targets"|"target").';
 const styleSourceField = 'Exact inspected paragraph or cell whose existing HWPX style must be cloned.';
 
 const HWPX_COMMAND_CATALOG = Object.freeze([
@@ -151,7 +153,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['locations'],
     precondition: 'target_inspect',
     fields: {
-      locations: 'Nonempty array of exact paragraph locations returned by target_map or target_inspect.',
+      locations: 'Nonempty array of exact paragraph locations returned by editor_hwpx_inspect(view="outline"|"targets"|"target").',
     },
     example: {
       op: 'text.deleteParagraphs',
@@ -314,6 +316,37 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'table.autoFit',
+    category: 'table',
+    description: 'Measure the current rendered content of one inspected cell, grow every cell in that row to the required minimum height, and repaginate the document.',
+    required: ['target'],
+    optional: [
+      'minHeight', 'maxHeight', 'extraPadding',
+      'maxPageGrowth', 'maxBlankPageGrowth', 'maxLowOccupancyGrowth',
+    ],
+    precondition: 'target_inspect',
+    execution: 'package-patch',
+    nativeMethods: [
+      'getCellProperties',
+      'getCellParagraphCount',
+      'getCellParagraphLength',
+      'getCursorRectInCell',
+      'getTableDimensions',
+      'getCellInfo',
+      'resizeTableCells',
+    ],
+    fields: {
+      target: locationField,
+      minHeight: 'Optional minimum row height in HWP units.',
+      maxHeight: 'Optional maximum row height in HWP units. The page-content safety limit is used when omitted.',
+      extraPadding: 'Optional additional bottom-safe space in HWP units.',
+      maxPageGrowth: 'Maximum allowed page-count increase for the reopened atomic batch. Defaults to 1.',
+      maxBlankPageGrowth: 'Maximum allowed increase in blank rendered pages. Defaults to 0.',
+      maxLowOccupancyGrowth: 'Maximum allowed increase in sparse/low-occupancy rendered pages. Defaults to 0.',
+    },
+    example: { op: 'table.autoFit', target: { tableId: 'tbl_0', cell: { number: 1 } }, extraPadding: 200 },
+  }),
+  command({
     op: 'table.create',
     category: 'table',
     description: 'Create a new HWPX table after an inspected body paragraph.',
@@ -365,6 +398,34 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     notes: [
       'Requires the repository source-built RHWP runtime; save/reopen verification is mandatory.',
     ],
+  }),
+  command({
+    op: 'table.structure',
+    category: 'table',
+    description: 'Insert/delete rows or columns, merge/split cells, or delete one inspected table through one location-changing command.',
+    required: ['target', 'action'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: [
+      'insertTableRow', 'insertTableColumn', 'deleteTableRow', 'deleteTableColumn',
+      'mergeTableCells', 'splitTableCellInto', 'deleteTableControl',
+    ],
+    enum: {
+      action: ['insertRow', 'insertColumn', 'deleteRow', 'deleteColumn', 'mergeCells', 'splitCell', 'deleteTable'],
+      side: ['before', 'after'],
+    },
+    fields: {
+      target: 'Exact inspected table target.',
+      action: 'Requested table structure mutation.',
+      row: 'Zero-based row for row and split operations.',
+      column: 'Zero-based column for column and split operations.',
+      startRow: 'Inclusive merge start row.', startColumn: 'Inclusive merge start column.',
+      endRow: 'Inclusive merge end row.', endColumn: 'Inclusive merge end column.',
+      rows: 'Split row count.', columns: 'Split column count.',
+      side: 'before or after for insertion.', equalRowHeight: 'Use equal split row heights.', mergeFirst: 'Merge an existing span before splitting.',
+    },
+    example: { op: 'table.structure', target: { tableId: 'tbl_0' }, action: 'mergeCells', startRow: 0, startColumn: 0, endRow: 0, endColumn: 2 },
+    notes: ['Runs alone because it invalidates table-cell locations.'],
   }),
   command({
     op: 'style.applyText',
@@ -454,40 +515,48 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'setParagraphStyle', target: { paragraph: { section: 0, number: 1 } }, style: { align: 'center' } },
   }),
   command({
-    op: 'list.writeBullets',
-    category: 'list',
-    description: 'Write stable visible bullet-list text into an inspected paragraph or cell.',
-    required: ['location', 'items'],
-    aliases: ['list.write'],
+    op: 'format.apply',
+    category: 'style',
+    description: 'Apply validated direct character, paragraph, table-cell, or table formatting through one strict contract.',
+    required: ['scope', 'target'],
+    anyOf: [['properties', 'styleRef']],
     precondition: 'target_inspect',
-    fields: { location: locationField, items: 'Nonempty string array.', marker: 'Visible bullet marker; default "-".', styleSource: styleSourceField },
-    example: { op: 'list.writeBullets', location: { paragraph: { section: 0, number: 1 } }, items: ['첫째', '둘째'], marker: '-' },
-    notes: ['This writes visible list text. Native HWPX numbering objects are not yet created and the quality report records this limitation.'],
-  }),
-  command({
-    op: 'list.applyNumbering',
-    category: 'list',
-    description: 'Write stable visible numbered-list text into an inspected paragraph or cell.',
-    required: ['location', 'items'],
-    aliases: ['paragraph.applyNumbering'],
-    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: [
+      'applyCharFormat', 'applyCharFormatInCell',
+      'applyParaFormat', 'applyParaFormatInCell',
+      'setCellProperties', 'setTableProperties',
+    ],
+    enum: { scope: ['character', 'paragraph', 'cell', 'table'] },
     fields: {
-      location: locationField,
-      items: 'Nonempty string array.',
-      startAt: 'First visible number; default 1.',
-      suffix: 'Visible number suffix; default ".".',
-      styleSource: styleSourceField,
+      scope: 'character, paragraph, cell, or table.',
+      target: locationField,
+      properties: formatCatalogFields(),
+      styleRef: 'Cross-document measured-format reference with source documentId, exact source location, and optional scope; resolved by the MCP gateway.',
     },
-    example: { op: 'list.applyNumbering', location: { paragraph: { section: 0, number: 1 } }, items: ['첫째', '둘째'], startAt: 1 },
-    notes: ['This writes visible list text. Native HWPX numbering objects are not yet created and the quality report records this limitation.'],
+    example: {
+      op: 'format.apply',
+      scope: 'paragraph',
+      target: { paragraph: { section: 0, number: 1 } },
+      properties: { alignment: 'justify', lineSpacingType: 'Percent', lineSpacing: 160, indent: 1000 },
+    },
+    notes: [
+      'Unknown properties and out-of-range values fail the whole atomic batch; they are never silently ignored.',
+      'Character or paragraph scope on a multi-paragraph cell requires target.cellParagraphIndex; the first cell paragraph is never selected implicitly.',
+    ],
   }),
   command({
     op: 'layout.fitText',
     category: 'layout',
     description: 'Calculate wrapping/truncation for one inspected table cell without changing the document.',
     required: ['location', 'text'],
+    optional: ['options'],
     precondition: 'target_inspect',
-    fields: { location: locationField, text: 'Text to fit.', options: 'Fit limits such as maxCharsPerLine, maxLines, truncate, and ellipsis.' },
+    fields: {
+      location: locationField,
+      text: 'Text to fit.',
+      options: 'Fit limits such as maxCharsPerLine/maxLines. Source text remains unchanged unless materializeBreaks=true; truncation additionally requires truncate=true and allowTextLoss=true.',
+    },
     example: {
       op: 'layout.fitText',
       location: { tableId: 'tbl_0', cell: { number: 1 } },
@@ -496,11 +565,24 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'paragraph.structure',
+    category: 'layout',
+    description: 'Split or merge a paragraph, or insert a native page/column break at an inspected offset.',
+    required: ['target', 'action'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['splitParagraph', 'mergeParagraph', 'insertPageBreak', 'insertColumnBreak'],
+    enum: { action: ['split', 'mergePrevious', 'pageBreak', 'columnBreak'] },
+    fields: { target: locationField, action: 'Requested paragraph mutation.', offset: 'Required insertion/split offset except mergePrevious.' },
+    example: { op: 'paragraph.structure', target: { native: { section: 0, para: 1, offset: 5 } }, action: 'pageBreak', offset: 5 },
+    notes: ['Runs alone because split and merge invalidate paragraph locations.'],
+  }),
+  command({
     op: 'image.replace',
     category: 'image',
     description: 'Replace bytes of an existing package image discovered by object_inventory.',
     required: ['imageName'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath']],
+    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
     aliases: ['object.replaceImage', 'chart.replaceImage'],
     precondition: 'object_inventory',
     fields: {
@@ -508,6 +590,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       bytesBase64: 'Base64-encoded image bytes.',
       bytes: 'Trusted in-process bytes only.',
       filePath: 'Trusted same-host file path only.',
+      assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Optional declared image MIME type.',
     },
     example: { op: 'image.replace', imageName: 'BinData/image1.png', bytesBase64: '<base64>' },
@@ -515,10 +598,10 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
   command({
     op: 'image.insertAfterParagraph',
     category: 'image',
-    description: 'Insert a bounded image after an inspected paragraph.',
+    description: 'Insert a bounded image after an inspected paragraph using safe inline paragraph flow by default.',
     required: ['target'],
-    optional: ['mimeType', 'width', 'height', 'altText', 'caption'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath']],
+    optional: ['assetRef', 'mimeType', 'width', 'height', 'altText', 'caption'],
+    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
     aliases: ['image.insert', 'object.insertImage'],
     precondition: 'target_inspect',
     execution: 'preserve-package-adapter',
@@ -527,6 +610,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       bytesBase64: 'Base64-encoded image bytes.',
       bytes: 'Trusted in-process binary input only.',
       filePath: 'Trusted same-host file input only.',
+      assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Declared image MIME type matching the bytes.',
       width: 'Optional width in HWP units.',
       height: 'Optional height in HWP units.',
@@ -539,20 +623,22 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       bytesBase64: '<base64>',
       mimeType: 'image/png',
     },
+    notes: ['The created image is re-read and must persist treatAsChar=true before the command succeeds. Native HWP may retain dormant Paper/Square fields while inline mode is active. Use object.format after re-inspection for intentional floating placement.'],
   }),
   command({
     op: 'image.replaceInCell',
     category: 'image',
     description: 'Replace the single existing picture in an inspected table cell without rewriting document structure.',
     required: ['target'],
-    optional: ['mimeType'],
-    anyOf: [['bytesBase64', 'bytes', 'filePath']],
+    optional: ['assetRef', 'mimeType'],
+    anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
     precondition: 'target_inspect',
     fields: {
       target: 'Exact inspected table-cell location containing one picture slot.',
       bytesBase64: 'Base64-encoded image bytes.',
       bytes: 'Trusted in-process binary input only.',
       filePath: 'Trusted same-host file input only.',
+      assetRef: 'Cross-document asset reference with source documentId and exact inventoried imageName; resolved only by the MCP gateway.',
       mimeType: 'Declared image MIME type matching the bytes.',
     },
     example: {
@@ -713,6 +799,28 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'object.deleteTextBoxByText', section: 0, texts: ['삭제 대상 안내문'] },
   }),
   command({
+    op: 'object.format',
+    category: 'object',
+    description: 'Apply validated positioning, wrapping, size, crop, caption, border, fill, rotation, or text-box properties to one inventoried image or shape.',
+    required: ['scope', 'target', 'properties'],
+    precondition: 'object_inventory',
+    execution: 'structural-adapter',
+    nativeMethods: ['setPictureProperties', 'setShapeProperties'],
+    enum: { scope: ['image', 'shape'] },
+    fields: {
+      scope: 'image or shape.',
+      target: 'Native section, paragraph, and control indices returned by object inventory.',
+      properties: formatCatalogFields(),
+    },
+    example: {
+      op: 'object.format',
+      scope: 'image',
+      target: { native: { section: 0, para: 3, control: 0 } },
+      properties: { treatAsChar: true, width: 18000, height: 12000, hasCaption: true, captionDirection: 'Bottom' },
+    },
+    notes: ['Unknown properties and out-of-range values fail the whole atomic batch.'],
+  }),
+  command({
     op: 'object.replaceTextBoxText',
     category: 'object',
     description: 'Replace visible text inside text-box shapes without deleting the shape.',
@@ -727,6 +835,21 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
 ]);
+
+const HWPX_PACKAGE_ONLY_OPS = Object.freeze(new Set([
+  'image.replace',
+  'image.replaceInCell',
+  'image.cloneToCell',
+  'image.generateAndReplace',
+  'object.deleteTextBoxByText',
+  'object.replaceTextBoxText',
+  'text.replaceTracked',
+  'style.clone',
+  'style.applyText',
+  'paragraph.applyStyle',
+  'table.applyCellStyle',
+  'table.writeRichCell',
+]));
 
 const normalizeCommandName = (value) => String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
 const commandByName = new Map();
@@ -791,6 +914,10 @@ const SINGLE_TARGET_INSPECTION_OPS = new Set([
   'table.insertRows',
   'table.setSize',
   'table.setCellSize',
+  'table.autoFit',
+  'format.apply',
+  'table.structure',
+  'paragraph.structure',
 ]);
 
 function nonNegativeInteger(value) {
@@ -855,7 +982,7 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
       add(cellLocation(cell, cell.tableId ?? commandValue.tableId ?? commandValue.location?.tableId), `cells[${index}]`);
       optional(cell.styleSource ?? commandValue.styleSource, `cells[${index}].styleSource`);
     }
-  } else if (['text.replaceParagraph', 'text.insertAfterParagraph', 'list.writeBullets', 'list.applyNumbering', 'layout.fitText'].includes(entry.op)) {
+  } else if (['text.replaceParagraph', 'text.insertAfterParagraph', 'layout.fitText'].includes(entry.op)) {
     add(commandValue.location ?? commandValue.target, 'location');
     optional(commandValue.styleSource, 'styleSource');
   } else if (SINGLE_TARGET_INSPECTION_OPS.has(entry.op)) {
@@ -920,7 +1047,7 @@ function validateParagraphTemplateIndices(value, paragraphCount, label) {
 
 function validateHwpxCommands(commands) {
   if (!Array.isArray(commands) || commands.length === 0) {
-    throw new Error('editor_hwpx_apply requires at least one command.');
+    throw new Error('editor_hwpx_edit requires at least one command.');
   }
   return commands.map((value, index) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -928,7 +1055,7 @@ function validateHwpxCommands(commands) {
     }
     const entry = resolveHwpxCommand(value);
     if (!entry) {
-      throw new Error(`Unsupported HWPX command op: ${String(value.op || `${value.group || ''}.${value.action || ''}` || '<missing>')}. Call editor_hwpx_command_catalog first.`);
+      throw new Error(`Unsupported HWPX command op: ${String(value.op || `${value.group || ''}.${value.action || ''}` || '<missing>')}. Call editor_hwpx_inspect with view=catalog first.`);
     }
     if (entry.readiness !== 'available') {
       throw new Error(
@@ -1028,6 +1155,40 @@ function validateHwpxCommands(commands) {
         }
       }
     }
+    if (entry.op === 'table.autoFit') {
+      for (const field of [
+        'minHeight', 'maxHeight', 'extraPadding',
+        'maxPageGrowth', 'maxBlankPageGrowth', 'maxLowOccupancyGrowth',
+      ]) {
+        if (value[field] !== undefined && nonNegativeInteger(value[field]) === null) {
+          throw new Error(`table.autoFit ${field} must be a nonnegative integer.`);
+        }
+      }
+      if (value.maxHeight !== undefined && Number(value.maxHeight) < 1) {
+        throw new Error('table.autoFit maxHeight must be a positive integer.');
+      }
+    }
+    if (entry.op === 'format.apply' || entry.op === 'object.format') {
+      normalizeFormatProperties(value.scope, value.properties, { resolveFontId: () => 0 });
+    }
+    if (entry.op === 'table.structure') {
+      const requiredByAction = {
+        insertRow: ['row'], insertColumn: ['column'], deleteRow: ['row'], deleteColumn: ['column'],
+        mergeCells: ['startRow', 'startColumn', 'endRow', 'endColumn'],
+        splitCell: ['row', 'column'], deleteTable: [],
+      }[value.action] ?? [];
+      const missingArguments = requiredByAction.filter(field => nonNegativeInteger(value[field]) === null);
+      if (missingArguments.length) throw new Error(`table.structure ${value.action} requires nonnegative integer field(s): ${missingArguments.join(', ')}.`);
+      for (const field of ['rows', 'columns']) {
+        if (value[field] !== undefined && (nonNegativeInteger(value[field]) === null || Number(value[field]) < 1)) {
+          throw new Error(`table.structure ${field} must be a positive integer.`);
+        }
+      }
+    }
+    if (entry.op === 'paragraph.structure' && value.action !== 'mergePrevious'
+      && nonNegativeInteger(value.offset ?? value.target?.offset ?? value.target?.native?.offset) === null) {
+      throw new Error(`paragraph.structure ${value.action} requires a nonnegative offset.`);
+    }
     if (entry.op === 'image.cloneToCell') {
       if (!/^pic_\d+$/.test(String(value.sourcePictureId ?? ''))) {
         throw new Error('image.cloneToCell sourcePictureId must be a picture ID returned by object_inventory.');
@@ -1041,12 +1202,6 @@ function validateHwpxCommands(commands) {
         if (value[field] !== undefined && (!Number.isInteger(Number(value[field])) || Number(value[field]) <= 0)) {
           throw new Error(`image.cloneToCell ${field} must be a positive integer.`);
         }
-      }
-    }
-    if (entry.op === 'list.writeBullets' || entry.op === 'list.applyNumbering') {
-      if (!Array.isArray(value.items) || value.items.length === 0
-        || value.items.some((item) => typeof item !== 'string' || item.trim() === '')) {
-        throw new Error(`${entry.op} items must be a nonempty array of nonempty strings.`);
       }
     }
     if (entry.op === 'object.deleteTextBoxByText'
@@ -1067,7 +1222,7 @@ function validateHwpxCommands(commands) {
   });
 }
 
-function getHwpxCommandCatalog({ category, op } = {}) {
+function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
   const requestedCategory = String(category || '').trim();
   const requestedOp = String(op || '').trim();
   let commands = HWPX_COMMAND_CATALOG;
@@ -1076,12 +1231,42 @@ function getHwpxCommandCatalog({ category, op } = {}) {
     const resolved = resolveHwpxCommand(requestedOp);
     commands = resolved ? commands.filter((entry) => entry.op === resolved.op) : [];
   }
+  const normalizedSourceFormat = String(sourceFormat || 'hwpx').toLowerCase();
+  const sourceAwareCommands = commands.map((entry) => {
+    const hwpAvailable = !HWPX_PACKAGE_ONLY_OPS.has(entry.op);
+    const hwpxAvailable = true;
+    const available = normalizedSourceFormat !== 'hwp' || hwpAvailable;
+    const publishedFields = {
+      ...entry.fields,
+      commandId: 'Required stable ID for matching this editor_hwpx_edit command to its result.',
+      ...(['format.apply', 'object.format'].includes(entry.op)
+        ? { properties: formatCatalogFields(normalizedSourceFormat) }
+        : {}),
+    };
+    return {
+      ...entry,
+      required: Object.freeze([...new Set([...entry.required, 'commandId'])]),
+      fields: Object.freeze(publishedFields),
+      example: Object.freeze({ commandId: `example-${entry.op.replace(/[^a-z0-9]+/gi, '-')}`, ...entry.example }),
+      precondition: entry.precondition === 'target_inspect'
+        ? 'editor_hwpx_inspect(view="target")'
+        : entry.precondition === 'object_inventory'
+          ? 'editor_hwpx_inspect(view="objects")'
+          : entry.precondition,
+      sourceSupport: { hwp: hwpAvailable, hwpx: hwpxAvailable },
+      readiness: available ? entry.readiness : 'unavailable-for-source-format',
+      ...(available ? {} : {
+        unavailableReason: 'This command depends on HWPX package XML. Use a native formatting/insertion command or explicitly convert the source first.',
+      }),
+    };
+  });
   return {
-    version: '1.0.0',
-    sourceFormat: 'hwpx',
+    version: '2.4.0',
+    sourceFormat: normalizedSourceFormat,
     categories: HWPX_COMMAND_CATEGORIES,
-    commandCount: commands.length,
-    commands,
+    commandCount: sourceAwareCommands.length,
+    availableCommandCount: sourceAwareCommands.filter(entry => entry.readiness === 'available').length,
+    commands: sourceAwareCommands,
   };
 }
 
@@ -1093,6 +1278,7 @@ export {
   HWPX_COMMAND_CATALOG,
   HWPX_COMMAND_CATEGORIES,
   HWPX_COMMAND_OPS,
+  HWPX_PACKAGE_ONLY_OPS,
   commandsNeedPrecondition,
   getHwpxCommandCatalog,
   requiredInspectionTargets,

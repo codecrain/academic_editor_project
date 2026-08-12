@@ -110,7 +110,7 @@ export function buildListText(items, options = {}) {
   }).join('\n');
 }
 
-export function wrapLine(line, maxCharsPerLine) {
+export function wrapLine(line, maxCharsPerLine, options = {}) {
   const source = String(line ?? '');
   if (!maxCharsPerLine || source.length <= maxCharsPerLine) {
     return [source];
@@ -129,7 +129,7 @@ export function wrapLine(line, maxCharsPerLine) {
       lines.push(current.trimEnd());
       current = '';
     }
-    if (token.trim().length > maxCharsPerLine) {
+    if (token.trim().length > maxCharsPerLine && options.splitLongTokens === true) {
       for (let i = 0; i < token.length; i += maxCharsPerLine) {
         lines.push(token.slice(i, i + maxCharsPerLine));
       }
@@ -151,10 +151,17 @@ export function fitTextToCapacity(text, capacity, options = {}) {
     return { text: source, changed: false, truncated: false, capacity };
   }
 
-  const lines = source.split('\n').flatMap((line) => wrapLine(line, maxCharsPerLine));
+  const lines = source.split('\n').flatMap((line) => wrapLine(line, maxCharsPerLine, {
+    splitLongTokens: options.splitLongTokens === true,
+  }));
   let nextLines = lines;
   let truncated = false;
-  if (options.truncate !== false && maxLines && lines.length > maxLines) {
+  if (options.truncate === true && options.allowTextLoss !== true) {
+    const error = new Error('fitText truncation requires allowTextLoss=true.');
+    error.code = 'FIT_TEXT_LOSS_NOT_AUTHORIZED';
+    throw error;
+  }
+  if (options.truncate === true && maxLines && lines.length > maxLines) {
     nextLines = lines.slice(0, maxLines);
     truncated = true;
     if (options.ellipsis !== false && nextLines.length) {
@@ -164,13 +171,18 @@ export function fitTextToCapacity(text, capacity, options = {}) {
     }
   }
 
-  const nextText = nextLines.join('\n');
+  const suggestedText = nextLines.join('\n');
+  const materializeBreaks = options.materializeBreaks === true;
+  const nextText = materializeBreaks || truncated ? suggestedText : source;
   return {
     text: nextText,
+    suggestedText,
     changed: nextText !== source,
+    wouldChange: suggestedText !== source,
+    materializedBreaks: materializeBreaks && suggestedText !== source,
     truncated,
     originalLength: source.length,
-    fittedLength: nextText.length,
+    fittedLength: suggestedText.length,
     lineCount: nextLines.length,
     capacity,
   };

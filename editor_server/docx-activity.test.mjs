@@ -13,7 +13,7 @@ test('DOCX activity summaries expose bounded factual descriptions only', () => {
   );
   assert.equal(activitySummary('editor_docx_render_pages', { pages: [1, 2, 2] }), 'Rendering 2 pages');
   assert.equal(activitySummary('editor_docx_target_find', { query: 'confidential query' }), 'Locating requested content');
-  assert.equal(activitySummary('editor_hwpx_apply', { commands: [{}] }), '');
+  assert.equal(activitySummary('editor_hwpx_edit', { commands: [{}] }), '');
   assert.equal(
     activityDetail('editor_docx_apply', {
       commands: [

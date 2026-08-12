@@ -94,9 +94,15 @@ class WorkerBackedEditorSession {
 
   readJson() { return this.runtime.call(this.documentId, 'readJson'); }
   targetMap() { return this.runtime.call(this.documentId, 'targetMap'); }
+  outlinePage(options) { return this.runtime.call(this.documentId, 'outlinePage', options); }
+  styleProfile(options) { return this.runtime.call(this.documentId, 'styleProfile', options); }
   inspectTargets(locations) { return this.runtime.call(this.documentId, 'inspectTargets', { locations }); }
   resolveText(query, match) { return this.runtime.call(this.documentId, 'resolveText', { query, match }); }
   objectInventory() { return this.runtime.call(this.documentId, 'objectInventory'); }
+  async readAsset(imageName) {
+    const asset = await this.runtime.call(this.documentId, 'readAsset', { imageName });
+    return { ...asset, bytes: Buffer.from(asset.bytes) };
+  }
   qualityCheck(options) { return this.runtime.call(this.documentId, 'qualityCheck', { options }); }
   renderHwpxSvgPages(pages) { return this.runtime.call(this.documentId, 'renderHwpxSvgPages', { pages }); }
 

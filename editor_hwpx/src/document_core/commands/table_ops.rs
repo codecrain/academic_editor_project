@@ -1156,6 +1156,7 @@ impl DocumentCore {
             table.repeat_header = v;
         }
         if let Some(v) = json_bool(json, "treatAsChar") {
+            table.common.treat_as_char = v;
             if v {
                 table.attr |= 0x01;
             } else {
@@ -1165,6 +1166,13 @@ impl DocumentCore {
 
         // 위치 속성: attr 비트 필드
         if let Some(v) = json_str(json, "textWrap") {
+            table.common.text_wrap = match v.as_str() {
+                "Square" => crate::model::shape::TextWrap::Square,
+                "TopAndBottom" => crate::model::shape::TextWrap::TopAndBottom,
+                "BehindText" => crate::model::shape::TextWrap::BehindText,
+                "InFrontOfText" => crate::model::shape::TextWrap::InFrontOfText,
+                _ => crate::model::shape::TextWrap::Square,
+            };
             let bits: u32 = match v.as_str() {
                 "Square" => 0,
                 "TopAndBottom" => 1,
@@ -1175,6 +1183,11 @@ impl DocumentCore {
             table.attr = (table.attr & !(0x07 << 21)) | (bits << 21);
         }
         if let Some(v) = json_str(json, "vertRelTo") {
+            table.common.vert_rel_to = match v.as_str() {
+                "Page" => crate::model::shape::VertRelTo::Page,
+                "Para" => crate::model::shape::VertRelTo::Para,
+                _ => crate::model::shape::VertRelTo::Paper,
+            };
             let bits: u32 = match v.as_str() {
                 "Paper" => 0,
                 "Page" => 1,
@@ -1184,6 +1197,13 @@ impl DocumentCore {
             table.attr = (table.attr & !(0x03 << 3)) | (bits << 3);
         }
         if let Some(v) = json_str(json, "vertAlign") {
+            table.common.vert_align = match v.as_str() {
+                "Center" => crate::model::shape::VertAlign::Center,
+                "Bottom" => crate::model::shape::VertAlign::Bottom,
+                "Inside" => crate::model::shape::VertAlign::Inside,
+                "Outside" => crate::model::shape::VertAlign::Outside,
+                _ => crate::model::shape::VertAlign::Top,
+            };
             let bits: u32 = match v.as_str() {
                 "Top" => 0,
                 "Center" => 1,
@@ -1195,6 +1215,12 @@ impl DocumentCore {
             table.attr = (table.attr & !(0x07 << 5)) | (bits << 5);
         }
         if let Some(v) = json_str(json, "horzRelTo") {
+            table.common.horz_rel_to = match v.as_str() {
+                "Page" => crate::model::shape::HorzRelTo::Page,
+                "Column" => crate::model::shape::HorzRelTo::Column,
+                "Para" => crate::model::shape::HorzRelTo::Para,
+                _ => crate::model::shape::HorzRelTo::Paper,
+            };
             let bits: u32 = match v.as_str() {
                 "Paper" => 0,
                 "Page" => 1,
@@ -1205,6 +1231,13 @@ impl DocumentCore {
             table.attr = (table.attr & !(0x03 << 8)) | (bits << 8);
         }
         if let Some(v) = json_str(json, "horzAlign") {
+            table.common.horz_align = match v.as_str() {
+                "Center" => crate::model::shape::HorzAlign::Center,
+                "Right" => crate::model::shape::HorzAlign::Right,
+                "Inside" => crate::model::shape::HorzAlign::Inside,
+                "Outside" => crate::model::shape::HorzAlign::Outside,
+                _ => crate::model::shape::HorzAlign::Left,
+            };
             let bits: u32 = match v.as_str() {
                 "Left" => 0,
                 "Center" => 1,
@@ -1412,6 +1445,20 @@ impl DocumentCore {
                     );
                 }
             }
+        }
+
+        // `Table` historically kept the common-object flags in three places.
+        // The HWP writer gives `raw_ctrl_data` precedence, so changing only
+        // `table.attr` or `table.common` appears successful until reopen. Keep
+        // the compatibility mirrors synchronized at this single commit point.
+        {
+            let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
+            table.common.attr = table.attr;
+            while table.raw_ctrl_data.len() < common_obj_offsets::FLAGS.end {
+                table.raw_ctrl_data.push(0);
+            }
+            table.raw_ctrl_data[common_obj_offsets::FLAGS]
+                .copy_from_slice(&table.attr.to_le_bytes());
         }
 
         self.document.sections[section_idx].raw_stream = None;

@@ -52,7 +52,7 @@ function createEditorMcpTools({
   const tools = [
     {
       name: `${prefix}_open`,
-      description: `Open a ${label} in an isolated editor session. Application code should supply bytes; never ask a user or model to reproduce binary content.`,
+      description: `Open a ${label} in an isolated editor session. Application code should supply bytes; never ask a user or model to reproduce binary content.${normalizedFormat === 'hwpx' ? ' On a loopback gateway, open the returned browserPresentation.url in the Codex in-app Browser side panel and reload that same tab after every successful revision-changing call so the user sees the current session bytes.' : ''}`,
       inputSchema: {
         ...objectSchema({
           filename: { type: 'string', minLength: 1 },

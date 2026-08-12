@@ -30,17 +30,19 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'table.insertRows',
     'table.setSize',
     'table.setCellSize',
+    'table.autoFit',
     'table.create',
     'table.insertCaption',
+    'table.structure',
     'style.applyText',
     'paragraph.applyStyle',
     'style.clone',
     'applyStyle',
     'setRunStyle',
     'setParagraphStyle',
-    'list.writeBullets',
-    'list.applyNumbering',
+    'format.apply',
     'layout.fitText',
+    'paragraph.structure',
     'image.replace',
     'image.insertAfterParagraph',
     'image.replaceInCell',
@@ -52,6 +54,7 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'setHeaderFooter',
     'insertFootnote',
     'object.deleteTextBoxByText',
+    'object.format',
     'object.replaceTextBoxText',
   ]);
   assert.equal(catalog.commandCount, HWPX_COMMAND_OPS.length);
@@ -59,6 +62,15 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('text'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('table'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('image'));
+});
+
+test('HWP catalog exposes source-format availability instead of silent package-only no-ops', () => {
+  const catalog = getHwpxCommandCatalog({ sourceFormat: 'hwp' });
+  assert.equal(catalog.sourceFormat, 'hwp');
+  assert.ok(catalog.availableCommandCount < catalog.commandCount);
+  assert.equal(catalog.commands.find(entry => entry.op === 'image.replace').readiness, 'unavailable-for-source-format');
+  assert.equal(catalog.commands.find(entry => entry.op === 'image.insertAfterParagraph').readiness, 'available');
+  assert.equal(catalog.commands.find(entry => entry.op === 'setParagraphStyle').sourceSupport.hwp, true);
 });
 
 test('HWPX location-changing commands require explicit stable targets and bounded shapes', () => {
@@ -133,6 +145,18 @@ test('HWPX location-changing commands require explicit stable targets and bounde
     ['table:tbl_0/cell:4'],
   );
   assert.throws(() => validateHwpxCommands([{ ...setCellSize, width: -1 }]), /positive integer/);
+
+  const autoFit = {
+    op: 'table.autoFit',
+    target: { tableId: 'tbl_0', cell: { number: 4 } },
+    extraPadding: 200,
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([autoFit]));
+  assert.deepEqual(
+    requiredInspectionTargets([autoFit]).map((item) => item.key),
+    ['table:tbl_0/cell:4'],
+  );
+  assert.throws(() => validateHwpxCommands([{ ...autoFit, minHeight: -1 }]), /nonnegative integer/);
 
   const clonePicture = {
     op: 'image.cloneToCell',
@@ -243,6 +267,15 @@ test('HWPX command catalog publishes every operation as executable', () => {
 });
 
 test('HWPX promoted contracts expose optional fields and enforced enums', () => {
+  const fitText = getHwpxCommandCatalog({ op: 'layout.fitText' }).commands[0];
+  assert.deepEqual(fitText.optional, ['options']);
+  assert.doesNotThrow(() => validateHwpxCommands([{
+    op: 'layout.fitText',
+    location: { tableId: 'tbl_0', cell: { number: 0 } },
+    text: 'non-destructive fit analysis',
+    options: { maxLines: 2, materializeBreaks: false },
+  }]));
+
   const createTable = getHwpxCommandCatalog({ op: 'table.create' }).commands[0];
   assert.deepEqual(createTable.optional, ['width', 'height', 'cellTexts', 'caption']);
   assert.doesNotThrow(() => validateHwpxCommands([{
@@ -282,7 +315,7 @@ test('HWPX promoted contracts expose optional fields and enforced enums', () => 
 test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {
   assert.equal(resolveHwpxCommand('setCellText').op, 'table.writeCell');
   assert.equal(resolveHwpxCommand({ group: 'table', action: 'writeCell' }).op, 'table.writeCell');
-  assert.equal(resolveHwpxCommand('paragraph.applyNumbering').op, 'list.applyNumbering');
+  assert.equal(resolveHwpxCommand('paragraph.applyNumbering'), null);
   assert.equal(getHwpxCommandCatalog({ op: 'setCellText' }).commands[0].op, 'table.writeCell');
 });
 
@@ -298,7 +331,7 @@ test('HWPX command validation rejects malformed batches before execution', () =>
     op: 'list.writeBullets',
     location: { paragraph: { section: 0, number: 1 } },
     items: [],
-  }]), /items/);
+  }]), /Unsupported HWPX command/);
 });
 
 test('HWPX stable target keys cover paragraphs and table cells', () => {

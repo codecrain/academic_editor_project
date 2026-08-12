@@ -9,6 +9,7 @@ import {
   validateHwpxCommands,
 } from '../../editor_hwpx/scripts/hwpx-command-catalog.mjs';
 import { renderHwpxPdf } from '../../editor_hwpx/scripts/hwpx-native-pdf.mjs';
+import { formatCatalogFields } from '../../editor_hwpx/scripts/hwpx-format-contract.mjs';
 
 const hwpxAdapter = Object.freeze({
   format: 'hwpx',
@@ -18,7 +19,10 @@ const hwpxAdapter = Object.freeze({
   async createSession(bytes, options = {}) {
     await initHwpxRuntime();
     return new HwpxApiSession(bytes, {
-      saveMode: options.saveStrategy || options.strategy || 'preserve-package',
+      ...((options.saveStrategy || options.strategy)
+        ? { saveMode: options.saveStrategy || options.strategy }
+        : {}),
+      initialRevision: options.initialRevision,
     });
   },
   createRawSession(bytes) {
@@ -30,6 +34,9 @@ const hwpxAdapter = Object.freeze({
   commandsNeedPrecondition,
   requiredInspectionTargets,
   stableTargetKey: stableHwpxTargetKey,
+  formatPropertyNames(sourceFormat, scope) {
+    return formatCatalogFields(sourceFormat)[scope] || [];
+  },
 });
 
 export { hwpxAdapter };

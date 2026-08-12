@@ -4892,7 +4892,11 @@ impl TypesetEngine {
                         _ => None,
                     })
                     .sum();
-                (effective_sb + outer_top + tac_seg_total).min(fmt.total_height)
+                // A stale line-segment height can be much smaller than the
+                // measured inline table.  The measured table already defines
+                // the flow height, so do not collapse it back to the host
+                // paragraph's text-only height.
+                effective_sb + outer_top + tac_seg_total
             } else {
                 fmt.total_height
             };
@@ -5065,11 +5069,25 @@ impl TypesetEngine {
             // 표가 다음 페이지로 밀린다(2025 donations HWPX pi=25).
             fmt.line_heights[0]
         } else if fmt.total_height > 0.0 {
-            // 단일 TAC: 호스트 문단의 height_for_fit 사용
-            fmt.height_for_fit
+            // Never reserve less flow space than the table's measured rows.
+            ft.total_height.max(fmt.height_for_fit)
         } else {
             ft.total_height
         };
+
+        if std::env::var("RHWP_TABLE_DRIFT").is_ok() {
+            eprintln!(
+                "TAC_TABLE_DRIFT: pi={} sec={} ft_total={:.1} fmt_fit={:.1} chosen={:.1} cur_h={:.1} controls={} lines={}",
+                para_idx,
+                st.section_index,
+                ft.total_height,
+                fmt.height_for_fit,
+                table_height,
+                st.current_height,
+                para.controls.len(),
+                fmt.line_heights.len(),
+            );
+        }
 
         // TAC 표는 분할하지 않고 통째로 배치
         let available = st.available_height();

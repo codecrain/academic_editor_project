@@ -101,13 +101,11 @@ The editor gateway exposes a Streamable HTTP MCP endpoint at `/mcp`. Transport
 requests are stateless, while each opened document is an isolated,
 revision-bound server session that must be finalized or discarded.
 It implements `initialize`, `ping`, `tools/list`, and `tools/call` for DOCX,
-HWPX, and PDF open/read/target/inspect/apply/quality/render/finalize
-workflows.
-For common HWPX text and style work, prefer the semantic-plan MCP sequence
-`semantic_context` → `prepare_plan` → `execute_plan` → `verify_plan`: the
-gateway owns raw command construction and returns target-level execution
-receipts plus all-page rendering evidence. See `API.md` for the typed actions
-and the remaining advanced-command boundary.
+HWPX, and PDF workflows. HWPX uses the compact canonical sequence
+`open` -> `inspect` -> `edit` -> `review` -> `save` for both HWP and HWPX source bytes. The nine tools expose 41 catalog-driven editing operations without one-tool-per-property duplication. Verified save preserves the source format. Its measured `styles` and
+ordered `outline` views expose paragraph hierarchy, indentation, table-cell
+geometry, and exact targets without guessing protected/form regions. See
+`docs/HWPX_MCP_API.md` for the nine-tool contract and Browser reload workflow.
 DOCX `open` can receive the persisted `storedDocumentId` returned by
 `/api/documents` instead of downloading that working copy and sending it back as
 Base64. This is an authenticated application-server reference; agents should

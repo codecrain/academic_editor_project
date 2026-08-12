@@ -30,26 +30,19 @@ DOCX MCP tools:
 - `editor_docx_artifact_delete` (delete a handed-off DOCX/PDF artifact)
 - `editor_docx_prepare_review` (creates the candidate DOCX and tracked-review DOCX for approval; it closes the edit session)
 
+DOCX additionally supports `references` through its DOCX-specific command catalog.
+
 HWPX MCP tools:
 
 - `editor_hwpx_open`
-- `editor_hwpx_discard`
-- `editor_hwpx_read_json`
-- `editor_hwpx_target_map`
-- `editor_hwpx_target_find`
-- `editor_hwpx_target_inspect`
-- `editor_hwpx_object_inventory`
-- `editor_hwpx_command_catalog`
-- `editor_hwpx_apply`
-- `editor_hwpx_render_pages`
-- `editor_hwpx_quality_check`
-- `editor_hwpx_save_source`
-- `editor_hwpx_save_checkpoint`
+- `editor_hwpx_inspect` (`summary`, `outline`, `styles`, `targets`, `target`, `objects`, `template`, `page`, `quality`, `catalog`)
+- `editor_hwpx_edit`
+- `editor_hwpx_review`
+- `editor_hwpx_save` (`verified` or recovery-only `checkpoint`)
 - `editor_hwpx_export_pdf`
+- `editor_hwpx_discard`
 - `editor_hwpx_artifact_read`
 - `editor_hwpx_artifact_delete`
-- `editor_hwpx_semantic_context`
-- `editor_hwpx_commit_plan`
 
 PDF MCP tools:
 
@@ -70,43 +63,25 @@ PDF MCP tools:
 - `editor_pdf_artifact_read`
 - `editor_pdf_artifact_delete`
 
-`editor_docx_command_catalog`, `editor_hwpx_command_catalog`, and
+`editor_docx_command_catalog`, `editor_hwpx_inspect(view="catalog")`, and
 `editor_pdf_command_catalog` are the machine-readable sources of truth. They
-currently expose 31 DOCX commands, 37 HWPX commands, and 6 PDF commands.
+currently expose 31 DOCX commands, 41 HWPX commands, and 46 PDF commands.
 HWPX command entries report
 `readiness` separately from `execution`; canonical commands that are not ready
 are rejected before mutation. Agents should query the applicable
 catalog by category or operation before the first apply. The broker validates
 every apply against that catalog before the document session can mutate.
 
-### HWPX semantic edit plans
+### HWPX canonical lifecycle
 
-Agents that edit ordinary text, paragraph style, or cell style should prefer the
-HWPX semantic-plan path instead of composing raw HWPX locations and command
-fields. The model-visible path has only two steps and no user-approval state:
-
-1. `editor_hwpx_semantic_context` returns one revision-bound page of target
-   IDs, visible text, current style fingerprints, layout facts, and table-cell
-   row/column coordinates. Follow its
-   opaque `nextCursor` unchanged until it is null; it does not expose raw
-   command coordinates.
-2. `editor_hwpx_commit_plan` accepts the complete typed requirement list at the
-   returned revision. The gateway resolves and inspects targets, rejects no-ops,
-   applies one atomic batch, verifies every requirement, confirms that all
-   unmentioned targets are unchanged, runs quality and full-page rendering,
-   saves the HWPX, reopens the saved bytes, reruns quality and full rendering,
-   and returns one opaque artifact receipt. Any failure discards the session and
-   produces no successful artifact.
-
-The current typed requirements are `replace_text`, `replace_joined_text`,
-`replace_fragment`, `select_checkbox`, `copy_text_style`, and `copy_cell_style`. Joined replacement
-constructs newline- or tab-separated text from explicit parts. Fragment replacement requires one
-exact occurrence and preserves the rest of the target. Structural, object, tracked-change, list, and page-layout
-edits remain available to trusted internal callers through the catalogued raw
-command contract. The semantic path never falls back to those commands.
-Every typed requirement must produce a real target change: replacing a target
-with its current text, or copying an already-identical style, is rejected at
-plan preparation and cannot create a successful semantic receipt.
+HWPX uses one public flow: `open → inspect → edit → review → save`. The former
+semantic-plan and duplicated read/map/find routes are removed. `inspect(styles)`
+reports measured paragraph and character properties, indentation, outline
+levels, frequency, and examples without inferring protected regions or heading
+roles from text. `edit` accepts canonical catalog commands and applies the whole
+batch atomically. `review` renders all pages by default and treats actual glyphs
+outside table-cell clip rectangles as blocking errors. Estimated capacity and
+blank-page findings remain warnings because they can be intentional.
 
 The broker enforces exact revisions, command-specific inspection or object
 inventory preconditions, and a quality check before finalization or PDF
@@ -153,23 +128,25 @@ projections instead:
 
 ```json
 {
-  "name": "editor_hwpx_read_json",
+  "name": "editor_hwpx_inspect",
   "arguments": {
     "documentId": "doc_...",
-    "view": "blocks",
-    "limit": 40,
-    "textPreviewChars": 200,
-    "cellPreviewLimit": 3
+    "view": "outline",
+    "limit": 40
   }
 }
 ```
 
-`view` is `summary` (default), `blocks`, or `tables`; DOCX additionally supports
-`references` for native citation occurrences. `limit` is `1..100`,
-`textPreviewChars` is `32..512`, and `cellPreviewLimit` is `0..12`. The summary
-view is always one compact item. Blocks contain an exact location, length,
-style fingerprint, and capped `textPreview`; tables contain compact metadata
-and at most `cellPreviewLimit` compact cell previews.
+HWPX `view` is `summary`, `outline`, `styles`, `targets`, `target`, `objects`,
+`template`, `page`, `quality`, or `catalog`. Ordered and style views use revision-bound opaque
+cursors and return exact locations plus measured style/layout facts. DOCX and
+PDF retain their format-specific paged read projections.
+
+For submission documents, call `editor_hwpx_review` with
+`profile="submission"`. This keeps the same nine-tool lifecycle while adding
+unresolved-field, instruction-region, dummy-identifier, required-blank,
+floating-image, sparse-page, content-bound, and occupancy evidence. Template
+suggestions are advisory; explicit `templatePolicy` roles remain authoritative.
 
 Every read page has this envelope:
 
@@ -282,10 +259,16 @@ the same visible text also occurs in a body paragraph.
 
 ## Non-Negotiable Agent Algorithm
 
-For every edit:
+For legacy DOCX/PDF edit surfaces:
 
 ```text
 open -> read-json -> command-catalog -> target-map/find -> inspect -> apply -> quality/check -> render/compare -> save/export
+```
+
+HWP/HWPX uses the compact canonical lifecycle:
+
+```text
+open -> inspect(summary/outline/styles/catalog/target|objects) -> edit -> review(all pages) -> save(verified)
 ```
 
 On cancellation or unrecoverable failure, replace `save/export` with the
@@ -730,8 +713,6 @@ table.applyCellStyle
 style.applyText
 paragraph.applyStyle
 style.clone
-list.writeBullets
-list.applyNumbering
 layout.fitText
 image.replace
 image.generateAndReplace
@@ -774,7 +755,7 @@ object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-The HWPX catalog has 37 canonical entries and all currently report
+The HWPX catalog has 41 canonical entries and all currently report
 `readiness=available`. Commands promoted beyond the published RHWP wrapper use
 qualified package-preserving or structural adapters and must pass mutation,
 package qualification, export, reopen, and operation-specific postconditions.
@@ -787,7 +768,7 @@ package qualification and reopen verification.
 Runtime artifact validation statically compares the `HwpDocument` method
 surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
 initialize WASM or introspect live WASM exports, so method presence alone is not
-semantic readiness. The 37-operation set is additionally gated by pinned
+semantic readiness. The 41-operation set is additionally gated by pinned
 installed-artifact and adapter tests that require the applicable mutation,
 package qualification, export, reopen, and operation-specific postconditions.
 
@@ -1029,46 +1010,14 @@ DOCX legacy named style:
 }
 ```
 
-## List Commands
+## List formatting boundary
 
-Write bullet text:
-
-```json
-{
-  "commandId": "bullets-1",
-  "op": "list.writeBullets",
-  "location": { "tableId": "tbl_1", "cell": { "number": 5 } },
-  "marker": "-",
-  "items": ["first", "second"],
-  "styleSource": { "tableId": "tbl_1", "cell": { "number": 5 } }
-}
-```
-
-Write numbered text:
-
-```json
-{
-  "commandId": "numbering-1",
-  "op": "list.applyNumbering",
-  "location": { "tableId": "tbl_1", "cell": { "number": 5 } },
-  "startAt": 3,
-  "suffix": ")",
-  "items": ["alpha", "beta"],
-  "styleSource": { "tableId": "tbl_1", "cell": { "number": 5 } }
-}
-```
-
-Aliases:
-
-```text
-list.write
-paragraph.applyNumbering
-```
-
-Current behavior:
-- Writes visible list text.
-- May clone source paragraph style.
-- Does not guarantee native numbering-definition creation for HWPX.
+The old `list.writeBullets` and `list.applyNumbering` commands were removed.
+They only prefixed visible characters and falsely implied native list hierarchy.
+Write the intended content with a text or table-cell command, then apply the
+inspected paragraph formatting explicitly. A list command must not be
+advertised until the engine can create and verify native numbering definitions
+after reopen.
 
 ## Layout Commands
 
@@ -1224,7 +1173,7 @@ Chart rule:
 
 The following examples show DOCX payload shapes. HWPX exposes the matching
 metadata, style, page setup, header/footer, and footnote operations with
-format-specific schemas; query `editor_hwpx_command_catalog` before applying
+format-specific schemas; query `editor_hwpx_inspect(view="catalog")` before applying
 them.
 
 DOCX metadata example:
@@ -1572,6 +1521,10 @@ table.writeCell
 table.writeCells
 table.writeRichCell
 table.applyCellStyle
+table.insertRows
+table.setSize
+table.setCellSize
+table.autoFit
 table.create
 table.insertCaption
 style.applyText
@@ -1580,11 +1533,11 @@ style.clone
 applyStyle
 setRunStyle
 setParagraphStyle
-list.writeBullets
-list.applyNumbering
 layout.fitText
 image.replace
 image.insertAfterParagraph
+image.replaceInCell
+image.cloneToCell
 image.generateAndReplace
 setDocumentMetadata
 defineStyle
@@ -1595,7 +1548,8 @@ object.deleteTextBoxByText
 object.replaceTextBoxText
 ```
 
-All 32 entries currently report `readiness=available`. Apply still fails closed
+All 41 HWPX entries currently report `readiness=available`. For binary HWP,
+the same catalog marks package-XML-only commands unavailable. Apply still fails closed
 when required inspection, object inventory, exact revision, or
 operation-specific postconditions are missing.
 Tracked replacement is limited to one `hp:t` run and must be the only command

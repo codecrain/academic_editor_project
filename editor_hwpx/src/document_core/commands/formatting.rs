@@ -1612,6 +1612,54 @@ impl DocumentCore {
     }
 
     /// 본문 문단에 글자 서식 적용 헬퍼
+    /// Apply exact existing style identifiers to one table-cell paragraph.
+    /// This avoids property conversion when losslessly rewriting cell text.
+    pub fn apply_cell_style_ids_native(
+        &mut self,
+        sec_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+        cell_para_idx: usize,
+        style_id: usize,
+        para_shape_id: usize,
+        char_shape_id: usize,
+    ) -> Result<String, HwpError> {
+        if style_id > u8::MAX as usize
+            || para_shape_id >= self.document.doc_info.para_shapes.len()
+            || char_shape_id >= self.document.doc_info.char_shapes.len()
+        {
+            return Err(HwpError::RenderError(
+                "cell paragraph style identifier is out of range".to_string(),
+            ));
+        }
+        {
+            let paragraph = self.get_cell_paragraph_mut(
+                sec_idx,
+                parent_para_idx,
+                control_idx,
+                cell_idx,
+                cell_para_idx,
+            )?;
+            paragraph.style_id = style_id as u8;
+            paragraph.para_shape_id = para_shape_id as u16;
+            paragraph.char_shapes.clear();
+            paragraph
+                .char_shapes
+                .push(crate::model::paragraph::CharShapeRef {
+                    start_pos: 0,
+                    char_shape_id: char_shape_id as u32,
+                });
+        }
+        self.document.sections[sec_idx].raw_stream = None;
+        self.rebuild_section(sec_idx);
+        self.event_log.push(DocumentEvent::ParaFormatChanged {
+            section: sec_idx,
+            para: parent_para_idx,
+        });
+        Ok("{\"ok\":true}".to_string())
+    }
+
     pub(crate) fn apply_char_mods_to_paragraph(
         &mut self,
         sec_idx: usize,

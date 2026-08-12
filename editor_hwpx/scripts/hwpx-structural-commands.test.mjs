@@ -524,6 +524,60 @@ test('table.insertCaption rejects an existing native caption before mutation', (
   assert.deepEqual(calls, []);
 });
 
+test('table.autoFit measures rendered cell content and grows every cell in the row', () => {
+  const calls = [];
+  const heights = [1000, 1200, 900, 900];
+  const rows = [0, 0, 1, 1];
+  const doc = {
+    getCellProperties: (_section, _paragraph, _control, cellIndex) => JSON.stringify({
+      height: heights[cellIndex],
+      paddingTop: 100,
+      paddingBottom: 100,
+    }),
+    getCellParagraphCount: () => 2,
+    getCellParagraphLength: () => 8,
+    getCursorRectInCell: (_section, _paragraph, _control, _cell, paragraph, offset) => JSON.stringify(
+      paragraph === 0 && offset === 0
+        ? { pageIndex: 0, y: 10, height: 12 }
+        : { pageIndex: 0, y: 50, height: 12 },
+    ),
+    getTableDimensions: () => JSON.stringify({ cellCount: 4 }),
+    getCellInfo: (_section, _paragraph, _control, cellIndex) => JSON.stringify({ row: rows[cellIndex] }),
+    resizeTableCells: (...args) => {
+      calls.push([...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true}';
+    },
+  };
+  const result = applyHwpxStructuralCommand(doc, {
+    op: 'table.autoFit',
+    target: { tableId: 'tbl_0', cell: { number: 0 } },
+    extraPadding: 100,
+  }, {
+    before: {
+      tables: [{
+        id: 'tbl_0',
+        native: { section: 1, paragraph: 3, control: 2 },
+        cells: [{
+          native: {
+            section: 1,
+            paragraph: 3,
+            control: 2,
+            cellIndex: 0,
+            cellParagraphIndex: 0,
+          },
+        }],
+      }],
+    },
+  });
+
+  assert.equal(result.measuredContentHeight, 3900);
+  assert.equal(result.expectedCellHeight, 4200);
+  assert.deepEqual(calls, [[1, 3, 2, [
+    { cellIdx: 0, heightDelta: 3200 },
+    { cellIdx: 1, heightDelta: 3000 },
+  ]]]);
+});
+
 test('table.create lower-level adapter exercises width, height, cell text, and caption path', () => {
   const calls = [];
   const doc = {
@@ -612,6 +666,14 @@ test('image.insertAfterParagraph registers decoded bytes in a new paragraph', ()
       calls.push(['insertPicture', ...args]);
       return '{"ok":true,"paraIdx":4,"controlIdx":0}';
     },
+    setPictureProperties: (...args) => {
+      calls.push(['setPictureProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true}';
+    },
+    getPictureProperties: (...args) => {
+      calls.push(['getPictureProperties', ...args]);
+      return '{"treatAsChar":true,"vertRelTo":"Paper","horzRelTo":"Paper","textWrap":"Square","width":75,"height":75}';
+    },
   };
   const result = applyHwpxStructuralCommand(doc, {
     op: 'image.insertAfterParagraph',
@@ -626,6 +688,24 @@ test('image.insertAfterParagraph registers decoded bytes in a new paragraph', ()
   assert.deepEqual(calls[1].slice(1, 5), [0, 4, 0, '']);
   assert.deepEqual(Buffer.from(calls[1][5]), png);
   assert.deepEqual(calls[1].slice(6), [75, 75, 1, 1, 'png', '기관 로고', null, null]);
+  assert.deepEqual(calls[2], ['setPictureProperties', 0, 4, 0, {
+    treatAsChar: true,
+    textWrap: 'TopAndBottom',
+    vertRelTo: 'Para',
+    vertAlign: 'Top',
+    horzRelTo: 'Para',
+    horzAlign: 'Center',
+    vertOffset: 0,
+    horzOffset: 0,
+    allowOverlap: false,
+    restrictInPage: true,
+    keepWithAnchor: true,
+    width: 75,
+    height: 75,
+  }]);
+  assert.deepEqual(calls[3], ['getPictureProperties', 0, 4, 0]);
+  assert.equal(result.verifiedInlinePlacement, true);
+  assert.equal(result.native.actualPlacement.treatAsChar, true);
   assert.deepEqual(result.target, {
     kind: 'image',
     sectionIndex: 0,
@@ -650,6 +730,14 @@ test('image.insertAfterParagraph preserves aspect ratio and creates its advertis
       calls.push(['insertPicture', ...args]);
       return '{"ok":true,"paraIdx":3,"controlIdx":1}';
     },
+    setPictureProperties: (...args) => {
+      calls.push(['setPictureProperties', ...args.slice(0, 3), JSON.parse(args[3])]);
+      return '{"ok":true}';
+    },
+    getPictureProperties: (...args) => {
+      calls.push(['getPictureProperties', ...args]);
+      return '{"treatAsChar":true,"width":300,"height":150}';
+    },
     insertText: (...args) => {
       calls.push(['insertText', ...args]);
       return '{"ok":true,"charOffset":5}';
@@ -665,7 +753,8 @@ test('image.insertAfterParagraph preserves aspect ratio and creates its advertis
 
   assert.deepEqual(calls[0], ['insertParagraph', 0, 3]);
   assert.deepEqual(calls[1].slice(6, 10), [300, 150, 2, 1]);
-  assert.deepEqual(calls.slice(2), [
+  assert.equal(calls[2][0], 'setPictureProperties');
+  assert.deepEqual(calls.slice(4), [
     ['insertParagraph', 0, 4],
     ['insertText', 0, 4, 0, '그림 1'],
   ]);
@@ -682,6 +771,25 @@ test('image.insertAfterParagraph preserves aspect ratio and creates its advertis
       paragraphIndex: 4,
     },
   ]);
+});
+
+test('image.insertAfterParagraph rejects a native engine that does not persist inline placement', () => {
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const doc = {
+    insertParagraph: () => '{"ok":true,"paraIdx":1}',
+    insertPicture: () => '{"ok":true,"paraIdx":1,"controlIdx":0}',
+    setPictureProperties: () => '{"ok":true}',
+    getPictureProperties: () => '{"treatAsChar":false,"vertRelTo":"Paper","horzRelTo":"Paper","textWrap":"Square"}',
+  };
+  assert.throws(() => applyHwpxStructuralCommand(doc, {
+    op: 'image.insertAfterParagraph',
+    target: { sectionIndex: 0, paragraphIndex: 0 },
+    bytesBase64: png.toString('base64'),
+    mimeType: 'image/png',
+  }), error => error.code === 'HWPX_IMAGE_PLACEMENT_VERIFICATION_FAILED');
 });
 
 test('setPageSetup maps public fields to the RHWP PageDef payload', () => {

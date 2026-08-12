@@ -10,6 +10,12 @@ import {
 } from './editor-mcp.mjs';
 import { EDITOR_MCP_SCHEMA_FACTORY } from '../editor_common/editor-mcp-tool-factory.mjs';
 import { PDF_COMMAND_OPS } from '../editor_pdf/scripts/pdf-command-catalog.mjs';
+import { HWPX_COMMAND_CATALOG, getHwpxCommandCatalog } from '../editor_hwpx/scripts/hwpx-command-catalog.mjs';
+import {
+  ACADEMIC_EDITOR_MCP_INSTRUCTIONS,
+  HWPX_MCP_CONTRACT,
+  HWPX_MCP_CONTRACT_VERSION,
+} from './hwpx-mcp-contract.mjs';
 
 test('MCP validates advertised input schemas before executing a tool', async () => {
   const calls = [];
@@ -176,7 +182,7 @@ test('MCP enforces bounded pagination arguments before gateway execution', async
   assert.equal(calls.length, 1);
 });
 
-test('MCP advertises HWPX parity tools with the HWPX command enum', async () => {
+test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', async () => {
   const listed = await handleEditorMcpJsonRpc({
     jsonrpc: '2.0',
     id: 1,
@@ -186,34 +192,54 @@ test('MCP advertises HWPX parity tools with the HWPX command enum', async () => 
     executeTool: async () => ({ ok: true }),
   });
   const tools = new Map(listed.result.tools.map((tool) => [tool.name, tool]));
-  for (const name of [
-    'editor_hwpx_open',
-    'editor_hwpx_read_json',
-    'editor_hwpx_target_map',
-    'editor_hwpx_target_inspect',
-    'editor_hwpx_object_inventory',
-    'editor_hwpx_command_catalog',
-    'editor_hwpx_apply',
-    'editor_hwpx_render_pages',
-    'editor_hwpx_quality_check',
-    'editor_hwpx_export_pdf',
-    'editor_hwpx_save_source',
-    'editor_hwpx_save_checkpoint',
-    'editor_hwpx_artifact_read',
-    'editor_hwpx_artifact_delete',
-  ]) {
-    assert.ok(tools.has(name), `${name} must be advertised`);
-  }
-  const opEnum = tools.get('editor_hwpx_apply').inputSchema.properties.commands.items.properties.op.enum;
+  assert.deepEqual(
+    [...tools.keys()].filter((name) => name.startsWith('editor_hwpx_')),
+    HWPX_MCP_CONTRACT.tools,
+  );
+  const opEnum = tools.get('editor_hwpx_edit').inputSchema.properties.commands.items.properties.op.enum;
   assert.ok(opEnum.includes('text.replaceParagraph'));
   assert.ok(opEnum.includes('object.replaceTextBoxText'));
   assert.ok(opEnum.includes('setDocumentMetadata'));
-  const semanticActions = tools.get('editor_hwpx_commit_plan')
-    .inputSchema.properties.requirements.items.oneOf
-    .flatMap((variant) => variant.properties.action.enum);
-  assert.ok(semanticActions.includes('replace_fragment'));
-  assert.ok(semanticActions.includes('replace_joined_text'));
-  assert.ok(semanticActions.includes('select_checkbox'));
+  assert.ok(opEnum.includes('table.autoFit'));
+  assert.deepEqual(
+    tools.get('editor_hwpx_inspect').inputSchema.properties.view.enum,
+    ['summary', 'outline', 'styles', 'targets', 'target', 'objects', 'template', 'page', 'quality', 'catalog'],
+  );
+  assert.equal(tools.has('editor_hwpx_semantic_context'), false);
+  assert.equal(tools.has('editor_hwpx_commit_plan'), false);
+  assert.deepEqual(opEnum, HWPX_MCP_CONTRACT.commandOps);
+  assert.deepEqual(tools.get('editor_hwpx_save').inputSchema.properties.mode.enum, HWPX_MCP_CONTRACT.saveModes);
+  assert.equal(tools.get('editor_hwpx_open').annotations.readOnlyHint, false);
+  assert.equal(tools.get('editor_hwpx_export_pdf').annotations.readOnlyHint, false);
+});
+
+test('MCP initialize publishes the current HWPX lifecycle instead of removed tool guidance', async () => {
+  const initialized = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-06-18' },
+  });
+  assert.equal(initialized.result.serverInfo.name, 'academic-editor-mcp');
+  assert.equal(initialized.result.serverInfo.version, HWPX_MCP_CONTRACT_VERSION);
+  assert.equal(initialized.result.instructions, ACADEMIC_EDITOR_MCP_INSTRUCTIONS);
+  for (const toolName of HWPX_MCP_CONTRACT.lifecycle) {
+    assert.match(initialized.result.instructions, new RegExp(`\\b${toolName}\\b`));
+  }
+  assert.match(initialized.result.instructions, /browserPresentation\.url/);
+  assert.doesNotMatch(
+    initialized.result.instructions,
+    /editor_hwpx_(?:read_json|target_map|target_find|target_inspect|object_inventory|command_catalog|apply|quality_check|render_pages|save_source|save_checkpoint)/,
+  );
+});
+
+test('HWPX catalog human guidance names only the compact inspection API', () => {
+  const guidance = HWPX_COMMAND_CATALOG.map(({ description, fields, notes }) => ({ description, fields, notes }));
+  assert.doesNotMatch(JSON.stringify(guidance), /\btarget_(?:map|find|inspect)\b/);
+  assert.match(JSON.stringify(guidance), /editor_hwpx_inspect/);
+  const published = JSON.stringify(getHwpxCommandCatalog());
+  assert.doesNotMatch(published, /"precondition":"(?:target_inspect|object_inventory)"/);
+  assert.match(published, /editor_hwpx_inspect\(view=\\"(?:target|objects)\\"\)/);
 });
 
 test('HWPX MCP schema is owned by the HWPX environment and contains no DOCX contract text', () => {
@@ -223,7 +249,7 @@ test('HWPX MCP schema is owned by the HWPX environment and contains no DOCX cont
   assert.doesNotMatch(JSON.stringify(HWPX_MCP_TOOLS), /editor_docx|DOCX/);
 });
 
-test('DOCX, HWPX, and PDF MCP tools are generated by one schema factory contract', () => {
+test('DOCX and PDF retain the common factory while HWPX uses its compact lifecycle contract', () => {
   const byFormat = (format) => new Map(
     EDITOR_MCP_TOOLS
       .filter((tool) => tool.name.startsWith(`editor_${format}_`))
@@ -234,48 +260,32 @@ test('DOCX, HWPX, and PDF MCP tools are generated by one schema factory contract
   const pdf = byFormat('pdf');
 
   assert.equal(docx.size, 17);
-  assert.equal(hwpx.size, 19);
+  assert.equal(hwpx.size, 9);
   assert.equal(pdf.size, 16);
   assert.ok(docx.has('prepare_review'));
   const commonDocx = new Map([...docx].filter(([suffix]) => suffix !== 'prepare_review'));
-  const hwpxCommon = new Map([...hwpx].filter(([suffix]) => ![
-    'semantic_context',
-    'apply_plan',
-    'commit_plan',
-  ].includes(suffix)));
-  assert.deepEqual([...commonDocx.keys()].sort(), [...hwpxCommon.keys()].sort());
   assert.deepEqual([...commonDocx.keys()].sort(), [...pdf.keys()].sort());
 
   for (const [suffix, docxTool] of commonDocx) {
-    const hwpxTool = hwpxCommon.get(suffix);
     const pdfTool = pdf.get(suffix);
     assert.equal(docxTool[EDITOR_MCP_SCHEMA_FACTORY], 'editor-common-v1', `${docxTool.name} must use the common factory`);
-    assert.equal(hwpxTool[EDITOR_MCP_SCHEMA_FACTORY], 'editor-common-v1', `${hwpxTool.name} must use the common factory`);
     assert.equal(pdfTool[EDITOR_MCP_SCHEMA_FACTORY], 'editor-common-v1', `${pdfTool.name} must use the common factory`);
     const docxProperties = Object.keys(docxTool.inputSchema.properties || {}).sort();
-    const hwpxProperties = Object.keys(hwpxTool.inputSchema.properties || {}).sort();
     if (suffix === 'open') {
-      assert.deepEqual(
-        docxProperties,
-        [...hwpxProperties, 'storedDocumentId'].sort(),
-        'DOCX open adds only its persisted document-store reference',
-      );
       assert.equal(pdfTool.inputSchema.properties.storedDocumentId, undefined);
     } else {
       assert.deepEqual(
         docxProperties,
-        hwpxProperties,
-        `${suffix} top-level properties must stay transport-compatible`,
+        Object.keys(pdfTool.inputSchema.properties || {}).sort(),
+        `${suffix} DOCX/PDF properties must stay transport-compatible`,
       );
     }
   }
   assert.equal(docx.get('prepare_review')?.annotations?.destructiveHint, false);
-  for (const suffix of ['semantic_context', 'commit_plan']) {
-    assert.ok(hwpx.has(suffix), `HWPX semantic tool ${suffix} must be advertised`);
-    assert.equal(hwpx.get(suffix)[EDITOR_MCP_SCHEMA_FACTORY], undefined);
-  }
-  assert.ok(hwpx.get('semantic_context')?.inputSchema?.properties?.cursor);
-  assert.ok(hwpx.get('commit_plan')?.inputSchema?.properties?.requirements);
+  assert.deepEqual([...hwpx.keys()], [
+    'open', 'inspect', 'edit', 'review', 'save', 'export_pdf', 'discard', 'artifact_read', 'artifact_delete',
+  ]);
+  assert.ok([...hwpx.values()].every((tool) => tool[EDITOR_MCP_SCHEMA_FACTORY] === undefined));
 });
 
 test('PDF MCP advertises every implemented PDF edit operation', () => {

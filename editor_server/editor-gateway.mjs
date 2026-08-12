@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { copyFile, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
@@ -11,6 +11,7 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
+import { HWPX_MCP_CONTRACT_VERSION } from './hwpx-mcp-contract.mjs';
 import {
   DocxActivityHub,
   activityDescriptor,
@@ -18,6 +19,9 @@ import {
   commandReviewMode,
 } from './docx-activity.mjs';
 import { EditorSessionWorkerPool, defaultWorkerCount } from './editor-session-runtime.mjs';
+import { analyzeSvgCellClipping, analyzeSvgPageMetrics, svgHasVisibleContent } from './svg-render-evidence.mjs';
+import { analyzeHwpxSemanticEvidence, suggestHwpxTemplateRegions } from './hwpx-semantic-evidence.mjs';
+import { analyzeHwpxVisualEvidence } from './hwpx-visual-evidence.mjs';
 import {
   docxAdapter,
   formatAdapters,
@@ -48,6 +52,7 @@ const MCP_TEXT_PREVIEW_DEFAULT_CHARS = 200;
 const MCP_TEXT_PREVIEW_MAX_CHARS = 512;
 const MCP_CELL_PREVIEW_DEFAULT_LIMIT = 3;
 const MCP_CELL_PREVIEW_MAX_LIMIT = 12;
+const NATIVE_HWP_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/bmp']);
 const STATIC_MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'],
   ['.html', 'text/html; charset=utf-8'],
@@ -977,6 +982,12 @@ function isEditorApiPath(pathname) {
   return /^\/v1\/(?:docx|hwpx|pdf)\//.test(pathname);
 }
 
+function isLoopbackHwpxLiveSourceRequest(req, config, pathname) {
+  return req.method === 'GET'
+    && isLoopbackHost(config.host)
+    && /^\/v1\/hwpx\/documents\/[^/]+\/live-source$/.test(pathname);
+}
+
 async function readJsonBody(req, limitBytes) {
   const body = await readRequestBody(req, limitBytes);
   if (!body.length) {
@@ -1167,8 +1178,28 @@ function recordPreconditions(record) {
     inspectedTargetKeys: new Set(),
     inventoryRevision: null,
     qualityRevision: null,
+    qualityProfile: null,
+    qualityVisualPolicy: null,
   };
+  record.preconditions.qualityVisualPolicy ??= null;
   return record.preconditions;
+}
+
+// Visual-policy objects arrive over JSON, so callers may use a different key
+// order while expressing the same policy.  Canonicalize recursively before
+// storing the review precondition; this keeps the gate strict without making
+// semantically identical requests fail spuriously.
+function stableJson(value) {
+  if (value === undefined || value === null) return 'null';
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function visualPolicyKey(policy) {
+  return stableJson(policy ?? null);
 }
 
 function clearRecordPreconditions(record) {
@@ -1177,6 +1208,8 @@ function clearRecordPreconditions(record) {
   preconditions.inspectedTargetKeys = new Set();
   preconditions.inventoryRevision = null;
   preconditions.qualityRevision = null;
+  preconditions.qualityProfile = null;
+  preconditions.qualityVisualPolicy = null;
 }
 
 function requireBaseRevision(record, body) {
@@ -1248,13 +1281,31 @@ function assertMutationPreconditions(record, action, body, commands = []) {
       'run a clean quality check at the current revision before finalizing the document.',
     );
   }
+  if ((action === 'save-source' || action === 'export-pdf') && record.fmt === 'hwpx') {
+    const requiredProfile = body?.profile === 'submission' ? 'submission' : 'structural';
+    if (preconditions.qualityProfile !== requiredProfile) {
+      throw new EditorContractError(
+        'quality_profile_required',
+        `run a clean ${requiredProfile} review at the current revision before finalizing the document.`,
+        409,
+        { requiredProfile, reviewedProfile: preconditions.qualityProfile },
+      );
+    }
+    const requestedVisualPolicy = visualPolicyKey(body?.visualPolicy);
+    if (preconditions.qualityVisualPolicy !== requestedVisualPolicy) {
+      throw new EditorContractError(
+        'quality_visual_policy_required',
+        'finalization must use the exact visualPolicy that passed the current-revision review.',
+        409,
+        {
+          reviewedVisualPolicy: preconditions.qualityVisualPolicy,
+          requestedVisualPolicy,
+        },
+      );
+    }
+  }
 
   return { baseRevision, commandEntries };
-}
-
-function semanticPlanStore(record) {
-  record.semanticPlans ??= new Map();
-  return record.semanticPlans;
 }
 
 function flattenEditableTargets(targetMap = {}) {
@@ -1262,462 +1313,6 @@ function flattenEditableTargets(targetMap = {}) {
     ...(Array.isArray(targetMap.paragraphs) ? targetMap.paragraphs : []),
     ...(Array.isArray(targetMap.cells) ? targetMap.cells : []),
   ];
-}
-
-function semanticTargetView(target) {
-  return {
-    targetId: target.id,
-    kind: target.kind,
-    text: target.currentText,
-    textLength: target.textLength,
-    styleFingerprint: target.styleFingerprint ?? null,
-    layout: target.layout ?? null,
-    ...(target.table ? { table: { id: target.table.id, dims: target.table.dims } } : {}),
-    ...(target.kind === 'cell' && target.cell ? {
-      cell: {
-        index: target.cell.cellIndex,
-        row: target.cell.row,
-        column: target.cell.col,
-        rowSpan: target.cell.rowSpan,
-        colSpan: target.cell.colSpan,
-        pictureCount: Number(target.cell.pictureCount || 0),
-      },
-    } : {}),
-  };
-}
-
-function semanticCellNeighborMap(cells = []) {
-  const cellFacts = (cell) => cell.cell || {
-    row: cell.location?.cell?.row,
-    col: cell.location?.cell?.column,
-    rowSpan: cell.location?.cell?.rowSpan,
-    colSpan: cell.location?.cell?.colSpan,
-  };
-  const byTable = new Map();
-  for (const cell of cells) {
-    const tableId = cell.table?.id || cell.location?.tableId;
-    if (!tableId || !Number.isInteger(Number(cellFacts(cell).row)) || !Number.isInteger(Number(cellFacts(cell).col))) continue;
-    const group = byTable.get(tableId) || [];
-    group.push(cell);
-    byTable.set(tableId, group);
-  }
-  const result = new Map();
-  const overlaps = (startA, spanA, startB, spanB) => (
-    startA < startB + spanB && startB < startA + spanA
-  );
-  for (const group of byTable.values()) {
-    for (const cell of group) {
-      const facts = cellFacts(cell);
-      const row = Number(facts.row);
-      const column = Number(facts.col);
-      const rowSpan = Number(facts.rowSpan || 1);
-      const colSpan = Number(facts.colSpan || 1);
-      const neighbors = {};
-      for (const candidate of group) {
-        if (candidate.id === cell.id) continue;
-        const candidateFacts = cellFacts(candidate);
-        const candidateRow = Number(candidateFacts.row);
-        const candidateColumn = Number(candidateFacts.col);
-        const candidateRowSpan = Number(candidateFacts.rowSpan || 1);
-        const candidateColSpan = Number(candidateFacts.colSpan || 1);
-        if (candidateColumn + candidateColSpan === column
-          && overlaps(row, rowSpan, candidateRow, candidateRowSpan)) neighbors.leftTargetId ??= candidate.id;
-        if (column + colSpan === candidateColumn
-          && overlaps(row, rowSpan, candidateRow, candidateRowSpan)) neighbors.rightTargetId ??= candidate.id;
-        if (candidateRow + candidateRowSpan === row
-          && overlaps(column, colSpan, candidateColumn, candidateColSpan)) neighbors.aboveTargetId ??= candidate.id;
-        if (row + rowSpan === candidateRow
-          && overlaps(column, colSpan, candidateColumn, candidateColSpan)) neighbors.belowTargetId ??= candidate.id;
-      }
-      result.set(cell.id, neighbors);
-    }
-  }
-  return result;
-}
-
-function semanticTargetEvidence(target) {
-  const view = semanticTargetView(target);
-  return {
-    targetId: view.targetId,
-    kind: view.kind,
-    text: view.text,
-    styleHash: view.styleFingerprint?.hash ?? null,
-  };
-}
-
-function semanticStableTargetKey(target) {
-  return hwpxAdapter.stableTargetKey(target.location) || target.id;
-}
-
-function semanticPreservationReceipt(beforeById, afterById, editedTargetIds) {
-  const changed = [];
-  const missing = [];
-  const added = [];
-  for (const [targetId, before] of beforeById) {
-    if (editedTargetIds.has(targetId)) continue;
-    const after = afterById.get(targetId);
-    if (!after) {
-      missing.push(targetId);
-      continue;
-    }
-    if (before.kind !== after.kind || before.text !== after.text || before.styleHash !== after.styleHash) {
-      changed.push({ targetId, before, after });
-    }
-  }
-  for (const targetId of afterById.keys()) {
-    if (!beforeById.has(targetId)) added.push(targetId);
-  }
-  return {
-    ok: changed.length === 0 && missing.length === 0 && added.length === 0,
-    checkedTargetCount: [...beforeById.keys()].filter((targetId) => !editedTargetIds.has(targetId)).length,
-    changed,
-    missingTargetIds: missing,
-    addedTargetIds: added,
-  };
-}
-
-function semanticEvidenceFingerprint(evidence) {
-  return JSON.stringify([evidence.kind, evidence.text, evidence.styleHash]);
-}
-
-function semanticStructuralPreservationReceipt(beforeTargets, afterTargets, maxAddedTargets, editedTargetIds = new Set()) {
-  const counts = (targets) => {
-    const result = new Map();
-    for (const target of targets) {
-      if (editedTargetIds.has(target.id)) continue;
-      const evidence = target.kind && Object.hasOwn(target, 'styleHash')
-        ? target
-        : semanticTargetEvidence(target);
-      const key = semanticEvidenceFingerprint(evidence);
-      result.set(key, (result.get(key) || 0) + 1);
-    }
-    return result;
-  };
-  const beforeCounts = counts(beforeTargets);
-  const afterCounts = counts(afterTargets);
-  const missing = [];
-  for (const [fingerprint, count] of beforeCounts) {
-    const actual = afterCounts.get(fingerprint) || 0;
-    if (actual < count) missing.push({ fingerprint, expectedCount: count, actualCount: actual });
-  }
-  const beforeCount = beforeTargets.filter((target) => !editedTargetIds.has(target.id)).length;
-  const afterCount = afterTargets.filter((target) => !editedTargetIds.has(target.id)).length;
-  const addedTargetCount = Math.max(0, afterCount - beforeCount);
-  return {
-    ok: missing.length === 0 && addedTargetCount <= maxAddedTargets,
-    checkedTargetCount: beforeCount,
-    changed: missing,
-    missingTargetIds: [],
-    addedTargetIds: [],
-    addedTargetCount,
-    maxAddedTargetCount: maxAddedTargets,
-  };
-}
-
-async function inspectSemanticTargetIds(session, targetIds) {
-  const targetById = new Map(flattenEditableTargets(await session.targetMap()).map((target) => [target.id, target]));
-  const missing = [...new Set(targetIds)].filter((targetId) => !targetById.has(targetId));
-  if (missing.length) {
-    throw new EditorContractError(
-      'unknown_semantic_target',
-      `Target IDs are not editable at the current revision: ${missing.join(', ')}. Re-read semantic context.`,
-      422,
-      { missingTargetIds: missing },
-    );
-  }
-  const locations = [...new Set(targetIds)].map((targetId) => targetById.get(targetId).location);
-  const inspected = typeof session.inspectTargets === 'function'
-    ? await session.inspectTargets(locations)
-    : locations.map((location) => session.inspectTarget(location));
-  return new Map(inspected.map((target) => [target.id, target]));
-}
-
-function normalizeSemanticRequirements(requirements) {
-  if (!Array.isArray(requirements) || requirements.length === 0 || requirements.length > 40) {
-    throw new EditorContractError('invalid_semantic_plan', 'requirements must contain 1-40 typed edit requirements.', 422);
-  }
-  const ids = new Set();
-  return requirements.map((requirement) => {
-    const id = String(requirement?.id || '').trim();
-    const action = String(requirement?.action || '').trim();
-    const targetId = String(requirement?.targetId || '').trim();
-    const statement = String(requirement?.statement || '').trim();
-    const sourceTargetId = requirement?.sourceTargetId === undefined ? '' : String(requirement.sourceTargetId).trim();
-    if (!id || ids.has(id) || !statement) {
-      throw new EditorContractError('invalid_semantic_plan', 'Each requirement needs a unique non-empty id.', 422);
-    }
-    ids.add(id);
-    if (!['replace_text', 'replace_joined_text', 'replace_fragment', 'select_checkbox', 'copy_text_style', 'copy_cell_style', 'insert_image_after'].includes(action) || !targetId) {
-      throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} has an unsupported action or missing targetId.`, 422);
-    }
-    if (action === 'replace_text') {
-      if (typeof requirement.text !== 'string') {
-        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires text for replace_text.`, 422);
-      }
-      return { id, statement, action, targetId, text: requirement.text };
-    }
-    if (action === 'replace_fragment') {
-      if (typeof requirement.oldText !== 'string' || !requirement.oldText.length || typeof requirement.newText !== 'string') {
-        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires non-empty oldText and string newText for replace_fragment.`, 422);
-      }
-      if (requirement.oldText === requirement.newText) {
-        throw new EditorContractError('semantic_noop_requirement', `Requirement ${id} does not change its text fragment.`, 422);
-      }
-      return { id, statement, action, targetId, oldText: requirement.oldText, newText: requirement.newText };
-    }
-    if (action === 'replace_joined_text') {
-      if (!Array.isArray(requirement.parts) || !requirement.parts.length || requirement.parts.length > 100
-        || requirement.parts.some((part) => typeof part !== 'string')
-        || !['newline', 'tab'].includes(requirement.separator)) {
-        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires string parts and separator newline or tab.`, 422);
-      }
-      return { id, statement, action, targetId, parts: requirement.parts, separator: requirement.separator };
-    }
-    if (action === 'select_checkbox') {
-      const optionText = typeof requirement.optionText === 'string' ? requirement.optionText.trim() : '';
-      if (!optionText) {
-        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires non-empty optionText for select_checkbox.`, 422);
-      }
-      return { id, statement, action, targetId, optionText };
-    }
-    if (action === 'insert_image_after') {
-      const bytesBase64 = typeof requirement.bytesBase64 === 'string' ? requirement.bytesBase64.trim() : '';
-      const mimeType = typeof requirement.mimeType === 'string' ? requirement.mimeType.trim().toLowerCase() : '';
-      const caption = typeof requirement.caption === 'string' ? requirement.caption.trim() : '';
-      const altText = typeof requirement.altText === 'string' ? requirement.altText.trim() : '';
-      if (!bytesBase64 || !/^image\/(png|jpeg|gif|bmp)$/.test(mimeType)) {
-        throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires authenticated image bytes and a supported MIME type.`, 422);
-      }
-      return {
-        id, statement, action, targetId, bytesBase64, mimeType,
-        ...(caption ? { caption } : {}),
-        ...(altText ? { altText } : {}),
-      };
-    }
-    if (!sourceTargetId) {
-      throw new EditorContractError('invalid_semantic_plan', `Requirement ${id} requires sourceTargetId for ${action}.`, 422);
-    }
-    return { id, statement, action, targetId, sourceTargetId };
-  });
-}
-
-function compileHwpxSemanticRequirements(requirements, inspectedById) {
-  const stagedCheckboxTextByTarget = new Map();
-  return requirements.map((requirement) => {
-    const inspectedTarget = inspectedById.get(requirement.targetId);
-    const target = stagedCheckboxTextByTarget.has(requirement.targetId)
-      ? { ...inspectedTarget, currentText: stagedCheckboxTextByTarget.get(requirement.targetId) }
-      : inspectedTarget;
-    const source = requirement.sourceTargetId ? inspectedById.get(requirement.sourceTargetId) : null;
-    if (requirement.action === 'replace_text') {
-      if (target.currentText === requirement.text) {
-        throw new EditorContractError(
-          'semantic_noop_requirement',
-          `Requirement ${requirement.id} does not change target ${target.id}.`,
-          422,
-        );
-      }
-      return {
-        requirement,
-        command: target.kind === 'cell'
-          ? { op: 'table.writeCell', target: target.location, text: requirement.text }
-          : { op: 'text.replaceParagraph', location: target.location, text: requirement.text },
-        expected: { text: requirement.text },
-      };
-    }
-    if (requirement.action === 'replace_fragment') {
-      const firstIndex = target.currentText.indexOf(requirement.oldText);
-      const secondIndex = firstIndex < 0
-        ? -1
-        : target.currentText.indexOf(requirement.oldText, firstIndex + requirement.oldText.length);
-      if (firstIndex < 0 || secondIndex >= 0) {
-        throw new EditorContractError(
-          'semantic_fragment_ambiguous',
-          `Requirement ${requirement.id} oldText must occur exactly once in target ${target.id}.`,
-          422,
-        );
-      }
-      const text = `${target.currentText.slice(0, firstIndex)}${requirement.newText}${target.currentText.slice(firstIndex + requirement.oldText.length)}`;
-      return {
-        requirement,
-        command: target.kind === 'cell'
-          ? { op: 'table.writeCell', target: target.location, text }
-          : { op: 'text.replaceParagraph', location: target.location, text },
-        expected: { text },
-      };
-    }
-    if (requirement.action === 'replace_joined_text') {
-      const text = requirement.parts.join(requirement.separator === 'newline' ? '\n' : '\t');
-      if (target.currentText === text) {
-        throw new EditorContractError(
-          'semantic_noop_requirement',
-          `Requirement ${requirement.id} does not change target ${target.id}.`,
-          422,
-        );
-      }
-      return {
-        requirement,
-        command: target.kind === 'cell'
-          ? { op: 'table.writeCell', target: target.location, text }
-          : { op: 'text.replaceParagraph', location: target.location, text },
-        expected: { text },
-      };
-    }
-    if (requirement.action === 'select_checkbox') {
-      const optionIndex = target.currentText.indexOf(requirement.optionText);
-      const repeatedIndex = optionIndex < 0
-        ? -1
-        : target.currentText.indexOf(requirement.optionText, optionIndex + requirement.optionText.length);
-      let markerIndex = optionIndex - 1;
-      while (markerIndex >= 0 && /\s/.test(target.currentText[markerIndex])) markerIndex -= 1;
-      if (optionIndex < 0 || repeatedIndex >= 0 || markerIndex < 0 || !'□☐☑■'.includes(target.currentText[markerIndex])) {
-        throw new EditorContractError(
-          'semantic_checkbox_ambiguous',
-          `Requirement ${requirement.id} optionText must identify exactly one checkbox option in target ${target.id}.`,
-          422,
-        );
-      }
-      const text = `${target.currentText.slice(0, markerIndex)}☑${target.currentText.slice(markerIndex + 1)}`;
-      if (target.currentText === text) {
-        throw new EditorContractError('semantic_noop_requirement', `Requirement ${requirement.id} does not change checkbox selection.`, 422);
-      }
-      stagedCheckboxTextByTarget.set(requirement.targetId, text);
-      return {
-        requirement,
-        command: target.kind === 'cell'
-          ? { op: 'table.writeCell', target: target.location, text }
-          : { op: 'text.replaceParagraph', location: target.location, text },
-        expected: { checkboxOptionText: requirement.optionText },
-      };
-    }
-    if (requirement.action === 'insert_image_after') {
-      if (!['paragraph', 'cell'].includes(target.kind)) {
-        throw new EditorContractError(
-          'semantic_target_kind_mismatch',
-          `Requirement ${requirement.id} insert_image_after requires a paragraph or table-cell target.`,
-          422,
-        );
-      }
-      const expectedSha256 = sha256(Buffer.from(requirement.bytesBase64, 'base64'));
-      if (target.kind === 'cell') {
-        return {
-          requirement,
-          command: {
-            op: 'image.replaceInCell',
-            target: target.location,
-            bytesBase64: requirement.bytesBase64,
-            mimeType: requirement.mimeType,
-          },
-          expected: { replacedImage: true, expectedSha256 },
-        };
-      }
-      return {
-        requirement,
-        command: {
-          op: 'image.insertAfterParagraph',
-          target: target.location,
-          bytesBase64: requirement.bytesBase64,
-          mimeType: requirement.mimeType,
-          ...(requirement.caption ? { caption: requirement.caption } : {}),
-          ...(requirement.altText ? { altText: requirement.altText } : {}),
-        },
-        expected: { insertedImage: true, caption: requirement.caption || '' },
-      };
-    }
-    const targetStyleHash = target.styleFingerprint?.hash;
-    const sourceStyleHash = source.styleFingerprint?.hash;
-    if (target.id === source.id || (targetStyleHash && sourceStyleHash && targetStyleHash === sourceStyleHash)) {
-      throw new EditorContractError(
-        'semantic_noop_requirement',
-        `Requirement ${requirement.id} does not change the target style.`,
-        422,
-      );
-    }
-    if (requirement.action === 'copy_text_style') {
-      return {
-        requirement,
-        command: { op: 'paragraph.applyStyle', target: target.location, styleSource: source.location },
-        expected: { styleFingerprint: source.styleFingerprint ?? null },
-      };
-    }
-    if (target.kind !== 'cell' || source.kind !== 'cell') {
-      throw new EditorContractError(
-        'semantic_target_kind_mismatch',
-        `Requirement ${requirement.id} copy_cell_style requires cell targets.`,
-        422,
-        { targetId: target.id, sourceTargetId: source.id },
-      );
-    }
-    return {
-      requirement,
-      command: { op: 'table.applyCellStyle', target: target.location, styleSource: source.location },
-      expected: { styleFingerprint: source.styleFingerprint ?? null },
-    };
-  });
-}
-
-function semanticPostcondition(entry, before, after, structuralEvidence = {}) {
-  if (entry.expected.replacedImage === true) {
-    const expectedSha256 = String(entry.expected.expectedSha256 || '');
-    const actualSha256 = String(structuralEvidence.sha256 || '');
-    return {
-      ok: Boolean(expectedSha256) && actualSha256 === expectedSha256,
-      expected: { sha256: expectedSha256 },
-      actual: {
-        imageName: structuralEvidence.imageName || null,
-        sha256: actualSha256 || null,
-      },
-      changed: Boolean(actualSha256) && actualSha256 === expectedSha256,
-    };
-  }
-  if (entry.expected.insertedImage === true) {
-    const imageCountIncreased = Number(structuralEvidence.imageCountAfter || 0)
-      > Number(structuralEvidence.imageCountBefore || 0);
-    const captionVisible = !entry.expected.caption
-      || Number(structuralEvidence.captionCountAfter || 0) > Number(structuralEvidence.captionCountBefore || 0);
-    return {
-      ok: imageCountIncreased && captionVisible,
-      expected: { imageCountIncreased: true, caption: entry.expected.caption || null },
-      actual: {
-        imageCountBefore: Number(structuralEvidence.imageCountBefore || 0),
-        imageCountAfter: Number(structuralEvidence.imageCountAfter || 0),
-        captionCountBefore: Number(structuralEvidence.captionCountBefore || 0),
-        captionCountAfter: Number(structuralEvidence.captionCountAfter || 0),
-      },
-      changed: imageCountIncreased,
-    };
-  }
-  if (Object.hasOwn(entry.expected, 'checkboxOptionText')) {
-    const optionText = entry.expected.checkboxOptionText;
-    const optionIndex = after.currentText.indexOf(optionText);
-    let markerIndex = optionIndex - 1;
-    while (markerIndex >= 0 && /\s/.test(after.currentText[markerIndex])) markerIndex -= 1;
-    const selected = optionIndex >= 0 && markerIndex >= 0 && '☑■'.includes(after.currentText[markerIndex]);
-    return {
-      ok: before?.text !== after.currentText && selected,
-      expected: `☑ ${optionText}`,
-      actual: selected ? `☑ ${optionText}` : after.currentText,
-      changed: before?.text !== after.currentText,
-    };
-  }
-  if (Object.hasOwn(entry.expected, 'text')) {
-    const changed = before?.text !== after.currentText;
-    return {
-      ok: changed && after.currentText === entry.expected.text,
-      expected: entry.expected.text,
-      actual: after.currentText,
-      changed,
-    };
-  }
-  const expectedHash = entry.expected.styleFingerprint?.hash ?? null;
-  const beforeHash = before?.styleFingerprint?.hash ?? null;
-  const actualHash = after.styleFingerprint?.hash ?? null;
-  return {
-    ok: expectedHash !== null && beforeHash !== actualHash && expectedHash === actualHash,
-    expected: expectedHash,
-    actual: actualHash,
-    changed: beforeHash !== actualHash,
-  };
 }
 
 function pruneExpiredApiSessions(state, ttlMs) {
@@ -1750,7 +1345,7 @@ function mcpArtifactDirectory() {
   return outDir;
 }
 
-const MCP_ARTIFACT_EXTENSIONS = new Set(['docx', 'hwpx', 'pdf']);
+const MCP_ARTIFACT_EXTENSIONS = new Set(['docx', 'hwp', 'hwpx', 'pdf']);
 
 function mcpArtifactPath(artifactId, extension = 'docx') {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(artifactId || ''))) {
@@ -1774,6 +1369,8 @@ async function resolveMcpArtifact(artifactId) {
           filePath,
           mimeType: extension === 'pdf'
             ? 'application/pdf'
+            : extension === 'hwp'
+              ? 'application/x-hwp'
             : extension === 'hwpx'
               ? 'application/vnd.hancom.hwpx'
               : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -1793,7 +1390,7 @@ async function pruneExpiredMcpArtifacts(config) {
   const cutoff = Date.now() - ttlMs;
   const names = await readdir(mcpArtifactDirectory());
   await Promise.all(names
-    .filter((name) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:docx|hwpx|pdf)$/i.test(name))
+    .filter((name) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:docx|hwp|hwpx|pdf)$/i.test(name))
     .map(async (name) => {
       const filePath = path.join(mcpArtifactDirectory(), name);
       try {
@@ -1811,6 +1408,24 @@ async function pruneExpiredMcpArtifacts(config) {
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+function emitHwpxLifecycleTrace(event, payload = {}) {
+  if (/^(?:0|false|off|no)$/i.test(readEnv('EDITOR_HWPX_TRACE_ENABLED', 'true'))) return;
+  const trace = {
+    schemaVersion: 'academic-editor-hwpx-lifecycle/v2',
+    timestamp: new Date().toISOString(),
+    event,
+    ...payload,
+  };
+  const line = JSON.stringify(trace);
+  console.log(`[editor:hwpx] ${line}`);
+  const traceFile = readEnv('EDITOR_HWPX_TRACE_FILE', '').trim();
+  if (traceFile) {
+    const resolved = path.resolve(traceFile);
+    mkdirSync(path.dirname(resolved), { recursive: true });
+    appendFileSync(resolved, `${line}\n`, 'utf8');
+  }
 }
 
 function boundedInteger(value, fallback, minimum, maximum, label) {
@@ -1835,11 +1450,11 @@ function encodeMcpCursor(state, payload) {
 function decodeMcpCursor(state, cursor) {
   const value = String(cursor || '');
   if (!value || value.length > 2048) {
-    throw new Error('invalid_cursor: pagination cursor length is invalid. Start a new read without cursor.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor length is invalid. Start a new read without cursor.', 422);
   }
   const parts = value.split('.');
   if (parts.length !== 3 || parts[0] !== 'v1' || !parts[1] || !parts[2]) {
-    throw new Error('invalid_cursor: pagination cursor is malformed. Start a new read without cursor.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor is malformed. Start a new read without cursor.', 422);
   }
   const expected = createHmac('sha256', mcpPaginationKey(state)).update(parts[1]).digest();
   let supplied;
@@ -1849,28 +1464,28 @@ function decodeMcpCursor(state, cursor) {
     supplied = Buffer.alloc(0);
   }
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
-    throw new Error('invalid_cursor: pagination cursor signature is invalid. Start a new read without cursor.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor signature is invalid. Start a new read without cursor.', 422);
   }
   let decoded;
   try {
     decoded = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
   } catch {
-    throw new Error('invalid_cursor: pagination cursor payload is invalid. Start a new read without cursor.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor payload is invalid. Start a new read without cursor.', 422);
   }
   if (!decoded || decoded.v !== 1 || typeof decoded.documentId !== 'string' ||
       !Number.isInteger(decoded.revision) || !Number.isInteger(decoded.offset) ||
       decoded.offset < 0 || !decoded.query || typeof decoded.query !== 'object') {
-    throw new Error('invalid_cursor: pagination cursor payload is incomplete. Start a new read without cursor.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor payload is incomplete. Start a new read without cursor.', 422);
   }
   return decoded;
 }
 
 function assertCursorStream(cursor, { documentId, revision, stream }) {
   if (cursor.stream !== stream || cursor.documentId !== documentId) {
-    throw new Error('invalid_cursor: pagination cursor belongs to a different document or stream.');
+    throw new EditorContractError('invalid_cursor', 'Pagination cursor belongs to a different document or stream.', 422);
   }
   if (cursor.revision !== revision) {
-    throw new Error(`stale_cursor: cursor revision ${cursor.revision} does not match current revision ${revision}. Start a new read without cursor.`);
+    throw new EditorContractError('stale_cursor', `stale_cursor: cursor revision ${cursor.revision} does not match current revision ${revision}. Start a new read without cursor.`, 409);
   }
 }
 
@@ -1880,7 +1495,7 @@ function assertCursorQueryArguments(args, query, keys) {
       continue;
     }
     if (JSON.stringify(args[key]) !== JSON.stringify(query[key])) {
-      throw new Error(`cursor_query_mismatch: ${key} cannot change while following nextCursor.`);
+      throw new EditorContractError('cursor_query_mismatch', `${key} cannot change while following nextCursor.`, 422);
     }
   }
 }
@@ -1962,22 +1577,22 @@ function projectDocumentSummary(json) {
     ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
     ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
     ...(json.pageCountIsEstimate !== undefined ? { pageCountIsEstimate: Boolean(json.pageCountIsEstimate) } : {}),
-    sectionCount: json.sections?.length ?? 0,
-    paragraphCount: (json.sections ?? []).reduce((sum, section) => sum + (section.paragraphs?.length ?? 0), 0),
-    blockCount: json.blocks?.length ?? 0,
-    tableCount: tables.length,
+    sectionCount: json.sectionCount ?? json.sections?.length ?? 0,
+    paragraphCount: json.paragraphCount ?? (json.sections ?? []).reduce((sum, section) => sum + (section.paragraphs?.length ?? 0), 0),
+    blockCount: json.blockCount ?? json.blocks?.length ?? 0,
+    tableCount: json.tableCount ?? tables.length,
     referenceCount: json.references?.length ?? 0,
-    cellCount: tables.reduce((sum, table) => sum + (table.cells?.length ?? 0), 0),
+    cellCount: json.cellCount ?? tables.reduce((sum, table) => sum + (table.cells?.length ?? 0), 0),
     styleCount: json.styleGraph?.count ?? json.styleGraph?.styles?.length ?? 0,
     objectCounts: {
-      images: objectGraph.images?.length ?? 0,
-      pictures: objectGraph.pictures?.length ?? 0,
-      charts: objectGraph.charts?.length ?? 0,
+      images: json.objectCounts?.images ?? objectGraph.images?.length ?? 0,
+      pictures: json.objectCounts?.pictures ?? objectGraph.pictures?.length ?? 0,
+      charts: json.objectCounts?.charts ?? objectGraph.charts?.length ?? 0,
       relationships: objectGraph.relationships?.length ?? 0,
       xmlFiles: objectGraph.xmlFiles?.length ?? 0,
       binaryFiles: objectGraph.binaryFiles?.length ?? 0,
     },
-    warningCount: rawWarnings.length,
+    warningCount: json.warningCount ?? rawWarnings.length,
     warnings,
     warningsTruncated: warnings.length < rawWarnings.length,
   };
@@ -2165,93 +1780,322 @@ async function boundedDocxTargetMapPage(state, documentId, session, args = {}) {
   });
 }
 
-function normalizeSemanticContextQuery(args = {}) {
-  const kind = args.kind == null ? null : String(args.kind);
-  if (kind !== null && kind !== 'paragraph' && kind !== 'cell') {
-    throw new EditorContractError('invalid_semantic_context', 'kind must be paragraph, cell, or null.', 422);
-  }
-  return {
-    kind,
-    limit: boundedInteger(args.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit'),
-  };
-}
-
-async function boundedHwpxSemanticContextPage(state, documentId, session, args = {}) {
+async function boundedHwpxOutlinePage(state, documentId, session, args = {}) {
   const revision = Number(session.revision);
-  let query;
+  const limit = boundedInteger(args.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit');
+  const kind = args.kind == null ? null : String(args.kind);
+  if (kind !== null && !['paragraph', 'cell'].includes(kind)) {
+    throw new Error('kind must be paragraph, cell, or null.');
+  }
+  const tableId = args.tableId == null ? null : String(args.tableId);
+  const textPreviewChars = boundedInteger(args.textPreviewChars, 200, 32, 512, 'textPreviewChars');
   let offset = 0;
   if (args.cursor) {
     const cursor = decodeMcpCursor(state, args.cursor);
-    assertCursorStream(cursor, { documentId, revision, stream: 'hwpx-semantic-context' });
-    assertCursorQueryArguments(args, cursor.query, ['kind', 'limit']);
-    query = normalizeSemanticContextQuery(cursor.query);
+    assertCursorStream(cursor, { documentId, revision, stream: 'hwpx-outline' });
+    assertCursorQueryArguments(args, cursor.query, ['limit', 'kind', 'tableId', 'textPreviewChars']);
     offset = cursor.offset;
-  } else {
-    query = normalizeSemanticContextQuery(args);
   }
-  const map = await session.targetMap();
-  const sourceTargets = query.kind === 'paragraph'
-    ? (map.paragraphs || [])
-    : query.kind === 'cell'
-      ? (map.cells || [])
-      : flattenEditableTargets(map);
-  const pageSourceTargets = sourceTargets.slice(offset, offset + query.limit);
-  const inspected = typeof session.inspectTargets === 'function'
-    ? await session.inspectTargets(pageSourceTargets.map((target) => target.location))
-    : pageSourceTargets.map((target) => session.inspectTarget(target.location));
-  const cellNeighbors = semanticCellNeighborMap(map.cells || []);
-  const sourceCellById = new Map((map.cells || []).map((cell) => [cell.id, cell]));
-  const targets = inspected.map((target) => ({
-    ...semanticTargetView(target),
-    ...(target.kind === 'cell' ? (() => {
-      const neighbors = cellNeighbors.get(target.id) || {};
-      const source = sourceCellById.get(target.id);
-      const right = sourceCellById.get(neighbors.rightTargetId);
-      const labelText = String(source?.currentText || '').trim();
-      const isFormLabel = labelText && right && (
-        !String(right.currentText || '').trim()
-        || source?.styleFingerprint?.hash !== right?.styleFingerprint?.hash
-      );
-      return {
-        neighbors,
-        ...(isFormLabel ? {
-          formField: {
-            labelText,
-            labelTargetId: target.id,
-            valueTargetId: right.id,
-          },
-        } : {}),
-      };
-    })() : {}),
-  }));
-  const makeCursor = (nextOffset) => encodeMcpCursor(state, {
+  let total;
+  let items;
+  if (typeof session.outlinePage === 'function') {
+    const page = await session.outlinePage({ offset, limit, kind, tableId, textPreviewChars });
+    total = page.total;
+    items = page.items;
+  } else {
+    const map = await session.targetMap();
+    const ordered = flattenEditableTargets(map)
+      .filter((target) => !kind || target.kind === kind)
+      .filter((target) => !tableId || target.location?.tableId === tableId)
+      .filter((target) => target?.flow)
+      .sort((left, right) => (
+        Number(left.flow.section || 0) - Number(right.flow.section || 0)
+        || Number(left.flow.paragraph || 0) - Number(right.flow.paragraph || 0)
+        || Number(left.flow.order || 0) - Number(right.flow.order || 0)
+      ));
+    const pageTargets = ordered.slice(offset, offset + limit);
+    const inspected = pageTargets.length && typeof session.inspectTargets === 'function'
+      ? await session.inspectTargets(pageTargets.map((target) => target.location))
+      : pageTargets;
+    total = ordered.length;
+    items = inspected.map((target) => ({
+      targetId: target.id,
+      kind: target.kind,
+      flow: target.flow,
+      pageHint: target.pageHint ?? null,
+      text: String(target.currentText || '').slice(0, textPreviewChars),
+      textLength: target.textLength,
+      textTruncated: String(target.currentText || '').length > textPreviewChars,
+      styleFingerprint: target.styleFingerprint?.hash ? { hash: target.styleFingerprint.hash } : null,
+      layout: target.layout ?? null,
+      location: target.location,
+    }));
+  }
+  const nextOffset = offset + items.length;
+  const nextCursor = nextOffset < total ? encodeMcpCursor(state, {
     documentId,
     revision,
-    stream: 'hwpx-semantic-context',
-    query,
+    stream: 'hwpx-outline',
+    query: { limit, kind, tableId, textPreviewChars },
     offset: nextOffset,
-  });
-  const makeEnvelope = (pageTargets, nextCursor, oversizedItem) => ({
+  }) : null;
+  return {
     ok: true,
     revision,
-    kind: query.kind,
-    targets: pageTargets,
-    returnedTargetCount: pageTargets.length,
-    totalTargetCount: sourceTargets.length,
+    view: 'outline',
+    kind,
+    tableId,
+    textPreviewChars,
+    total,
+    returned: items.length,
     nextCursor,
-    truncated: nextCursor !== null,
-    ...(oversizedItem ? { oversizedItem: true } : {}),
-  });
-  const nextOffset = offset + targets.length;
-  return makeEnvelope(
-    targets,
-    nextOffset < sourceTargets.length ? makeCursor(nextOffset) : null,
-    false,
-  );
+    items,
+  };
+}
+
+async function boundedHwpxStyleProfile(state, documentId, session, args = {}) {
+  const revision = Number(session.revision);
+  const limit = boundedInteger(args.limit, MCP_TARGET_DEFAULT_LIMIT, 1, MCP_TARGET_MAX_LIMIT, 'limit');
+  let offset = 0;
+  if (args.cursor) {
+    const cursor = decodeMcpCursor(state, args.cursor);
+    assertCursorStream(cursor, { documentId, revision, stream: 'hwpx-styles' });
+    assertCursorQueryArguments(args, cursor.query, ['limit']);
+    offset = cursor.offset;
+  }
+  const page = await session.styleProfile({ offset, limit });
+  const nextOffset = offset + page.items.length;
+  return {
+    ok: true,
+    documentId,
+    revision,
+    view: 'styles',
+    total: page.total,
+    returned: page.items.length,
+    nextCursor: nextOffset < page.total ? encodeMcpCursor(state, {
+      documentId,
+      revision,
+      stream: 'hwpx-styles',
+      query: { limit },
+      offset: nextOffset,
+    }) : null,
+    items: page.items,
+  };
 }
 
 function normalizeCommands(body = {}) {
   return body.commands || body.ops || body.commandBatch || [];
+}
+
+function normalizeTemplatePolicy(policy = {}) {
+  const uniqueStrings = (value) => [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => String(item || '').trim()).filter(Boolean))];
+  const normalized = {
+    protectedLocations: Array.isArray(policy.protectedLocations) ? policy.protectedLocations : [],
+    requiredTableIds: uniqueStrings(policy.requiredTableIds),
+    removableTableIds: uniqueStrings(policy.removableTableIds),
+    requiredImageNames: uniqueStrings(policy.requiredImageNames),
+    replaceableImageNames: uniqueStrings(policy.replaceableImageNames),
+    requiredLocations: Array.isArray(policy.requiredLocations) ? policy.requiredLocations : [],
+    instructionLocations: Array.isArray(policy.instructionLocations) ? policy.instructionLocations : [],
+    freeformLocations: Array.isArray(policy.freeformLocations) ? policy.freeformLocations : [],
+    allowedUnresolvedLocations: Array.isArray(policy.allowedUnresolvedLocations) ? policy.allowedUnresolvedLocations : [],
+    repeatableTableIds: uniqueStrings(policy.repeatableTableIds),
+    conditionalTableIds: uniqueStrings(policy.conditionalTableIds),
+  };
+  const overlappingTables = normalized.requiredTableIds
+    .filter(value => normalized.removableTableIds.includes(value));
+  const overlappingImages = normalized.requiredImageNames
+    .filter(value => normalized.replaceableImageNames.includes(value));
+  const tableRoles = [
+    ['required', normalized.requiredTableIds],
+    ['removable', normalized.removableTableIds],
+    ['repeatable', normalized.repeatableTableIds],
+    ['conditional', normalized.conditionalTableIds],
+  ];
+  const conflictingTableRoles = [];
+  for (let left = 0; left < tableRoles.length; left += 1) {
+    for (let right = left + 1; right < tableRoles.length; right += 1) {
+      const overlap = tableRoles[left][1].filter(value => tableRoles[right][1].includes(value));
+      if (overlap.length) conflictingTableRoles.push({ roles: [tableRoles[left][0], tableRoles[right][0]], tableIds: overlap });
+    }
+  }
+  const locationRoles = [
+    ['protected', normalized.protectedLocations],
+    ['required', normalized.requiredLocations],
+    ['instruction', normalized.instructionLocations],
+    ['freeform', normalized.freeformLocations],
+  ].map(([role, locations]) => [role, locations.map(location => hwpxAdapter.stableTargetKey(location)).filter(Boolean)]);
+  const conflictingLocationRoles = [];
+  for (let left = 0; left < locationRoles.length; left += 1) {
+    for (let right = left + 1; right < locationRoles.length; right += 1) {
+      const overlap = locationRoles[left][1].filter(value => locationRoles[right][1].includes(value));
+      if (overlap.length) conflictingLocationRoles.push({ roles: [locationRoles[left][0], locationRoles[right][0]], locationKeys: overlap });
+    }
+  }
+  if (overlappingTables.length || overlappingImages.length || conflictingTableRoles.length || conflictingLocationRoles.length) {
+    throw new EditorContractError(
+      'template_policy_conflict',
+      'Template items cannot be both required and removable or replaceable.',
+      422,
+      { overlappingTables, overlappingImages, conflictingTableRoles, conflictingLocationRoles },
+    );
+  }
+  return normalized;
+}
+
+function enforceTemplatePolicy(record, commands) {
+  const policy = normalizeTemplatePolicy(record.templatePolicy);
+  const requiredTables = new Set(policy.requiredTableIds);
+  const requiredImages = new Set(policy.requiredImageNames);
+  for (const [commandIndex, command] of commands.entries()) {
+    const op = String(command?.op ?? '');
+    const location = command?.target ?? command?.location;
+    if (op === 'table.structure' && command.action === 'deleteTable'
+      && requiredTables.has(String(location?.tableId ?? ''))) {
+      throw new EditorContractError(
+        'template_required_table',
+        'A table marked required by the active template policy cannot be deleted.',
+        422,
+        { commandIndex, tableId: location.tableId },
+      );
+    }
+    if (['image.replace', 'image.generateAndReplace'].includes(op)
+      && requiredImages.has(String(command.imageName ?? ''))) {
+      throw new EditorContractError(
+        'template_required_image',
+        'An image marked required by the active template policy cannot be replaced.',
+        422,
+        { commandIndex, imageName: command.imageName },
+      );
+    }
+  }
+  const protectedKeys = new Set(policy.protectedLocations.map((location) => hwpxAdapter.stableTargetKey(location)).filter(Boolean));
+  if (!protectedKeys.size) return;
+  const attempted = hwpxAdapter.requiredInspectionTargets(commands)
+    .map((entry) => ({ ...entry, key: entry.key || hwpxAdapter.stableTargetKey(entry.value) }))
+    .filter((entry) => !['source', 'styleSource'].includes(entry.role) && protectedKeys.has(entry.key));
+  if (attempted.length) {
+    throw new EditorContractError(
+      'template_protected_region',
+      'The command batch targets a location explicitly protected by the active template policy.',
+      422,
+      { attempted: attempted.map((entry) => ({ commandIndex: entry.commandIndex, role: entry.role, key: entry.key })) },
+    );
+  }
+}
+
+async function resolveCrossDocumentResources(state, targetDocumentId, commands) {
+  const resolved = [];
+  const transfers = [];
+  const targetRecord = findApiRecord(state, 'hwpx', targetDocumentId);
+  for (const command of commands) {
+    if (!command?.assetRef && !command?.styleRef) {
+      resolved.push(command);
+      continue;
+    }
+    if (command.styleRef) {
+      const sourceDocumentId = String(command.styleRef.documentId || '').trim();
+      const location = command.styleRef.location;
+      const scope = String(command.scope || command.styleRef.scope || '').trim();
+      const sourceRecord = findApiRecord(state, 'hwpx', sourceDocumentId);
+      if (!sourceRecord || !location || !['character', 'paragraph', 'cell', 'table'].includes(scope)) {
+        throw new EditorContractError('style_ref_invalid', 'styleRef requires an open source document, exact location, and supported scope.', 422);
+      }
+      const [sourceTarget] = await sourceRecord.session.inspectTargets([location]);
+      const sourceProperties = scope === 'character'
+        ? sourceTarget.characterFormat ?? sourceTarget.style?.text
+        : scope === 'paragraph'
+          ? sourceTarget.paragraphFormat ?? sourceTarget.style?.paragraph
+          : scope === 'cell'
+            ? sourceTarget.style?.cell
+            : sourceTarget.table?.layout?.properties ?? sourceTarget.table?.style ?? sourceTarget.style?.table;
+      if (!sourceProperties || typeof sourceProperties !== 'object') {
+        throw new EditorContractError('style_ref_unavailable', `The source target does not expose transferable ${scope} properties.`, 422);
+      }
+      const portableFields = {
+        character: new Set([
+          'fontFamily', 'fontSize', 'bold', 'italic', 'underline', 'strikethrough',
+          'textColor', 'shadeColor', 'underlineType', 'underlineColor', 'strikeColor',
+          'subscript', 'superscript', 'kerning', 'ratios', 'spacings', 'relativeSizes', 'charOffsets',
+        ]),
+        paragraph: new Set([
+          'alignment', 'lineSpacing', 'lineSpacingType', 'indent', 'marginLeft', 'marginRight',
+          'spacingBefore', 'spacingAfter', 'headType', 'paraLevel', 'numberingId',
+        ]),
+        cell: new Set([
+          'width', 'height', 'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom',
+          'verticalAlign', 'textDirection', 'isHeader', 'cellProtect',
+        ]),
+        table: new Set([
+          'treatAsChar', 'wrapText', 'flowWithText', 'allowOverlap', 'anchorType', 'textWrap',
+          'zOrder', 'outerLeft', 'outerRight', 'outerTop', 'outerBottom', 'cellSpacing',
+          'paddingLeft', 'paddingRight', 'paddingTop', 'paddingBottom', 'pageBreak', 'repeatHeader',
+        ]),
+      }[scope];
+      const transferableFields = new Set(hwpxAdapter.formatPropertyNames(targetRecord?.sourceFormat, scope)
+        .filter((field) => portableFields.has(field)));
+      const properties = Object.fromEntries(Object.entries(sourceProperties)
+        .filter(([field, value]) => transferableFields.has(field) && value !== undefined && value !== null));
+      if (!Object.keys(properties).length) {
+        throw new EditorContractError('style_ref_unavailable', `The source target exposes no target-format-safe ${scope} properties.`, 422);
+      }
+      const { styleRef: _styleRef, ...rest } = command;
+      resolved.push({ ...rest, scope, properties });
+      transfers.push({
+        type: 'style',
+        commandId: command.commandId,
+        sourceDocumentId,
+        targetDocumentId,
+        scope,
+        sourceLocation: location,
+        sourceFingerprint: sourceTarget.styleFingerprint?.hash ?? null,
+      });
+      continue;
+    }
+    const sourceDocumentId = String(command.assetRef.documentId || '').trim();
+    const imageName = String(command.assetRef.imageName || '').trim();
+    if (!sourceDocumentId || !imageName) {
+      throw new EditorContractError('asset_ref_invalid', 'assetRef requires documentId and imageName.', 422);
+    }
+    const sourceRecord = findApiRecord(state, 'hwpx', sourceDocumentId);
+    if (!sourceRecord) {
+      throw new EditorContractError('asset_source_not_found', 'The source HWP/HWPX session is unavailable.', 404);
+    }
+    const asset = await sourceRecord.session.readAsset(imageName);
+    if (targetRecord?.sourceFormat === 'hwp'
+      && command.op === 'image.insertAfterParagraph'
+      && !NATIVE_HWP_IMAGE_MIME_TYPES.has(asset.mimeType)) {
+      throw new EditorContractError(
+        'asset_target_format_unsupported',
+        `Native HWP image insertion supports PNG, JPEG, GIF, and BMP; source asset ${imageName} reports ${asset.mimeType || 'an unknown MIME type'}.`,
+        422,
+        {
+          imageName,
+          mimeType: asset.mimeType ?? null,
+          targetSourceFormat: targetRecord.sourceFormat,
+          supportedMimeTypes: [...NATIVE_HWP_IMAGE_MIME_TYPES],
+        },
+      );
+    }
+    const { assetRef: _assetRef, ...rest } = command;
+    resolved.push({
+      ...rest,
+      bytesBase64: Buffer.from(asset.bytes).toString('base64'),
+      ...(asset.mimeType ? { mimeType: asset.mimeType } : {}),
+    });
+    transfers.push({
+      type: 'asset',
+      commandId: command.commandId,
+      sourceDocumentId,
+      targetDocumentId,
+      imageName,
+      sha256: asset.sha256,
+      byteLength: asset.byteLength,
+      mimeType: asset.mimeType,
+    });
+  }
+  return { commands: resolved, transfers };
 }
 
 async function renderHwpxSvgPages(session, pages = []) {
@@ -2267,10 +2111,177 @@ async function renderHwpxSvgPages(session, pages = []) {
     return {
       page: pageNumber,
       format: 'svg',
-      nonBlank: String(svg || '').length > 80,
+      nonBlank: svgHasVisibleContent(svg),
+      layout: { ...analyzeSvgCellClipping(svg), pageMetrics: analyzeSvgPageMetrics(svg) },
       svg,
     };
   });
+}
+
+async function renderHwpxBaselinePages(config, documentId, sourceBytes, pages) {
+  if (config.editorSessionRuntime) {
+    return config.editorSessionRuntime.renderHwpxBytes(`${documentId}:baseline`, sourceBytes, pages);
+  }
+  const baselineSession = hwpxAdapter.createRawSession(sourceBytes);
+  const pageCount = Math.max(1, Number(baselineSession.readJson().pageCount) || 1);
+  const requestedPages = pages.map(Number).filter((page) => Number.isFinite(page) && page > 0);
+  const availablePages = requestedPages.filter((page) => page <= pageCount);
+  return {
+    pageCount,
+    pages: baselineSession.doc?.renderPageSvg
+      ? availablePages.map((page) => {
+          const svg = baselineSession.doc.renderPageSvg(Math.max(1, Number(page) || 1) - 1);
+          return {
+            page,
+            format: 'svg',
+            nonBlank: svgHasVisibleContent(svg),
+            layout: { ...analyzeSvgCellClipping(svg), pageMetrics: analyzeSvgPageMetrics(svg) },
+            svg,
+          };
+        })
+      : [],
+    unavailablePages: requestedPages.filter((page) => page > pageCount),
+  };
+}
+
+function resolveRenderedCellTarget(json, provenance) {
+  const native = provenance?.native;
+  const cellNumber = Number(provenance?.cell?.number);
+  if (!native || !Number.isInteger(cellNumber) || cellNumber < 0) return null;
+  const table = (json.tables || []).find((candidate) => (
+    Number(candidate.section) === Number(native.section)
+    && Number(candidate.para) === Number(native.paragraph)
+    && Number(candidate.control) === Number(native.control)
+  ));
+  const cell = table?.cells?.find((candidate) => Number(candidate.cellIndex) === cellNumber);
+  if (!table || !cell) return null;
+  return {
+    targetId: cell.id,
+    tableId: table.id,
+    location: cell.location,
+  };
+}
+
+async function qualityWithRenderedLayout(session, options = {}) {
+  const quality = await session.qualityCheck(options);
+  const json = await session.readJson();
+  const semantic = analyzeHwpxSemanticEvidence(json, {
+    profile: options.profile,
+    templatePolicy: options.templatePolicy,
+  });
+  const estimateCodes = new Set([
+    'cell-overflow-risk',
+    'cell-line-overflow-risk',
+    'cell-content-clipped',
+  ]);
+  const estimatedIssues = (quality.issues || []).filter(issue => estimateCodes.has(issue.code));
+  const structuralIssues = (quality.issues || []).filter(issue => !estimateCodes.has(issue.code));
+  const pageCount = Math.max(1, Number(quality.pageCount || await pageCountFromSession(session) || 1));
+  const pages = Array.from({ length: pageCount }, (_value, index) => index + 1);
+  const rendered = await renderHwpxSvgPages(session, pages);
+  const targetMap = typeof session.targetMap === 'function' ? await session.targetMap() : null;
+  const layoutIssues = rendered.flatMap((page) => (page.layout?.issues || []).map((issue) => ({
+    severity: 'error',
+    code: 'render-cell-clip',
+    message: 'Rendered table-cell content extends outside its clip rectangle.',
+    page: page.page,
+    ...issue,
+    ...(resolveRenderedCellTarget(json, issue.provenance) || {}),
+  })));
+  const blankPageIssues = rendered
+    .filter((page) => page.nonBlank !== true)
+    .map((page) => ({
+      severity: 'warning',
+      code: 'render-blank-page',
+      message: 'A rendered page contains no visible document content; review it because intentional blank pages are permitted.',
+      page: page.page,
+    }));
+  const readabilityIssues = rendered.flatMap((page) => {
+    const metrics = page.layout?.pageMetrics || {};
+    const pageIssues = [];
+    if (Number.isFinite(metrics.minFontSize) && metrics.minFontSize < 6) {
+      pageIssues.push({
+        severity: 'warning',
+        code: 'render-font-size-suspiciously-small',
+        message: 'Rendered text contains a font size below the readability threshold.',
+        page: page.page,
+        minFontSize: metrics.minFontSize,
+      });
+    }
+    if (Number(metrics.lineCount || 0) > 100) {
+      pageIssues.push({
+        severity: 'warning',
+        code: 'render-page-density-high',
+        message: 'Rendered page contains an unusually high number of text baselines.',
+        page: page.page,
+        lineCount: metrics.lineCount,
+      });
+    }
+    if (metrics.sparseContent === true) {
+      pageIssues.push({
+        severity: 'warning',
+        code: 'render-page-sparse-content',
+        message: 'A rendered page contains very little text and no image; inspect pagination and conditional template remnants.',
+        page: page.page,
+        textCount: metrics.textCount,
+        textCharacters: metrics.textCharacters,
+        verticalOccupancy: metrics.verticalOccupancy,
+      });
+    } else if (Number.isFinite(metrics.verticalOccupancy) && metrics.verticalOccupancy < 0.12
+      && Number(metrics.textCharacters || 0) < 180) {
+      pageIssues.push({
+        severity: 'warning',
+        code: 'render-page-low-occupancy',
+        message: 'Visible content occupies an unusually small vertical span on this page.',
+        page: page.page,
+        textCharacters: metrics.textCharacters,
+        verticalOccupancy: metrics.verticalOccupancy,
+      });
+    }
+    return pageIssues;
+  });
+  const visual = analyzeHwpxVisualEvidence({
+    json,
+    targetMap,
+    renderedPages: rendered,
+    profile: options.profile,
+    visualPolicy: options.visualPolicy,
+  });
+  const issues = [
+    ...structuralIssues,
+    ...layoutIssues,
+    ...blankPageIssues,
+    ...readabilityIssues,
+    ...semantic.issues,
+    ...visual.issues,
+  ];
+  const result = {
+    ...quality,
+    ok: quality.ok === true && issues.every((issue) => issue.severity !== 'error'),
+    stable: quality.stable !== false && issues.every((issue) => issue.severity !== 'error'),
+    issues,
+    advisoryEstimates: {
+      suppressedBecauseAllPagesRendered: true,
+      total: estimatedIssues.length,
+      byCode: Object.fromEntries([...estimateCodes].map(code => [
+        code,
+        estimatedIssues.filter(issue => issue.code === code).length,
+      ])),
+    },
+    renderedLayout: {
+      pageCount,
+      renderedPageCount: rendered.length,
+      clippedCellCount: layoutIssues.length,
+      blankPageCount: blankPageIssues.length,
+      suspiciousReadabilityCount: readabilityIssues.length,
+      pages: rendered.map((page) => ({ page: page.page, ...page.layout?.pageMetrics })),
+    },
+    semantic,
+    visual,
+    reviewProfile: semantic.profile,
+  };
+  if (options.includeRenderedPages === true) result._renderedPages = rendered;
+  return result;
 }
 
 function normalizePageRange(body = {}, fallbackPageCount = 1) {
@@ -2369,6 +2380,34 @@ function publicRenderedPages(rendered, revision) {
   };
 }
 
+function projectHwpxSvgEvidence(page, includeSvg = false) {
+  if (!page || typeof page !== 'object') return page;
+  const svg = String(page.svg || '');
+  const { svg: _svg, ...rest } = page;
+  return {
+    ...rest,
+    svgByteLength: Buffer.byteLength(svg, 'utf8'),
+    svgSha256: sha256(Buffer.from(svg, 'utf8')),
+    ...(includeSvg ? { svg } : {}),
+  };
+}
+
+function compactHwpxReviewPayload(result, includeSvg = false) {
+  const compactGroup = (group) => group && typeof group === 'object'
+    ? { ...group, pages: Array.isArray(group.pages)
+      ? group.pages.map(page => projectHwpxSvgEvidence(page, includeSvg))
+      : group.pages }
+    : group;
+  const render = result?.render;
+  if (!render || typeof render !== 'object') return result;
+  return {
+    ...result,
+    render: render.current || render.baseline
+      ? { ...render, current: compactGroup(render.current), baseline: compactGroup(render.baseline) }
+      : compactGroup(render),
+  };
+}
+
 async function handleEditorApiOpen(req, res, config, state, fmt) {
   if (req.method !== 'POST') {
     sendJson(res, 405, { ok: false, message: 'Method not allowed. Use POST.' }, { Allow: 'POST' });
@@ -2383,6 +2422,13 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     return true;
   }
   const id = `doc_${randomUUID()}`;
+  if (fmt === 'hwpx') {
+    emitHwpxLifecycleTrace('open.started', {
+      documentId: id,
+      filename: path.basename(String(body.filename || `document.${fmt}`)),
+      byteLength: bytes.length,
+    });
+  }
   const { session, json } = await createApiSession(fmt, id, bytes, body, config);
   pruneExpiredApiSessions(state, config.apiSessionTtlMs);
   const now = Date.now();
@@ -2391,7 +2437,10 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     fmt,
     filename: body.filename || `document.${fmt}`,
     sourceBytes: Buffer.from(bytes),
+    sourceFormat: String(json.sourceFormat || fmt),
     baselineJson: json,
+    templatePolicy: normalizeTemplatePolicy(),
+    deletedBaselineTableIds: new Set(),
     reviewChanges: [],
     intentionalSectionLayoutChanges: new Set(),
     session,
@@ -2399,6 +2448,18 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     lastAccessedAt: now,
   };
   apiStore(state).set(id, record);
+  if (fmt === 'hwpx') {
+    emitHwpxLifecycleTrace('open.completed', {
+      documentId: id,
+      revision: session.revision,
+      sourceFormat: record.sourceFormat,
+      pageCount: json.pageCount,
+      paragraphCount: record.baselineJson?.paragraphCount,
+      tableCount: record.baselineJson?.tableCount,
+      cellCount: record.baselineJson?.cellCount,
+      objectCounts: record.baselineJson?.objectCounts,
+    });
+  }
   const issued = fmt === 'docx' && config.documentStore
     ? config.documentStore.issueToken(id, { canWrite: false })
     : null;
@@ -2415,21 +2476,17 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     ...(json.pageCountEstimate !== undefined ? { pageCountEstimate: json.pageCountEstimate } : {}),
     ...(json.pageCountSource ? { pageCountSource: json.pageCountSource } : {}),
     ...(json.pageCountIsEstimate !== undefined ? { pageCountIsEstimate: Boolean(json.pageCountIsEstimate) } : {}),
-    capabilities: [
-      'json',
-      'targetMap',
-      'targetInspect',
-      'objectInventory',
-      'commandCatalog',
-      'commands',
+    capabilities: [...new Set([
+      ...(fmt === 'hwpx'
+        ? ['inspect', 'edit', 'review', 'save']
+        : ['json', 'targetMap', 'targetInspect', 'objectInventory', 'commandCatalog', 'commands']),
       'save',
       'quality',
       'renderPage',
       'renderAll',
       'renderCompare',
       'exportPdf',
-      ...(fmt === 'hwpx' ? ['semanticContext', 'semanticPlan', 'semanticReceipt'] : []),
-    ],
+    ])],
     ...(issued ? {
       liveEditorSession: {
         documentId: id,
@@ -2465,7 +2522,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     const saved = await record.session.save();
     const bytes = Buffer.from(saved.bytes || saved);
     res.writeHead(200, {
-      'Content-Type': 'application/vnd.hancom.hwpx',
+      'Content-Type': record.sourceFormat === 'hwp' ? 'application/x-hwp' : 'application/vnd.hancom.hwpx',
       'Content-Length': String(bytes.length),
       'Cache-Control': 'no-store',
     });
@@ -2479,9 +2536,245 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   const body = await readJsonBody(req);
   const { session } = record;
 
+  if (fmt === 'hwpx' && !new Set(['inspect', 'edit', 'review', 'save', 'export-pdf', 'discard']).has(actionPath)) {
+    sendJson(res, 404, {
+      ok: false,
+      code: 'legacy_hwpx_route_removed',
+      message: 'Use the canonical HWPX actions: inspect, edit, review, save, export-pdf, or discard.',
+    });
+    return true;
+  }
+
+  if (fmt === 'hwpx' && actionPath === 'inspect') {
+    const view = String(body.view || 'summary');
+    emitHwpxLifecycleTrace('inspect.started', { documentId: id, revision: session.revision, view });
+    if (body.baseRevision !== undefined) assertCurrentRevision({ revision: session.revision }, Number(body.baseRevision));
+    if (view === 'summary') {
+      const result = await boundedDocxReadPage(state, id, session, {
+        ...body,
+        responseMode: MCP_BOUNDED_RESPONSE_MODE,
+        view: 'summary',
+      });
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view });
+      sendJson(res, 200, result);
+      return true;
+    }
+    if (view === 'outline' || view === 'targets') {
+      const result = await boundedHwpxOutlinePage(state, id, session, body);
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, returned: result.returned, total: result.total });
+      sendJson(res, 200, result);
+      return true;
+    }
+    if (view === 'styles') {
+      const result = await boundedHwpxStyleProfile(state, id, session, body);
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, returned: result.returned, total: result.total });
+      sendJson(res, 200, result);
+      return true;
+    }
+    if (view === 'target') {
+      const locations = body.locations || (body.location ? [body.location] : []);
+      if (!locations.length && body.query) {
+        const target = await session.resolveText(body.query, body.match || {});
+        emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, targetCount: 1, queryResolved: true });
+        sendJson(res, 200, { target, ambiguous: false });
+        return true;
+      }
+      if (!locations.length) throw new EditorContractError('inspection_target_required', 'inspect view=target requires locations or query.', 422);
+      const targets = await session.inspectTargets(locations);
+      const inspectedTargetKeys = targets.map((target) => hwpxAdapter.stableTargetKey(target.location));
+      if (inspectedTargetKeys.some((key) => !key)) {
+        throw new EditorContractError('unstable_inspection_target', 'target inspection returned an unstable target.', 422);
+      }
+      const preconditions = recordPreconditions(record);
+      if (preconditions.inspectionRevision !== session.revision) preconditions.inspectedTargetKeys = new Set();
+      preconditions.inspectionRevision = session.revision;
+      inspectedTargetKeys.forEach((key) => preconditions.inspectedTargetKeys.add(key));
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, targetCount: targets.length });
+      sendJson(res, 200, { revision: session.revision, targets, inspectedTargetKeys: [...preconditions.inspectedTargetKeys] });
+      return true;
+    }
+    if (view === 'objects') {
+      const inventory = await session.objectInventory();
+      recordPreconditions(record).inventoryRevision = session.revision;
+      emitHwpxLifecycleTrace('inspect.completed', {
+        documentId: id,
+        revision: session.revision,
+        view,
+        imageCount: inventory.images?.length || 0,
+        pictureCount: inventory.pictures?.length || 0,
+      });
+      sendJson(res, 200, { revision: session.revision, ...inventory });
+      return true;
+    }
+    if (view === 'template') {
+      const json = await session.readJson();
+      const policy = normalizeTemplatePolicy(record.templatePolicy);
+      const requiredTables = new Set(policy.requiredTableIds);
+      const removableTables = new Set(policy.removableTableIds);
+      const requiredImages = new Set(policy.requiredImageNames);
+      const replaceableImages = new Set(policy.replaceableImageNames);
+      const repeatableTables = new Set(policy.repeatableTableIds);
+      const conditionalTables = new Set(policy.conditionalTableIds);
+      const suggestedRegions = suggestHwpxTemplateRegions(json, policy);
+      sendJson(res, 200, {
+        revision: session.revision,
+        policy,
+        deletedBaselineTableIds: [...record.deletedBaselineTableIds],
+        policySource: 'caller-explicit',
+        unclassifiedBehavior: 'review-warning',
+        fields: json.fields || [],
+        tables: (json.tables || []).map((table) => ({
+          id: table.id,
+          dims: table.dims,
+          location: table.location ?? table.native,
+          classification: requiredTables.has(table.id) ? 'required'
+            : removableTables.has(table.id) ? 'removable'
+              : repeatableTables.has(table.id) ? 'repeatable'
+                : conditionalTables.has(table.id) ? 'conditional'
+              : 'unclassified',
+        })),
+        images: (json.objectGraph?.images || []).map((image) => ({
+          name: image.name,
+          mimeType: image.mimeType,
+          byteLength: image.byteLength,
+          sha256: image.sha256,
+          classification: requiredImages.has(image.name) ? 'required'
+            : replaceableImages.has(image.name) ? 'replaceable'
+              : 'unclassified',
+        })),
+        suggestedRegions,
+        suggestionPolicy: 'advisory-only; explicit templatePolicy remains authoritative',
+        warning: 'Unclassified regions are never silently protected or removed. Review suggestedRegions and submit an explicit templatePolicy.',
+      });
+      return true;
+    }
+    if (view === 'page') {
+      const page = Math.max(1, Number(body.page || 1));
+      const pageCount = await pageCountFromSession(session);
+      if (page > pageCount) throw new EditorContractError('page_out_of_range', `Page ${page} exceeds page count ${pageCount}.`, 422);
+      const rendered = await renderHwpxSvgPages(session, [page]);
+      const returnLimit = Math.min(120, Number(body.limit || 60));
+      const pageTargets = [];
+      let offset = 0;
+      let total = 0;
+      do {
+        const outlinePage = await session.outlinePage({ kind: body.kind, offset, limit: 120, textPreviewChars: body.textPreviewChars });
+        total = Number(outlinePage.total || 0);
+        pageTargets.push(...(outlinePage.items || []).filter((target) => Number(target.pageHint) === page));
+        offset += (outlinePage.items || []).length;
+        if (!(outlinePage.items || []).length) break;
+      } while (offset < total);
+      sendJson(res, 200, {
+        revision: session.revision,
+        page,
+        pageCount,
+        render: rendered[0] || null,
+        targets: pageTargets.slice(0, returnLimit),
+        targetCoverage: {
+          scannedDocumentTargets: total,
+          matchedPageTargets: pageTargets.length,
+          returnedPageTargets: Math.min(returnLimit, pageTargets.length),
+          truncated: pageTargets.length > returnLimit,
+        },
+      });
+      return true;
+    }
+    if (view === 'catalog') {
+      const catalog = hwpxAdapter.commandCatalog({
+        category: body.category,
+        op: body.op,
+        sourceFormat: record.sourceFormat,
+      });
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, commandCount: catalog.commandCount });
+      sendJson(res, 200, catalog);
+      return true;
+    }
+    if (view === 'quality') {
+      const quality = await qualityWithRenderedLayout(session, {
+        baselineJson: record.baselineJson,
+        templatePolicy: record.templatePolicy,
+        deletedTableIds: [...record.deletedBaselineTableIds],
+        profile: body.profile,
+        visualPolicy: body.visualPolicy,
+      });
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, ok: quality.ok, issueCount: quality.issues?.length || 0 });
+      sendJson(res, 200, quality);
+      return true;
+    }
+    throw new EditorContractError('unsupported_inspection_view', `Unsupported HWPX inspection view: ${view}.`, 422);
+  }
+  if (fmt === 'hwpx' && actionPath === 'edit') actionPath = 'commands/apply';
+  if (fmt === 'hwpx' && actionPath === 'export-pdf') actionPath = 'documents/export-pdf';
+  if (fmt === 'hwpx' && actionPath === 'save') {
+    actionPath = body.mode === 'checkpoint' ? 'documents/save-checkpoint' : 'documents/save-source';
+  }
+  if (fmt === 'hwpx' && actionPath === 'review') {
+    const baseRevision = requireBaseRevision(record, body);
+    emitHwpxLifecycleTrace('review.started', {
+      documentId: id,
+      revision: baseRevision,
+      requestedPageCount: Array.isArray(body.pages) && body.pages.length ? body.pages.length : 'all',
+    });
+    const qualityResult = await qualityWithRenderedLayout(session, {
+      baselineJson: record.baselineJson,
+      templatePolicy: record.templatePolicy,
+      deletedTableIds: [...record.deletedBaselineTableIds],
+      includeRenderedPages: true,
+      profile: body.profile,
+      visualPolicy: body.visualPolicy,
+    });
+    const { _renderedPages: allRenderedPages = [], ...quality } = qualityResult;
+    const reviewPassed = qualityAllowsFinalization(quality, 'hwpx');
+    recordPreconditions(record).qualityRevision = reviewPassed ? baseRevision : null;
+    recordPreconditions(record).qualityProfile = reviewPassed ? quality.reviewProfile : null;
+    recordPreconditions(record).qualityVisualPolicy = reviewPassed
+      ? visualPolicyKey(body.visualPolicy)
+      : null;
+    const pageCount = Math.max(1, Number(quality.pageCount || 1));
+    const requestedPages = Array.isArray(body.pages) && body.pages.length
+      ? body.pages.map(Number)
+      : Array.from({ length: pageCount }, (_value, index) => index + 1);
+    const pages = requestedPages.filter((page) => Number.isFinite(page) && page > 0 && page <= pageCount);
+    const unavailablePages = requestedPages.filter((page) => !pages.includes(page));
+    const currentPages = allRenderedPages.filter((page) => pages.includes(page.page));
+    const render = body.includeBaseline === true
+      ? {
+          baseline: await renderHwpxBaselinePages(config, id, record.sourceBytes, pages),
+          current: {
+            revision: session.revision,
+            pageCount,
+            pages: currentPages,
+            unavailablePages,
+          },
+          visualComparisonRequired: true,
+        }
+      : { renderer: 'rhwp-svg', pages: currentPages, unavailablePages };
+    emitHwpxLifecycleTrace('review.completed', {
+      documentId: id,
+      revision: baseRevision,
+      ok: reviewPassed,
+      profile: quality.reviewProfile,
+      pageCount,
+      reviewedPageCount: pages.length,
+      errorCount: quality.issues?.filter((issue) => issue.severity === 'error').length || 0,
+      warningCount: quality.issues?.filter((issue) => issue.severity === 'warning').length || 0,
+      clippedCellCount: quality.renderedLayout?.clippedCellCount || 0,
+    });
+    sendJson(res, 200, {
+      ok: qualityAllowsFinalization(quality, 'hwpx'),
+      revision: baseRevision,
+      quality,
+      render,
+      reviewedPages: pages,
+      unavailablePages,
+    });
+    return true;
+  }
+
   if (actionPath === 'documents/discard' || actionPath === 'discard') {
     assertMutationPreconditions(record, 'discard', body);
     const deleted = discardApiSessionState(state, id);
+    if (fmt === 'hwpx') emitHwpxLifecycleTrace('discard.completed', { documentId: id, revision: body.baseRevision, deleted });
     sendJson(res, 200, {
       ok: true,
       documentId: id,
@@ -2559,281 +2852,68 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     sendJson(res, 200, catalog);
     return true;
   }
-  if (fmt === 'hwpx' && actionPath === 'semantic/context') {
-    sendJson(res, 200, await boundedHwpxSemanticContextPage(state, id, session, body));
-    return true;
-  }
-  if (fmt === 'hwpx' && actionPath === 'semantic/prepare') {
-    const baseRevision = requireBaseRevision(record, body);
-    const requirements = normalizeSemanticRequirements(body.requirements);
-    const preserveUnmentioned = body.preserveUnmentioned !== false;
-    const targetIds = requirements.flatMap((requirement) => [requirement.targetId, requirement.sourceTargetId].filter(Boolean));
-    const inspectedById = await inspectSemanticTargetIds(session, targetIds);
-    const entries = compileHwpxSemanticRequirements(requirements, inspectedById);
-    try {
-      hwpxAdapter.validateCommands(entries.map((entry) => entry.command));
-    } catch (error) {
-      throw new EditorContractError('semantic_compile_failed', error instanceof Error ? error.message : String(error), 422);
-    }
-    const planId = `hp_${randomUUID()}`;
-    const planDigest = sha256(Buffer.from(JSON.stringify({
-      documentId: id,
-      baseRevision,
-      preserveUnmentioned,
-      requirements,
-    }), 'utf8'));
-    let preservationBefore = new Map();
-    let imageCountBefore = 0;
-    if (preserveUnmentioned) {
-      const allTargets = flattenEditableTargets(await session.targetMap());
-      preservationBefore = new Map(allTargets.map((target) => [semanticStableTargetKey(target), semanticTargetEvidence(target)]));
-    }
-    if (entries.some((entry) => entry.expected.insertedImage === true)) {
-      const inventory = await session.objectInventory();
-      imageCountBefore = Number(inventory?.images?.length || inventory?.summary?.images || 0);
-    }
-    semanticPlanStore(record).set(planId, {
-      id: planId,
-      planDigest,
-      preparedRevision: baseRevision,
-      entries,
-      before: new Map([...inspectedById].map(([id, target]) => [id, semanticTargetView(target)])),
-      preservationBefore,
-      imageCountBefore,
-      preserveUnmentioned,
-      status: 'prepared',
-      createdAt: Date.now(),
-    });
-    sendJson(res, 200, {
-      ok: true,
-      documentId: id,
-      planId,
-      planDigest,
-      revision: baseRevision,
-      requirementCount: entries.length,
-      requirements: entries.map((entry) => ({ id: entry.requirement.id, action: entry.requirement.action, targetId: entry.requirement.targetId })),
-    });
-    return true;
-  }
-  if (fmt === 'hwpx' && actionPath === 'semantic/execute') {
-    const baseRevision = requireBaseRevision(record, body);
-    const planId = String(body.planId || '').trim();
-    const plan = semanticPlanStore(record).get(planId);
-    if (!plan || plan.status !== 'prepared') {
-      throw new EditorContractError('semantic_plan_unavailable', 'Plan was not found or is no longer executable. Prepare a new plan.', 409);
-    }
-    if (plan.preparedRevision !== baseRevision) {
-      throw new EditorContractError('semantic_plan_stale', `Plan ${planId} was prepared for revision ${plan.preparedRevision}, current revision is ${baseRevision}.`, 409);
-    }
-    const isImageEntry = (entry) => entry.expected.insertedImage === true || entry.expected.replacedImage === true;
-    const regularEntries = plan.entries.filter((entry) => !isImageEntry(entry));
-    const structuralEntries = plan.entries
-      .filter(isImageEntry)
-      .sort((left, right) => {
-        const leftParagraph = left.command.target?.paragraph || {};
-        const rightParagraph = right.command.target?.paragraph || {};
-        return Number(rightParagraph.section || 0) - Number(leftParagraph.section || 0)
-          || Number(rightParagraph.number || 0) - Number(leftParagraph.number || 0);
-      });
-    const commandResults = [];
-    let regularReceipt = [];
-    let regularAfterTargets = flattenEditableTargets(await session.targetMap());
-    let preservation = { ok: true, checkedTargetCount: 0, changed: [], missingTargetIds: [], addedTargetIds: [] };
-    if (regularEntries.length) {
-      const regularResult = await session.apply(regularEntries.map((entry) => entry.command));
-      commandResults.push(...(regularResult.results || []));
-      const regularLocations = regularEntries.map((entry) => entry.command.target || entry.command.location);
-      const inspectedRegularTargets = typeof session.inspectTargets === 'function'
-        ? await session.inspectTargets(regularLocations)
-        : regularLocations.map((location) => session.inspectTarget(location));
-      regularReceipt = regularEntries.map((entry, index) => {
-        const targetId = entry.requirement.targetId;
-        const after = inspectedRegularTargets[index];
-        const before = plan.before.get(targetId);
-        return {
-          requirementId: entry.requirement.id,
-          action: entry.requirement.action,
-          targetId,
-          before,
-          after: semanticTargetView(after),
-          postcondition: semanticPostcondition(entry, before, after),
-        };
-      });
-      regularAfterTargets = flattenEditableTargets(await session.targetMap());
-      if (plan.preserveUnmentioned) {
-        const afterById = new Map(regularAfterTargets.map((target) => [semanticStableTargetKey(target), semanticTargetEvidence(target)]));
-        preservation = semanticPreservationReceipt(
-          plan.preservationBefore,
-          afterById,
-          new Set(inspectedRegularTargets.map((target) => semanticStableTargetKey(target))),
-        );
-      }
-    }
-    let structuralReceipt = [];
-    if (structuralEntries.length) {
-      const structuralResult = await session.apply(structuralEntries.map((entry) => entry.command));
-      commandResults.push(...(structuralResult.results || []));
-      const afterTargets = flattenEditableTargets(await session.targetMap());
-      const inventory = await session.objectInventory();
-      const imageCountAfter = Number(inventory?.images?.length || inventory?.summary?.images || 0);
-      structuralReceipt = structuralEntries.map((entry, index) => {
-        const caption = entry.expected.caption || '';
-        const countText = (targets, text) => targets.filter((target) => String(target.currentText || '') === text).length;
-        const structuralEvidence = {
-          imageCountBefore: plan.imageCountBefore,
-          imageCountAfter,
-          captionCountBefore: caption ? countText(regularAfterTargets, caption) : 0,
-          captionCountAfter: caption ? countText(afterTargets, caption) : 0,
-          imageName: structuralResult.results?.[index]?.imageName || null,
-          sha256: structuralResult.results?.[index]?.sha256 || null,
-        };
-        const before = plan.before.get(entry.requirement.targetId);
-        return {
-          requirementId: entry.requirement.id,
-          action: entry.requirement.action,
-          targetId: entry.requirement.targetId,
-          before,
-          after: before,
-          postcondition: semanticPostcondition(entry, before, before, structuralEvidence),
-        };
-      });
-      const structuralPreservation = plan.preserveUnmentioned
-        ? semanticStructuralPreservationReceipt(
-          regularAfterTargets,
-          afterTargets,
-          structuralEntries.length * 2,
-          new Set(structuralEntries.map((entry) => entry.requirement.targetId)),
-        )
-        : { ok: true, checkedTargetCount: 0, changed: [], missingTargetIds: [], addedTargetIds: [] };
-      preservation = {
-        ...structuralPreservation,
-        ok: preservation.ok && structuralPreservation.ok,
-        regular: preservation,
-        structural: structuralPreservation,
-      };
-      const insertedEntryCount = structuralEntries.filter((entry) => entry.expected.insertedImage === true).length;
-      if (imageCountAfter - plan.imageCountBefore < insertedEntryCount) {
-        for (const [index, item] of structuralReceipt.entries()) {
-          if (structuralEntries[index].expected.insertedImage === true) item.postcondition.ok = false;
-        }
-      }
-    }
-    const receiptById = new Map([...regularReceipt, ...structuralReceipt].map((entry) => [entry.requirementId, entry]));
-    const receipt = plan.entries.map((entry) => receiptById.get(entry.requirement.id));
-    plan.status = 'executed';
-    plan.executedRevision = session.revision;
-    plan.receipt = receipt;
-    plan.preservation = preservation;
-    clearRecordPreconditions(record);
-    sendJson(res, 200, {
-      ok: receipt.every((entry) => entry.postcondition.ok) && preservation.ok,
-      documentId: id,
-      planId,
-      revision: session.revision,
-      commandResults,
-      receipt,
-      preservation,
-    });
-    return true;
-  }
-  if (fmt === 'hwpx' && actionPath === 'semantic/verify') {
-    const baseRevision = requireBaseRevision(record, body);
-    const planId = String(body.planId || '').trim();
-    const plan = semanticPlanStore(record).get(planId);
-    if (!plan || plan.status !== 'executed' || plan.executedRevision !== baseRevision) {
-      throw new EditorContractError('semantic_verification_unavailable', 'Plan has not been executed at this revision. Execute a current prepared plan first.', 409);
-    }
-    const currentTargets = flattenEditableTargets(await session.targetMap());
-    const inventory = await session.objectInventory();
-    const imageCountAfter = Number(inventory?.images?.length || inventory?.summary?.images || 0);
-    const priorReceiptById = new Map((plan.receipt || []).map((entry) => [entry.requirementId, entry]));
-    const receipt = plan.entries.map((entry) => {
-      const prior = priorReceiptById.get(entry.requirement.id);
-      if (entry.expected.insertedImage !== true && entry.expected.replacedImage !== true) {
-        return {
-          requirementId: entry.requirement.id,
-          targetId: entry.requirement.targetId,
-          postcondition: prior.postcondition,
-          after: prior.after,
-        };
-      }
-      if (entry.expected.replacedImage === true) {
-        const imageName = prior.postcondition.actual.imageName;
-        const image = (inventory?.images || []).find((item) => item.name === imageName);
-        const before = plan.before.get(entry.requirement.targetId);
-        return {
-          requirementId: entry.requirement.id,
-          targetId: entry.requirement.targetId,
-          postcondition: semanticPostcondition(entry, before, before, {
-            imageName,
-            sha256: image?.sha256 || null,
-          }),
-          after: prior.after,
-        };
-      }
-      const caption = entry.expected.caption || '';
-      const captionCountAfter = caption
-        ? currentTargets.filter((target) => String(target.currentText || '') === caption).length
-        : 0;
-      const before = plan.before.get(entry.requirement.targetId);
-      return {
-        requirementId: entry.requirement.id,
-        targetId: entry.requirement.targetId,
-        postcondition: semanticPostcondition(entry, before, before, {
-          imageCountBefore: plan.imageCountBefore,
-          imageCountAfter,
-          captionCountBefore: prior.postcondition.actual.captionCountBefore,
-          captionCountAfter,
-        }),
-        after: prior.after,
-      };
-    });
-    if (imageCountAfter - plan.imageCountBefore < plan.entries.filter((entry) => entry.expected.insertedImage === true).length) {
-      for (const item of receipt.filter((entry) => priorReceiptById.get(entry.requirementId)?.action === 'insert_image_after')) {
-        item.postcondition.ok = false;
-      }
-    }
-    const quality = await session.qualityCheck({
-      baselineJson: record.baselineJson,
-      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
-    });
-    const pages = Array.from({ length: await pageCountFromSession(session) }, (_value, index) => index + 1);
-    const renderedPages = await renderHwpxSvgPages(session, pages);
-    const visual = {
-      pageCount: pages.length,
-      renderedPageCount: renderedPages.length,
-      allPagesNonBlank: renderedPages.length === pages.length && renderedPages.every((page) => page.nonBlank === true),
-    };
-    const semanticOk = receipt.every((entry) => entry.postcondition.ok);
-    const preservationOk = plan.preservation?.ok === true;
-    const qualityOk = qualityAllowsFinalization(quality, 'hwpx');
-    recordPreconditions(record).qualityRevision = semanticOk && preservationOk && qualityOk && visual.allPagesNonBlank
-      ? baseRevision
-      : null;
-    plan.status = 'verified';
-    plan.verification = { receipt, quality, visual };
-    sendJson(res, 200, {
-      ok: semanticOk && preservationOk && qualityOk && visual.allPagesNonBlank,
-      documentId: id,
-      planId,
-      planDigest: plan.planDigest,
-      revision: baseRevision,
-      semantic: { ok: semanticOk, receipt },
-      preservation: plan.preservation,
-      quality: { ok: qualityOk, report: quality },
-      visual,
-    });
-    return true;
-  }
   if (actionPath === 'commands/apply' || actionPath === 'commands/batch') {
-    const commands = normalizeCommands(body);
+    let commands = normalizeCommands(body);
     if (!Array.isArray(commands)) {
       sendJson(res, 400, { ok: false, message: 'commands/apply requires commands or ops array.' });
       return true;
     }
+    let resourceTransfers = [];
+    if (fmt === 'hwpx' && commands.some((command) => command?.assetRef || command?.styleRef)) {
+      const resolvedResources = await resolveCrossDocumentResources(state, id, commands);
+      commands = resolvedResources.commands;
+      resourceTransfers = resolvedResources.transfers;
+    }
     assertMutationPreconditions(record, 'apply', body, commands);
-    const result = await session.apply(commands);
+    const previousRevision = session.revision;
+    const previousTemplatePolicy = normalizeTemplatePolicy(record.templatePolicy);
+    let proposedTemplatePolicy = previousTemplatePolicy;
+    if (fmt === 'hwpx') {
+      proposedTemplatePolicy = body.templatePolicy !== undefined
+        ? normalizeTemplatePolicy(body.templatePolicy)
+        : previousTemplatePolicy;
+      enforceTemplatePolicy({ ...record, templatePolicy: proposedTemplatePolicy }, commands);
+    }
+    if (fmt === 'hwpx') emitHwpxLifecycleTrace('edit.started', {
+      documentId: id,
+      revision: session.revision,
+      commandCount: commands.length,
+      commands: commands.map((command) => ({ commandId: command.commandId, op: command.op })),
+    });
+    let result;
+    try {
+      result = await session.apply(commands);
+    } catch (error) {
+      if (fmt === 'hwpx') emitHwpxLifecycleTrace('edit.failed', {
+        documentId: id,
+        revision: session.revision,
+        commandCount: commands.length,
+        code: error?.code || 'editor_error',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (error?.code === 'FIT_TEXT_LOSS_NOT_AUTHORIZED') {
+        throw new EditorContractError(
+          'text_loss_not_authorized',
+          error instanceof Error ? error.message : String(error),
+          422,
+        );
+      }
+      if (typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]+$/.test(error.code)) {
+        throw new EditorContractError(
+          error.code,
+          error instanceof Error ? error.message : String(error),
+          422,
+          error.details,
+        );
+      }
+      throw error;
+    }
+    if (fmt === 'hwpx') record.templatePolicy = proposedTemplatePolicy;
     for (const command of commands) {
+      if (fmt === 'hwpx' && command?.op === 'table.structure' && command.action === 'deleteTable') {
+        const tableId = String((command.target ?? command.location)?.tableId ?? '');
+        if (tableId) record.deletedBaselineTableIds.add(tableId);
+      }
       if (String(command?.op ?? '').replace(/[^a-z0-9]/gi, '').toLowerCase() === 'setpagesetup') {
         record.intentionalSectionLayoutChanges.add(command.section === 'all' ? 'all' : Number(command.section ?? 0));
       }
@@ -2844,25 +2924,84 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         });
       }
     }
-    clearRecordPreconditions(record);
-    sendJson(res, 200, { ...result, warnings: [] });
+    if (session.revision !== previousRevision) {
+      clearRecordPreconditions(record);
+    } else if (JSON.stringify(previousTemplatePolicy) !== JSON.stringify(proposedTemplatePolicy)) {
+      recordPreconditions(record).qualityRevision = null;
+    }
+    if (fmt === 'hwpx') emitHwpxLifecycleTrace('edit.completed', {
+      documentId: id,
+      previousRevision: body.baseRevision,
+      revision: result.revision,
+      commandCount: commands.length,
+    });
+    sendJson(res, 200, { ...result, resourceTransfers, warnings: [] });
     return true;
   }
   if (actionPath === 'documents/save-source' || actionPath === 'save'
     || actionPath === 'documents/save-checkpoint') {
     const checkpoint = actionPath === 'documents/save-checkpoint';
     assertMutationPreconditions(record, checkpoint ? 'save-checkpoint' : 'save-source', body);
+    if (fmt === 'hwpx') emitHwpxLifecycleTrace('save.started', { documentId: id, revision: session.revision, checkpoint, sourceFormat: record.sourceFormat });
     const saved = await session.save();
+    let reopen = null;
+    if (fmt === 'hwpx' && !checkpoint) {
+      const verifier = await hwpxAdapter.createSession(saved.bytes);
+      const verification = await qualityWithRenderedLayout(verifier, {
+        baselineJson: record.baselineJson,
+        templatePolicy: record.templatePolicy,
+        deletedTableIds: [...record.deletedBaselineTableIds],
+        profile: body.profile,
+        visualPolicy: body.visualPolicy,
+      });
+      if (!qualityAllowsFinalization(verification, 'hwpx')) {
+        throw new EditorContractError(
+          'saved_document_verification_failed',
+          'The saved HWP/HWPX failed quality or rendered-layout verification after reopening.',
+          422,
+          { verification },
+        );
+      }
+      if (String(verification.sourceFormat || saved.validation?.sourceFormat || '') !== String(record.sourceFormat || '')) {
+        throw new EditorContractError(
+          'saved_document_format_changed',
+          'Verified save changed the source document format unexpectedly.',
+          422,
+          { sourceFormat: record.sourceFormat, savedFormat: saved.validation?.sourceFormat },
+        );
+      }
+      reopen = {
+        ok: true,
+        sourceFormat: saved.validation?.sourceFormat,
+        pageCount: verification.pageCount,
+        renderedPageCount: verification.renderedLayout?.renderedPageCount,
+        clippedCellCount: verification.renderedLayout?.clippedCellCount,
+        sha256: sha256(saved.bytes),
+      };
+    }
     const outputPath = body.outputPath ? path.resolve(String(body.outputPath)) : bytesRefForSavedDocument(config, body.filename || record.filename);
     mkdirSync(path.dirname(outputPath), { recursive: true });
     await writeFile(outputPath, saved.bytes);
+    if (fmt === 'hwpx') emitHwpxLifecycleTrace('save.completed', {
+      documentId: id,
+      revision: saved.revision,
+      checkpoint,
+      sourceFormat: saved.validation?.sourceFormat,
+      pageCount: saved.validation?.pageCount,
+      byteLength: saved.bytes.length,
+      sha256: sha256(saved.bytes),
+      reopen,
+    });
     sendJson(res, 200, {
       ok: true,
       revision: saved.revision,
       bytesRef: outputPath,
+      byteLength: saved.bytes.length,
       sha256: sha256(saved.bytes),
       ...(fmt === 'docx' ? { visibleTextHash: sha256(Buffer.from(docxAdapter.visibleText(saved.bytes), 'utf8')) } : {}),
       validation: saved.validation,
+      ...(reopen ? { reopen } : {}),
+      reviewProfile: checkpoint ? null : recordPreconditions(record).qualityProfile,
       checkpoint,
       verified: !checkpoint,
     });
@@ -2937,12 +3076,24 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   }
   if (actionPath === 'quality/check' || actionPath === 'health/check') {
     const { baseRevision } = assertMutationPreconditions(record, 'quality-check', body);
-    const quality = await session.qualityCheck({
+    const quality = fmt === 'hwpx' ? await qualityWithRenderedLayout(session, {
+      baselineJson: record.baselineJson,
+      templatePolicy: record.templatePolicy,
+      deletedTableIds: [...record.deletedBaselineTableIds],
+      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
+      profile: body.profile,
+      visualPolicy: body.visualPolicy,
+    }) : await session.qualityCheck({
       baselineJson: record.baselineJson,
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
     });
-    recordPreconditions(record).qualityRevision = qualityAllowsFinalization(quality, fmt)
-      ? baseRevision
+    const qualityPassed = qualityAllowsFinalization(quality, fmt);
+    recordPreconditions(record).qualityRevision = qualityPassed ? baseRevision : null;
+    recordPreconditions(record).qualityProfile = qualityPassed && fmt === 'hwpx'
+      ? quality.reviewProfile
+      : null;
+    recordPreconditions(record).qualityVisualPolicy = qualityPassed && fmt === 'hwpx'
+      ? visualPolicyKey(body.visualPolicy)
       : null;
     sendJson(res, 200, {
       ok: quality.ok,
@@ -2993,7 +3144,12 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     return true;
   }
   if (actionPath === 'quality/render-compare') {
-    const quality = await session.qualityCheck({
+    const quality = fmt === 'hwpx' ? await qualityWithRenderedLayout(session, {
+      baselineJson: record.baselineJson,
+      templatePolicy: record.templatePolicy,
+      deletedTableIds: [...record.deletedBaselineTableIds],
+      allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
+    }) : await session.qualityCheck({
       baselineJson: record.baselineJson,
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
     });
@@ -4111,7 +4267,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (args.bytesRef && !config.mcpAllowBytesRef && !isLoopbackHost(config.host)) {
       throw new Error('bytesRef is disabled for externally bound MCP servers. Use trusted application-side bytesBase64 input.');
     }
-    return postLocalEditorApi(req, config, `/v1/${fmt}/documents/open`, {
+    const opened = await postLocalEditorApi(req, config, `/v1/${fmt}/documents/open`, {
       filename: args.filename,
       source: {
         ...(args.bytesBase64 ? { bytesBase64: args.bytesBase64 } : {}),
@@ -4119,6 +4275,26 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         ...(args.storedDocumentId ? { storedDocumentId: args.storedDocumentId } : {}),
       },
     });
+    if (fmt !== 'hwpx' || !isLoopbackHost(config.host) || !opened.liveEditorSession?.sourcePath) {
+      return opened;
+    }
+    const editorUrl = new URL(config.hwpxBasePath, config.publicOrigin);
+    editorUrl.searchParams.set('url', opened.liveEditorSession.sourcePath);
+    editorUrl.searchParams.set('filename', args.filename);
+    const browserUrl = editorUrl.toString();
+    return {
+      ...opened,
+      liveEditorSession: {
+        ...opened.liveEditorSession,
+        editorUrl: browserUrl,
+      },
+      browserPresentation: {
+        url: browserUrl,
+        surface: 'codex_in_app_browser_side_panel',
+        refreshMode: 'reload_after_revision_change',
+        readOnly: true,
+      },
+    };
   }
 
   if (name === `${toolPrefix}_artifact_read` || name === `${toolPrefix}_artifact_delete`) {
@@ -4128,13 +4304,24 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       throw new Error('expectedSha256 must be a lowercase SHA-256 digest.');
     }
     const artifact = await resolveMcpArtifact(artifactId);
-    if (artifact.extension !== fmt && artifact.extension !== 'pdf') {
-      throw new Error(`artifact_format_mismatch: expected ${fmt}, found ${artifact.extension}.`);
+    const formatMatches = artifact.extension === fmt
+      || artifact.extension === 'pdf'
+      || fmt === 'hwpx' && artifact.extension === 'hwp';
+    if (!formatMatches) {
+      throw new EditorContractError(
+        'artifact_format_mismatch',
+        `Expected a ${fmt.toUpperCase()} lifecycle artifact, found ${artifact.extension}.`,
+        422,
+      );
     }
     const bytes = await readFile(artifact.filePath);
     const actualSha256 = sha256(bytes);
     if (actualSha256 !== expectedSha256) {
-      throw new Error(`artifact_hash_mismatch: finalized ${fmt.toUpperCase()} artifact did not match the expected hash.`);
+      throw new EditorContractError(
+        'artifact_hash_mismatch',
+        `Finalized ${fmt.toUpperCase()} artifact did not match the expected hash.`,
+        422,
+      );
     }
     if (name === `${toolPrefix}_artifact_delete`) {
       await unlink(artifact.filePath);
@@ -4171,7 +4358,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         };
       }
       const prefix = `/v1/${fmt}/documents/${encodeURIComponent(documentId)}`;
-      const discarded = await postLocalEditorApi(req, config, `${prefix}/documents/discard`, {
+      const discarded = await postLocalEditorApi(req, config, `${prefix}/${fmt === 'hwpx' ? 'discard' : 'documents/discard'}`, {
         baseRevision: args.baseRevision,
       });
       return {
@@ -4181,6 +4368,16 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     }
 
     const prefix = `/v1/${fmt}/documents/${encodeURIComponent(documentId)}`;
+    if (name === 'editor_hwpx_inspect') {
+      const inspected = await postLocalEditorApi(req, config, `${prefix}/inspect`, args);
+      if (args.view === 'page' && inspected?.render) {
+        return {
+          ...inspected,
+          render: projectHwpxSvgEvidence(inspected.render, args.includeSvg === true),
+        };
+      }
+      return inspected;
+    }
     if (name === `${toolPrefix}_read_json`) {
       return postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
@@ -4209,187 +4406,25 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (name === `${toolPrefix}_target_inspect`) {
       return postLocalEditorApi(req, config, `${prefix}/target/inspect`, { locations: args.locations });
     }
-    if (name === 'editor_hwpx_semantic_context') {
-      return postLocalEditorApi(req, config, `${prefix}/semantic/context`, {
-        ...(args.kind !== undefined ? { kind: args.kind } : {}),
-        ...(args.limit !== undefined ? { limit: args.limit } : {}),
-        ...(args.cursor ? { cursor: args.cursor } : {}),
-      });
-    }
-
-    const structure = await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
-      responseMode: MCP_BOUNDED_RESPONSE_MODE,
-      view: 'summary',
-    });
+    const structure = fmt === 'hwpx'
+      ? await postLocalEditorApi(req, config, `${prefix}/inspect`, { view: 'summary' })
+      : await postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
+          responseMode: MCP_BOUNDED_RESPONSE_MODE,
+          view: 'summary',
+        });
     const baseRevision = Number(args.baseRevision);
     assertCurrentRevision(structure, baseRevision);
 
-    if (name === `${toolPrefix}_apply`) {
-      return postLocalEditorApi(req, config, `${prefix}/commands/apply`, {
+    if (name === `${toolPrefix}_apply` || name === 'editor_hwpx_edit') {
+      return postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_edit' ? 'edit' : 'commands/apply'}`, {
         baseRevision,
         commands: args.commands,
+        ...(args.templatePolicy !== undefined ? { templatePolicy: args.templatePolicy } : {}),
       });
     }
-    if (name === 'editor_hwpx_apply_plan') {
-      const prepared = await postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
-        baseRevision,
-        requirements: args.requirements,
-        preserveUnmentioned: args.preserveUnmentioned !== false,
-      });
-      const executed = await postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
-        baseRevision,
-        planId: prepared.planId,
-      });
-      if (executed.ok !== true) {
-        throw new EditorContractError(
-          executed.preservation?.ok === false ? 'semantic_preservation_failed' : 'semantic_postcondition_failed',
-          'The semantic edit batch did not satisfy every postcondition and preservation check.',
-          422,
-          { receipt: executed.receipt, preservation: executed.preservation },
-        );
-      }
-      const verified = await postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
-        baseRevision: executed.revision,
-        planId: prepared.planId,
-      });
-      if (verified.ok !== true) {
-        throw new EditorContractError(
-          'semantic_verification_failed',
-          'The semantic edit batch failed requirement, preservation, quality, or full-page render verification.',
-          422,
-          { verification: verified },
-        );
-      }
-      return {
-        ok: true,
-        status: 'review_required',
-        documentId,
-        planId: prepared.planId,
-        planDigest: prepared.planDigest,
-        revision: executed.revision,
-        requirementCount: prepared.requirementCount,
-        receipt: executed.receipt,
-        preservation: executed.preservation,
-        quality: verified.quality,
-        visual: verified.visual,
-        sessionClosed: false,
-      };
-    }
-    if (name === 'editor_hwpx_commit_plan') {
-      await pruneExpiredMcpArtifacts(config);
-      const artifactId = randomUUID();
-      const artifactPath = mcpArtifactPath(artifactId, 'hwpx');
-      try {
-        const prepared = await postLocalEditorApi(req, config, `${prefix}/semantic/prepare`, {
-          baseRevision,
-          requirements: args.requirements,
-          preserveUnmentioned: args.preserveUnmentioned !== false,
-        });
-        const executed = await postLocalEditorApi(req, config, `${prefix}/semantic/execute`, {
-          baseRevision,
-          planId: prepared.planId,
-        });
-        if (executed.ok !== true) {
-          throw new EditorContractError(
-            executed.preservation?.ok === false ? 'semantic_preservation_failed' : 'semantic_postcondition_failed',
-            'The semantic plan did not satisfy every postcondition and preservation check.',
-            422,
-            { receipt: executed.receipt, preservation: executed.preservation },
-          );
-        }
-        const verified = await postLocalEditorApi(req, config, `${prefix}/semantic/verify`, {
-          baseRevision: executed.revision,
-          planId: prepared.planId,
-        });
-        if (verified.ok !== true) {
-          throw new EditorContractError(
-            'semantic_verification_failed',
-            'The semantic plan failed requirement, preservation, quality, or full-page render verification.',
-            422,
-            { verification: verified },
-          );
-        }
-        const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
-          baseRevision: executed.revision,
-          filename: args.filename,
-          outputPath: artifactPath,
-        });
-        const savedBytes = await readFile(artifactPath);
-        const reopened = await postLocalEditorApi(req, config, '/v1/hwpx/documents/open', {
-          filename: args.filename,
-          source: { bytesBase64: savedBytes.toString('base64') },
-        });
-        let reopenReceipt;
-        try {
-          const reopenedPrefix = `/v1/hwpx/documents/${encodeURIComponent(reopened.documentId)}`;
-          const reopenedSummary = await postLocalEditorApi(
-            req,
-            config,
-            `${reopenedPrefix}/documents/read-json`,
-            { responseMode: MCP_BOUNDED_RESPONSE_MODE, view: 'summary' },
-          );
-          const reopenedQuality = await postLocalEditorApi(
-            req,
-            config,
-            `${reopenedPrefix}/quality/check`,
-            { baseRevision: reopened.revision },
-          );
-          const reopenPages = Array.from(
-            { length: Math.max(1, Number(reopenedSummary.pageCount || reopened.pageCount || 1)) },
-            (_value, index) => index + 1,
-          );
-          const reopenedRendered = await postLocalEditorApi(
-            req,
-            config,
-            `${reopenedPrefix}/pages/render-all`,
-            { pages: reopenPages },
-          );
-          const reopenedVisualOk = reopenedRendered.pages?.length === reopenPages.length
-            && reopenedRendered.pages.every((page) => page.nonBlank === true);
-          if (!qualityAllowsFinalization(reopenedQuality, 'hwpx') || !reopenedVisualOk) {
-            throw new EditorContractError(
-              'semantic_reopen_verification_failed',
-              'The saved HWPX did not pass quality and full-page rendering after reopen.',
-              422,
-            );
-          }
-          reopenReceipt = {
-            ok: true,
-            revision: reopened.revision,
-            pageCount: reopenPages.length,
-            renderedPages: reopenPages,
-            sha256: sha256(savedBytes),
-          };
-        } finally {
-          discardApiSessionState(state, reopened.documentId, { clearLock: false });
-        }
-        const { bytesRef: _serverLocalPath, ...publicSaved } = saved;
-        discardApiSessionState(state, documentId, { clearLock: false });
-        return {
-          ok: true,
-          status: 'completed',
-          documentId,
-          planId: prepared.planId,
-          planDigest: prepared.planDigest,
-          revision: executed.revision,
-          requirementCount: prepared.requirementCount,
-          receipt: executed.receipt,
-          preservation: executed.preservation,
-          quality: verified.quality,
-          visual: verified.visual,
-          reopen: reopenReceipt,
-          artifact: { ...publicSaved, artifactId },
-          artifactId,
-          sha256: publicSaved.sha256,
-          sessionClosed: true,
-        };
-      } catch (error) {
-        discardApiSessionState(state, documentId, { clearLock: false });
-        await unlink(artifactPath).catch((unlinkError) => {
-          if (unlinkError?.code !== 'ENOENT') throw unlinkError;
-        });
-        throw error;
-      }
+    if (name === 'editor_hwpx_review') {
+      const reviewed = await postLocalEditorApi(req, config, `${prefix}/review`, args);
+      return compactHwpxReviewPayload(reviewed, args.includeSvg === true);
     }
     if (name === `${toolPrefix}_render_pages`) {
       const pages = Array.isArray(args.pages) && args.pages.length ? args.pages.map(Number) : [1];
@@ -4401,17 +4436,23 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       }
       return postLocalEditorApi(req, config, `${prefix}/pages/render-all`, { pages });
     }
-    if (name === `${toolPrefix}_quality_check`) {
-      return postLocalEditorApi(req, config, `${prefix}/quality/check`, { baseRevision });
+    if (name === `${toolPrefix}_quality_check` || name === 'editor_hwpx_inspect' && args.view === 'quality') {
+      return postLocalEditorApi(req, config, `${prefix}/quality/check`, {
+        baseRevision,
+        profile: args.profile,
+        visualPolicy: args.visualPolicy,
+      });
     }
     if (name === `${toolPrefix}_export_pdf`) {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
       const outputPath = mcpArtifactPath(artifactId, 'pdf');
       try {
-        const exported = await postLocalEditorApi(req, config, `${prefix}/documents/export-pdf`, {
+        const exported = await postLocalEditorApi(req, config, `${prefix}/${fmt === 'hwpx' ? 'export-pdf' : 'documents/export-pdf'}`, {
           baseRevision,
           filename: args.filename,
+          profile: args.profile,
+          visualPolicy: args.visualPolicy,
           outputPath,
         });
         const { bytesRef: _serverLocalPath, bytesBase64: _inlineBytes, ...publicResult } = exported;
@@ -4469,25 +4510,37 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         throw error;
       }
     }
-    if (name === `${toolPrefix}_save_source`) {
+    if (name === `${toolPrefix}_save_source` || name === 'editor_hwpx_save' && args.mode !== 'checkpoint') {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
-      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+      const artifactExtension = fmt === 'hwpx'
+        && findApiRecord(state, 'hwpx', documentId)?.sourceFormat === 'hwp'
+        ? 'hwp'
+        : fmt;
+      const saved = await postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_save' ? 'save' : 'documents/save-source'}`, {
         baseRevision,
         filename: args.filename,
-        outputPath: mcpArtifactPath(artifactId, fmt),
+        profile: args.profile,
+        visualPolicy: args.visualPolicy,
+        ...(name === 'editor_hwpx_save' ? { mode: 'verified' } : {}),
+        outputPath: mcpArtifactPath(artifactId, artifactExtension),
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
       discardApiSessionState(state, documentId, { clearLock: false });
       return { ...publicResult, artifactId, sessionClosed: true };
     }
-    if (name === `${toolPrefix}_save_checkpoint`) {
+    if (name === `${toolPrefix}_save_checkpoint` || name === 'editor_hwpx_save' && args.mode === 'checkpoint') {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
-      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-checkpoint`, {
+      const artifactExtension = fmt === 'hwpx'
+        && findApiRecord(state, 'hwpx', documentId)?.sourceFormat === 'hwp'
+        ? 'hwp'
+        : fmt;
+      const saved = await postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_save' ? 'save' : 'documents/save-checkpoint'}`, {
         baseRevision,
         filename: args.filename,
-        outputPath: mcpArtifactPath(artifactId, fmt),
+        ...(name === 'editor_hwpx_save' ? { mode: 'checkpoint' } : {}),
+        outputPath: mcpArtifactPath(artifactId, artifactExtension),
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
       discardApiSessionState(state, documentId, { clearLock: false });
@@ -4511,7 +4564,7 @@ async function handleEditorMcp(req, res, config, state) {
   }
   const payload = await readJsonBody(req);
   const response = await handleEditorMcpJsonRpc(payload, {
-    serverInfo: { name: 'academic-editor-mcp', version: '1.0.0' },
+    serverInfo: { name: 'academic-editor-mcp', version: HWPX_MCP_CONTRACT_VERSION },
     executeTool: async (name, args = {}) => {
       const activity = activityDescriptor(name, args);
       const documentId = String(args.documentId || '').trim();
@@ -4577,8 +4630,9 @@ function createGatewayServer(config) {
   };
 
   const server = http.createServer(async (req, res) => {
+    let pathname = '';
     try {
-      const pathname = getRequestPath(req.url);
+      pathname = getRequestPath(req.url);
       if (pathname === '/') {
         res.writeHead(302, { Location: config.enableSampleDocx ? `${config.docxServiceRoot}/` : config.hwpxBasePath });
         res.end();
@@ -4663,7 +4717,8 @@ function createGatewayServer(config) {
       }
 
       if (isEditorApiPath(pathname)) {
-        if (!authorizeInternalRoute(req, res, config)) {
+        const loopbackLiveSource = isLoopbackHwpxLiveSourceRequest(req, config, pathname);
+        if (!loopbackLiveSource && !authorizeInternalRoute(req, res, config)) {
           return;
         }
         if (await handleEditorApi(req, res, config, state, pathname)) {
@@ -4754,6 +4809,16 @@ function createGatewayServer(config) {
 
       sendText(res, 404, 'Not found');
     } catch (error) {
+      if (pathname.startsWith('/v1/hwpx/')) {
+        const documentId = pathname.match(/\/v1\/hwpx\/(?:documents|sessions)\/(doc_[^/]+)/)?.[1];
+        emitHwpxLifecycleTrace('request.failed', {
+          ...(documentId ? { documentId } : {}),
+          method: req.method,
+          path: pathname,
+          code: error?.code || 'internal_error',
+          statusCode: error instanceof EditorContractError ? error.statusCode : 500,
+        });
+      }
       if (error instanceof EditorContractError) {
         sendJson(res, error.statusCode, {
           ok: false,

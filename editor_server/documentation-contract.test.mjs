@@ -84,6 +84,8 @@ test('documented command lists match executable catalogs exactly', () => {
     PDF_COMMAND_OPS,
   );
   assert.equal(PDF_COMMAND_OPS.length, 46);
+  assert.match(canonical.get('API.md'), /31 DOCX commands, 41 HWPX commands, and 46 PDF commands/);
+  assert.match(canonical.get('docs/DOCUMENTATION_INDEX.md'), /17 DOCX, 9 HWPX, 16 PDF, and 7 Image Studio/);
 });
 
 test('documented MCP tool lists match executable HWPX and PDF tools', () => {
@@ -95,7 +97,7 @@ test('documented MCP tool lists match executable HWPX and PDF tools', () => {
   assert.match(canonical.get('API.md'), /Only `editor_docx_render_pages` and `editor_docx_export_pdf` return an\s+authoritative renderer page count/);
   const documented = textBlockAfter(canonical.get('docs/HWPX_MCP_API.md'), '## Tools');
   assert.deepEqual(documented, HWPX_MCP_TOOLS.map((tool) => tool.name));
-  assert.equal(HWPX_MCP_TOOLS.length, 18);
+  assert.equal(HWPX_MCP_TOOLS.length, 9);
   assert.equal(DOCX_MCP_TOOLS.length, 17);
   assert.deepEqual(
     textBlockAfter(canonical.get('docs/PDF_MCP_API.md'), '## Tools'),

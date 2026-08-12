@@ -20,7 +20,7 @@ Canonical entrypoints:
 
 ## Capability status
 
-The HWPX catalog exposes 37 canonical commands and every entry currently
+The HWPX catalog exposes 41 canonical commands and every HWPX entry currently
 reports `readiness=available`. `execution` still identifies the actual path
 used by an operation, such as the native RHWP path, structural adapter, or
 preserve-package adapter. It is evidence about implementation, not a readiness
@@ -42,19 +42,22 @@ table.applyCellStyle
 table.insertRows
 table.setSize
 table.setCellSize
+table.autoFit
 table.create
 table.insertCaption
+table.structure
 style.applyText
 paragraph.applyStyle
 style.clone
 applyStyle
 setRunStyle
 setParagraphStyle
-list.writeBullets
-list.applyNumbering
+format.apply
 layout.fitText
+paragraph.structure
 image.replace
 image.insertAfterParagraph
+image.replaceInCell
 image.cloneToCell
 image.generateAndReplace
 setDocumentMetadata
@@ -63,6 +66,7 @@ setPageSetup
 setHeaderFooter
 insertFootnote
 object.deleteTextBoxByText
+object.format
 object.replaceTextBoxText
 ```
 
@@ -73,12 +77,14 @@ operation name is shared; query the format's command schema first.
 ## Safe edit workflow
 
 1. Open bytes and retain `documentId` plus `revision`.
-2. Read a bounded projection with `read_json`.
-3. Resolve and inspect every target required by the command catalog.
-4. Apply one revision-bound atomic command batch with `baseRevision`.
-5. Run `quality_check` for the new revision.
-6. Render the required pages and inspect the visible result.
-7. Save source or checkpoint, read the opaque artifact, verify hashes and
+2. Inspect bounded `summary`, `outline`, `styles`, and `catalog` views.
+3. Resolve and inspect every exact target required by the command catalog.
+4. Apply one revision-bound atomic batch with `edit` and `baseRevision`.
+5. Run `review` for the new revision with full-page coverage. Use
+   `profile="submission"` for applications, forms, and other deliverables that
+   must not retain unresolved placeholders or author instructions.
+6. Inspect every affected rendered page and its neighbors.
+7. Save in verified mode with the same review profile (use `profile="submission"` for deliverables), or recovery-only checkpoint mode; read the opaque artifact, verify hashes and
    reopen it, then delete the artifact.
 8. If the workflow is cancelled, call `discard` with `documentId` and the
    current `baseRevision`.
@@ -97,9 +103,14 @@ revision.
   final Hancom Office visual check for high-risk layout.
 - HWPX PDF export depends on the configured native converter runtime and fails
   closed when that runtime is unavailable.
-- The editor accepts HWPX as its document input. PDF, DOCX, HWP, XLSX, CSV,
-  TXT, PNG, and JPG are evaluation evidence inputs processed by the attachment
-  extractors; they are not silently treated as editable HWPX packages.
+- The editor accepts both binary HWP and HWPX document input. It preserves the
+  source format; package-only commands are marked unavailable for HWP.
+- `template` inspection returns advisory region suggestions, while explicit
+  `templatePolicy` remains authoritative. `page` inspection scans the complete
+  target stream before returning bounded page targets and occupancy metrics.
+- Newly inserted paragraph images must persist `treatAsChar=true` when re-read;
+  native HWP may retain dormant floating-layout fields while inline mode is active.
+  Floating placement requires a subsequent explicit `object.format`.
 
 ## Verification
 

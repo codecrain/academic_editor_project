@@ -51,7 +51,8 @@ function assertCommonSessionContract(session) {
     assert.equal(cellTarget.kind, 'cell');
     const fit = session.fitText(cellLocation, 'alpha beta gamma delta epsilon', { maxCharsPerLine: 12, truncate: false });
     assert.equal(fit.truncated, false);
-    assert.ok(fit.text.includes('\n'));
+    assert.equal(fit.text, 'alpha beta gamma delta epsilon');
+    assert.ok(fit.suggestedText.includes('\n'));
   }
 
   const searchableText =
@@ -97,12 +98,36 @@ test('common command helpers normalize equivalent LLM command inputs', () => {
   );
 });
 
-test('common fitText wraps on words before splitting long tokens', () => {
+test('common fitText preserves source text unless materialization is explicit', () => {
   assert.deepEqual(wrapLine('alpha beta gamma', 10), ['alpha beta', 'gamma']);
   const fit = fitTextToCapacity('alpha beta gamma', { maxCharsPerLine: 10, maxLines: 2 }, { truncate: false });
-  assert.equal(fit.text, 'alpha beta\ngamma');
-  assert.equal(fit.changed, true);
+  assert.equal(fit.text, 'alpha beta gamma');
+  assert.equal(fit.suggestedText, 'alpha beta\ngamma');
+  assert.equal(fit.changed, false);
+  assert.equal(fit.wouldChange, true);
   assert.equal(fit.truncated, false);
+
+  const materialized = fitTextToCapacity('alpha beta gamma', { maxCharsPerLine: 10, maxLines: 2 }, {
+    materializeBreaks: true,
+  });
+  assert.equal(materialized.text, 'alpha beta\ngamma');
+  assert.equal(materialized.changed, true);
+});
+
+test('common fitText never splits tokens or truncates without explicit loss authorization', () => {
+  assert.deepEqual(wrapLine('ABCDEFGHIJKLMNOPQRSTUVWXYZ', 8), ['ABCDEFGHIJKLMNOPQRSTUVWXYZ']);
+  const safe = fitTextToCapacity('one two three four', { maxCharsPerLine: 5, maxLines: 1 });
+  assert.equal(safe.text, 'one two three four');
+  assert.equal(safe.truncated, false);
+  assert.throws(
+    () => fitTextToCapacity('one two three four', { maxCharsPerLine: 5, maxLines: 1 }, { truncate: true }),
+    error => error?.code === 'FIT_TEXT_LOSS_NOT_AUTHORIZED' && /allowTextLoss=true/.test(error.message),
+  );
+  const lossy = fitTextToCapacity('one two three four', { maxCharsPerLine: 5, maxLines: 1 }, {
+    truncate: true,
+    allowTextLoss: true,
+  });
+  assert.equal(lossy.truncated, true);
 });
 
 test('DOCX session satisfies the shared document API contract', () => {

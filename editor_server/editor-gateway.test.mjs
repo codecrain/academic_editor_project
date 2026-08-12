@@ -33,9 +33,32 @@ import {
   DocxApiSession,
   getDocumentXml,
 } from '../editor_docx/scripts/docx-api-utils.mjs';
+import { HwpxApiSession, initHwpxRuntime } from '../editor_hwpx/scripts/hwpx-api-utils.mjs';
 
 const FAKE_PDF_BYTES = Buffer.from('%PDF-1.4\n%%EOF\n');
 const FAKE_WEBP_BYTES = Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary');
+
+test('mixed HWPX text and structural batch rolls back bytes and revision on failure', async () => {
+  await initHwpxRuntime();
+  const source = await readFile(path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/public-form-template.hwpx'));
+  const session = new HwpxApiSession(source, { saveMode: 'preserve-package' });
+  const paragraph = session.targetMap().paragraphs[0];
+  const beforeHash = createHash('sha256').update(session.inputBytes).digest('hex');
+  const beforeRevision = session.revision;
+
+  assert.throws(() => session.apply([
+    { op: 'text.replaceParagraph', location: paragraph.location, text: '원자성 검사' },
+    {
+      op: 'image.insertAfterParagraph',
+      target: paragraph.location,
+      bytesBase64: 'invalid-image',
+      mimeType: 'image/png',
+    },
+  ]));
+
+  assert.equal(session.revision, beforeRevision);
+  assert.equal(createHash('sha256').update(session.inputBytes).digest('hex'), beforeHash);
+});
 
 function fakeDocxRenderer(_bytes, options = {}) {
   const selectedPages = options.pages === 'none'
@@ -357,24 +380,14 @@ test('gateway exposes MCP tools/list and a guarded isolated DOCX candidate workf
       'editor_docx_artifact_delete',
       'editor_docx_prepare_review',
       'editor_hwpx_open',
-      'editor_hwpx_discard',
-      'editor_hwpx_read_json',
-      'editor_hwpx_target_map',
-      'editor_hwpx_target_find',
-      'editor_hwpx_target_inspect',
-      'editor_hwpx_object_inventory',
-      'editor_hwpx_command_catalog',
-      'editor_hwpx_apply',
-      'editor_hwpx_render_pages',
-      'editor_hwpx_quality_check',
+      'editor_hwpx_inspect',
+      'editor_hwpx_edit',
+      'editor_hwpx_review',
+      'editor_hwpx_save',
       'editor_hwpx_export_pdf',
-      'editor_hwpx_save_source',
-      'editor_hwpx_save_checkpoint',
+      'editor_hwpx_discard',
       'editor_hwpx_artifact_read',
       'editor_hwpx_artifact_delete',
-      'editor_hwpx_semantic_context',
-      'editor_hwpx_apply_plan',
-      'editor_hwpx_commit_plan',
       'editor_pdf_open',
       'editor_pdf_discard',
       'editor_pdf_read_json',
@@ -1960,7 +1973,7 @@ test('gateway serves HWPX static assets on the public /hwpx path', async () => {
   }
 });
 
-test('gateway exposes HWPX document API bridge for open, inspect, command, render, and save', async () => {
+test('gateway exposes the canonical HWPX HTTP API bridge', async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-api-'));
   const outputPath = path.join(tempRoot, 'bridge-smoke.hwpx');
   const server = createGatewayServer({
@@ -1978,10 +1991,8 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     hwpxPdfRenderer: fakeHwpxPdfRenderer,
   });
   const address = await listen(server);
-  assert.equal(typeof address, 'object');
   const origin = `http://127.0.0.1:${address.port}`;
   const sourcePath = path.resolve('editor_hwpx/samples/hwpx/ref/ref_text.hwpx');
-
   async function post(pathname, payload) {
     const response = await fetch(`${origin}${pathname}`, {
       method: 'POST',
@@ -1992,195 +2003,81 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     assert.equal(response.ok, true, `${pathname}: ${JSON.stringify(json)}`);
     return json;
   }
-
   try {
     const opened = await post('/v1/hwpx/documents/open', {
       source: { bytesRef: sourcePath },
       filename: 'ref_text.hwpx',
     });
-    assert.equal(opened.ok, true);
-    assert.equal(opened.fmt, 'hwpx');
+    assert.deepEqual(opened.capabilities.slice(0, 4), ['inspect', 'edit', 'review', 'save']);
+    assert.equal(new Set(opened.capabilities).size, opened.capabilities.length);
 
-    const semanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
+    const firstOutline = await post(`/v1/hwpx/documents/${opened.documentId}/inspect`, {
+      view: 'outline',
       limit: 1,
     });
-    assert.equal(semanticContext.returnedTargetCount, 1);
-    if (semanticContext.nextCursor) {
-      const nextSemanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
-        limit: 1,
-        cursor: semanticContext.nextCursor,
-      });
-      assert.notEqual(nextSemanticContext.targets[0].targetId, semanticContext.targets[0].targetId);
-      assert.equal(nextSemanticContext.totalTargetCount, semanticContext.totalTargetCount);
-    }
-    const completeSemanticContext = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/context`, {
+    assert.equal(firstOutline.returned, 1);
+    const fullOutline = await post(`/v1/hwpx/documents/${opened.documentId}/inspect`, {
+      view: 'outline',
       kind: 'paragraph',
       limit: 20,
     });
-    const semanticTarget = completeSemanticContext.targets.find((target) => target.text.trim().length > 0);
-    assert.ok(semanticTarget);
-    assert.equal(semanticTarget.styleFingerprint?.basis?.kind, 'paragraph');
-    const noOpPlan = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
+    const paragraph = fullOutline.items.find((item) => item.textLength > 0);
+    assert.ok(paragraph?.styleFingerprint?.hash);
+    const styles = await post(`/v1/hwpx/documents/${opened.documentId}/inspect`, {
+      view: 'styles',
+      baseRevision: opened.revision,
+      limit: 20,
+    });
+    assert.ok(styles.items.some((item) => item.scope === 'body-paragraph'));
+    const inspected = await post(`/v1/hwpx/documents/${opened.documentId}/inspect`, {
+      view: 'target',
+      locations: [paragraph.location],
+    });
+    assert.equal(inspected.targets.length, 1);
+
+    const staleEdit = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/edit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        baseRevision: completeSemanticContext.revision,
-        requirements: [{
-          id: 'no-op-title',
-          statement: 'Reject an unchanged title replacement.',
-          action: 'replace_text',
-          targetId: semanticTarget.targetId,
-          text: semanticTarget.text,
+        baseRevision: 999,
+        commands: [{
+          commandId: 'stale-edit',
+          op: 'text.replaceParagraph',
+          location: paragraph.location,
+          text: 'must not commit',
         }],
       }),
     });
-    assert.equal(noOpPlan.status, 422);
-    assert.equal((await noOpPlan.json()).code, 'semantic_noop_requirement');
-    const semanticPrepared = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
-      baseRevision: completeSemanticContext.revision,
-      requirements: [{
-        id: 'replace-title',
-        statement: 'Replace the title text.',
-        action: 'replace_fragment',
-        targetId: semanticTarget.targetId,
-        oldText: semanticTarget.text,
-        newText: `${semanticTarget.text} semantic plan`,
-      }],
-    });
-    const semanticExecuted = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/execute`, {
-      baseRevision: semanticPrepared.revision,
-      planId: semanticPrepared.planId,
-    });
-    assert.equal(semanticExecuted.ok, true, JSON.stringify(semanticExecuted));
-    assert.equal(semanticExecuted.receipt[0].postcondition.ok, true);
-    const semanticVerified = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/verify`, {
-      baseRevision: semanticExecuted.revision,
-      planId: semanticPrepared.planId,
-    });
-    assert.equal(semanticVerified.ok, true, JSON.stringify(semanticVerified));
-    assert.equal(semanticVerified.visual.allPagesNonBlank, true);
+    assert.equal(staleEdit.status, 409);
+    assert.equal((await staleEdit.json()).code, 'stale_revision');
 
-    const imagePrepared = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/prepare`, {
-      baseRevision: semanticExecuted.revision,
-      requirements: [{
-        id: 'insert-evidence-image',
-        statement: 'Insert one authenticated evidence image with a caption.',
-        action: 'insert_image_after',
-        targetId: semanticTarget.targetId,
-        bytesBase64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZQmcAAAAASUVORK5CYII=',
-        mimeType: 'image/png',
-        caption: 'Figure 1. Verified evidence image',
-        altText: 'A one-pixel semantic image fixture.',
-      }],
-    });
-    const imageExecuted = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/execute`, {
-      baseRevision: imagePrepared.revision,
-      planId: imagePrepared.planId,
-    });
-    assert.equal(imageExecuted.ok, true, JSON.stringify(imageExecuted));
-    assert.equal(imageExecuted.receipt[0].postcondition.ok, true);
-    const imageVerified = await post(`/v1/hwpx/documents/${opened.documentId}/semantic/verify`, {
-      baseRevision: imageExecuted.revision,
-      planId: imagePrepared.planId,
-    });
-    assert.equal(imageVerified.ok, true, JSON.stringify(imageVerified));
-
-    const docxOpened = await post('/v1/docx/documents/open', {
-      source: { bytesBase64: createDocxBytes({ paragraphs: ['DOCX isolation fixture'] }).toString('base64') },
-      filename: 'isolation.docx',
-    });
-    const hwpxIdOnDocxRoute = await fetch(
-      `${origin}/v1/docx/documents/${opened.documentId}/documents/read-json`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
-    );
-    const docxIdOnHwpxRoute = await fetch(
-      `${origin}/v1/hwpx/documents/${docxOpened.documentId}/documents/read-json`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
-    );
-    assert.equal(hwpxIdOnDocxRoute.status, 404);
-    assert.equal(docxIdOnHwpxRoute.status, 404);
-
-    const structure = await post(`/v1/hwpx/documents/${opened.documentId}/documents/read-json`, {});
-    assert.equal(structure.sourceFormat, 'hwpx');
-    const firstParagraph = structure.sections[0].paragraphs.find((paragraph) => paragraph.text.trim().length > 0);
-    assert.ok(firstParagraph);
-
-    const location = { paragraph: { section: firstParagraph.section, number: firstParagraph.para } };
-    const commandPayload = {
+    const edited = await post(`/v1/hwpx/documents/${opened.documentId}/edit`, {
+      baseRevision: opened.revision,
       commands: [{
-        commandId: 'gateway-smoke-replace',
+        commandId: 'canonical-api-edit',
         op: 'text.replaceParagraph',
-        location,
-        text: `${firstParagraph.text} API bridge`,
+        location: paragraph.location,
+        text: 'Canonical HWPX HTTP API verification',
       }],
-    };
-    const staleApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...commandPayload, baseRevision: 999 }),
     });
-    assert.equal(staleApply.status, 409);
-    assert.equal((await staleApply.json()).code, 'stale_revision');
-
-    const uninspectedApply = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...commandPayload, baseRevision: imageExecuted.revision }),
+    const review = await post(`/v1/hwpx/documents/${opened.documentId}/review`, {
+      baseRevision: edited.revision,
     });
-    assert.equal(uninspectedApply.status, 409);
-    assert.equal((await uninspectedApply.json()).code, 'inspection_required');
+    assert.equal(review.ok, true);
+    assert.equal(review.reviewedPages.length, review.quality.pageCount);
+    assert.ok(review.render.pages.every((page) => page.nonBlank));
 
-    for (const [fmt, documentId, prematurePath, baseRevision] of [
-      ['hwpx', opened.documentId, path.join(tempRoot, 'premature.hwpx'), imageExecuted.revision],
-      ['docx', docxOpened.documentId, path.join(tempRoot, 'premature.docx'), 1],
-    ]) {
-      const prematureSave = await fetch(`${origin}/v1/${fmt}/documents/${documentId}/documents/save-source`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseRevision, outputPath: prematurePath }),
-      });
-      if (fmt === 'hwpx') {
-        assert.equal(prematureSave.status, 200, 'semantic verification must satisfy the final quality gate');
-      } else {
-        assert.equal(prematureSave.status, 409);
-        assert.equal((await prematureSave.json()).code, 'quality_check_required');
-      }
-    }
-
-    const inspected = await post(`/v1/hwpx/documents/${opened.documentId}/target/inspect`, { locations: [location] });
-    assert.equal(inspected.targets.length, 1);
-
-    const command = await post(`/v1/hwpx/documents/${opened.documentId}/commands/apply`, {
-      ...commandPayload,
-      baseRevision: imageExecuted.revision,
-    });
-    assert.equal(command.revision, imageExecuted.revision + 1);
-
-    const quality = await post(`/v1/hwpx/documents/${opened.documentId}/quality/check`, { baseRevision: command.revision });
-    assert.equal(quality.ok, true);
-    assert.equal(quality.pageCount, structure.pageCount);
-
-    const rendered = await post(`/v1/hwpx/documents/${opened.documentId}/pages/render-all`, { pages: [1] });
-    assert.equal(rendered.renderer, 'rhwp-svg');
-    assert.equal(rendered.pages[0].nonBlank, true);
-
-    const renderedPage = await post(`/v1/hwpx/documents/${opened.documentId}/pages/render-page`, { page: 1 });
-    assert.equal(renderedPage.renderer, 'rhwp-svg');
-    assert.equal(renderedPage.page.page, 1);
-    assert.equal(renderedPage.page.nonBlank, true);
-    assert.equal(renderedPage.pages.length, 1);
-
-    const exported = await post(`/v1/hwpx/documents/${opened.documentId}/documents/export-pdf`, {
-      baseRevision: command.revision,
+    const exported = await post(`/v1/hwpx/documents/${opened.documentId}/export-pdf`, {
+      baseRevision: edited.revision,
     });
     assert.equal(exported.renderer, 'rhwp-native');
-    assert.equal(exported.mimeType, 'application/pdf');
     assert.equal(Buffer.from(exported.bytesBase64, 'base64').compare(FAKE_PDF_BYTES), 0);
 
-    const saved = await post(`/v1/hwpx/documents/${opened.documentId}/documents/save-source`, {
+    const saved = await post(`/v1/hwpx/documents/${opened.documentId}/save`, {
       outputPath,
       filename: 'bridge-smoke.hwpx',
-      baseRevision: command.revision,
+      baseRevision: edited.revision,
+      mode: 'verified',
     });
     assert.equal(saved.ok, true);
     assert.match(saved.sha256, /^[a-f0-9]{64}$/);
@@ -2189,9 +2086,8 @@ test('gateway exposes HWPX document API bridge for open, inspect, command, rende
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
-
-test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read, and delete workflow', async () => {
-  const tempRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-hwpx-mcp-'));
+test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle', async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), 'academic-editor-hwpx-canonical-mcp-'));
   const server = createGatewayServer({
     host: '127.0.0.1',
     port: 0,
@@ -2207,291 +2103,440 @@ test('gateway exposes guarded HWPX MCP open, inspect, apply, render, save, read,
     hwpxPdfRenderer: fakeHwpxPdfRenderer,
   });
   const address = await listen(server);
-  assert.equal(typeof address, 'object');
   const origin = `http://127.0.0.1:${address.port}`;
   const sourceBytes = await readFile(path.resolve('editor_hwpx/samples/hwpx/ref/ref_text.hwpx'));
-
-  async function mcp(id, name, argumentsValue) {
+  const fitSourceBytes = await readFile(path.resolve('editor_hwpx/samples/api-fixtures/esg-original.hwpx'));
+  const hwpSourceBytes = await readFile(path.resolve('editor_hwpx/samples/re-align-left-hancom.hwp'));
+  let artifact = null;
+  let pdfArtifact = null;
+  let requestId = 30_000;
+  const mcp = async (name, argumentsValue) => {
     const response = await fetch(`${origin}/mcp`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json, text/event-stream',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         jsonrpc: '2.0',
-        id,
+        id: requestId++,
         method: 'tools/call',
         params: { name, arguments: argumentsValue },
       }),
     });
     assert.equal(response.status, 200);
     return response.json();
-  }
+  };
 
-  let artifact;
-  let pdfArtifact;
   try {
-    const catalog = await mcp(1, 'editor_hwpx_command_catalog', { op: 'text.replaceParagraph' });
-    assert.equal(catalog.result.isError, false);
-    assert.equal(catalog.result.structuredContent.commands[0].op, 'text.replaceParagraph');
-
-    const openedCall = await mcp(2, 'editor_hwpx_open', {
+    const openedCall = await mcp('editor_hwpx_open', {
       filename: 'ref_text.hwpx',
       bytesBase64: sourceBytes.toString('base64'),
     });
     assert.equal(openedCall.result.isError, false, JSON.stringify(openedCall.result.structuredContent));
     const opened = openedCall.result.structuredContent;
-    assert.equal(opened.liveEditorSession.documentId, opened.documentId);
-    const semanticContextCall = await mcp(21, 'editor_hwpx_semantic_context', {
+    assert.match(opened.browserPresentation.url, /^http:\/\/127\.0\.0\.1(?::\d+)?\/hwpx\/\?/);
+
+    const catalogCall = await mcp('editor_hwpx_inspect', {
       documentId: opened.documentId,
-      kind: 'paragraph',
+      view: 'catalog',
+      op: 'table.autoFit',
+    });
+    assert.equal(catalogCall.result.structuredContent.commands[0].op, 'table.autoFit');
+
+    const outlineCall = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'outline',
       limit: 20,
     });
-    assert.equal(semanticContextCall.result.isError, false, JSON.stringify(semanticContextCall.result.structuredContent));
-    assert.ok(semanticContextCall.result.structuredContent.targets.every((target) => !Object.hasOwn(target, 'location')));
-    assert.ok(semanticContextCall.result.structuredContent.targets.some((target) => target.styleFingerprint?.basis?.kind === 'paragraph'));
-    const semanticCell = semanticContextCall.result.structuredContent.targets.find((target) => target.kind === 'cell');
-    if (semanticCell) {
-      assert.equal(Number.isInteger(semanticCell.cell?.row), true);
-      assert.equal(Number.isInteger(semanticCell.cell?.column), true);
-      assert.equal(Number.isInteger(semanticCell.cell?.index), true);
-    }
-    const semanticOpenedCall = await mcp(210, 'editor_hwpx_open', {
-      filename: 'semantic-apply.hwpx',
-      bytesBase64: sourceBytes.toString('base64'),
-    });
-    const semanticOpened = semanticOpenedCall.result.structuredContent;
-    const semanticApplyContext = await mcp(211, 'editor_hwpx_semantic_context', {
-      documentId: semanticOpened.documentId,
-      kind: 'paragraph',
+    const outline = outlineCall.result.structuredContent;
+    assert.equal(outline.revision, opened.revision);
+    const paragraph = outline.items.find((item) => item.kind === 'paragraph' && item.textLength > 0);
+    assert.ok(paragraph?.location);
+    assert.ok(paragraph.styleFingerprint?.hash);
+
+    const stylesCall = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'styles',
+      baseRevision: opened.revision,
       limit: 20,
     });
-    const semanticTarget = semanticApplyContext.result.structuredContent.targets.find(
-      (target) => target.kind === 'paragraph' && target.text,
-    );
-    assert.ok(semanticTarget);
-    const applyPlanCall = await mcp(212, 'editor_hwpx_apply_plan', {
-      documentId: semanticOpened.documentId,
-      baseRevision: semanticOpened.revision,
-      requirements: [{
-        id: 'replace-first-paragraph',
-        statement: '첫 문단을 수정한다.',
-        action: 'replace_text',
-        targetId: semanticTarget.targetId,
-        text: '반복 검토용 의미 편집',
+    assert.equal(stylesCall.result.isError, false, JSON.stringify(stylesCall.result.structuredContent));
+    assert.ok(stylesCall.result.structuredContent.items.length > 0);
+    assert.ok(stylesCall.result.structuredContent.items.every((item) => item.count > 0));
+
+    const inspectedBeforeEdit = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'target',
+      locations: [paragraph.location],
+    });
+    assert.equal(inspectedBeforeEdit.result.isError, false, JSON.stringify(inspectedBeforeEdit.result.structuredContent));
+
+    const pageCall = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'page',
+      page: 1,
+    });
+    const page = pageCall.result.structuredContent;
+    assert.equal(page.page, 1);
+    assert.equal(Object.hasOwn(page.render, 'svg'), false);
+    assert.ok(page.render.svgByteLength > 0);
+    assert.match(page.render.svgSha256, /^[a-f0-9]{64}$/);
+    assert.equal(page.targetCoverage.truncated, false);
+    assert.equal(page.targetCoverage.matchedPageTargets, page.targets.length);
+    const pageWithSvgCall = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'page',
+      page: 1,
+      includeSvg: true,
+    });
+    const pageWithSvg = pageWithSvgCall.result.structuredContent.render;
+    assert.equal(Buffer.byteLength(pageWithSvg.svg, 'utf8'), pageWithSvg.svgByteLength);
+    assert.equal(createHash('sha256').update(pageWithSvg.svg).digest('hex'), pageWithSvg.svgSha256);
+
+    const templateCall = await mcp('editor_hwpx_inspect', {
+      documentId: opened.documentId,
+      view: 'template',
+    });
+    assert.equal(templateCall.result.isError, false, JSON.stringify(templateCall.result.structuredContent));
+    assert.equal(templateCall.result.structuredContent.policy.protectedLocations.length, 0);
+    assert.match(templateCall.result.structuredContent.warning, /never silently protected or removed/i);
+    assert.equal(templateCall.result.structuredContent.suggestionPolicy, 'advisory-only; explicit templatePolicy remains authoritative');
+    assert.ok(Array.isArray(templateCall.result.structuredContent.suggestedRegions));
+
+    const protectedEditCall = await mcp('editor_hwpx_edit', {
+      documentId: opened.documentId,
+      baseRevision: opened.revision,
+      templatePolicy: { protectedLocations: [paragraph.location] },
+      commands: [{
+        commandId: 'reject-protected-edit',
+        op: 'text.replaceParagraph',
+        location: paragraph.location,
+        text: 'must not commit',
       }],
-      preserveUnmentioned: true,
     });
-    assert.equal(applyPlanCall.result.isError, false, JSON.stringify(applyPlanCall.result.structuredContent));
-    const appliedPlan = applyPlanCall.result.structuredContent;
-    assert.equal(appliedPlan.status, 'review_required');
-    assert.equal(appliedPlan.sessionClosed, false);
-    assert.ok(appliedPlan.revision > semanticOpened.revision);
-    const reviewedContext = await mcp(213, 'editor_hwpx_semantic_context', {
-      documentId: semanticOpened.documentId,
-      kind: 'paragraph',
-      limit: 20,
-    });
-    assert.ok(reviewedContext.result.structuredContent.targets.some(
-      (target) => target.targetId === semanticTarget.targetId && target.text === '반복 검토용 의미 편집',
-    ));
-    await mcp(214, 'editor_hwpx_discard', {
-      documentId: semanticOpened.documentId,
-      baseRevision: appliedPlan.revision,
-    });
-    const tableSource = await readFile(path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/public-form-template.hwpx'));
-    const tableOpenedCall = await mcp(22, 'editor_hwpx_open', {
-      filename: 'public-form-template.hwpx',
-      bytesBase64: tableSource.toString('base64'),
-    });
-    const tableContextCall = await mcp(23, 'editor_hwpx_semantic_context', {
-      documentId: tableOpenedCall.result.structuredContent.documentId,
-      kind: 'cell',
-      limit: 20,
-    });
-    const adjacentCell = tableContextCall.result.structuredContent.targets.find((target) => target.neighbors?.rightTargetId);
-    assert.ok(adjacentCell);
-    assert.ok(tableContextCall.result.structuredContent.targets.some((target) => target.targetId === adjacentCell.neighbors.rightTargetId));
-    const managerField = tableContextCall.result.structuredContent.targets.find((target) => target.text === '담당자');
-    assert.equal(managerField.formField?.labelTargetId, 'tbl_1_cell_4');
-    assert.equal(managerField.formField?.valueTargetId, 'tbl_1_cell_5');
-    const checkboxField = tableContextCall.result.structuredContent.targets.find(
-      (target) => target.text.includes('E(환경)/G(지배구조)') && target.text.includes('S(안전)'),
-    );
-    assert.ok(checkboxField);
-    const preparedResponse = await fetch(
-      `${origin}/v1/hwpx/documents/${tableOpenedCall.result.structuredContent.documentId}/semantic/prepare`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseRevision: tableOpenedCall.result.structuredContent.revision,
-          requirements: [
-            {
-              id: 'select-environment-governance',
-              statement: 'E(환경)/G(지배구조) 항목을 선택한다.',
-              action: 'select_checkbox',
-              targetId: checkboxField.targetId,
-              optionText: 'E(환경)/G(지배구조)',
-            },
-            {
-              id: 'select-safety',
-              statement: 'S(안전) 항목을 선택한다.',
-              action: 'select_checkbox',
-              targetId: checkboxField.targetId,
-              optionText: 'S(안전)',
-            },
-          ],
-        }),
-      },
-    );
-    const prepared = await preparedResponse.json();
-    assert.equal(preparedResponse.ok, true, JSON.stringify(prepared));
-    const executedResponse = await fetch(
-      `${origin}/v1/hwpx/documents/${tableOpenedCall.result.structuredContent.documentId}/semantic/execute`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseRevision: prepared.revision, planId: prepared.planId }),
-      },
-    );
-    const checkboxEdit = await executedResponse.json();
-    assert.equal(executedResponse.ok, true, JSON.stringify(checkboxEdit));
-    assert.equal(checkboxEdit.receipt.every((entry) => entry.postcondition.ok), true);
-    const updatedTableContextCall = await mcp(25, 'editor_hwpx_semantic_context', {
-      documentId: tableOpenedCall.result.structuredContent.documentId,
-      kind: 'cell',
-      limit: 20,
-    });
-    const updatedCheckboxField = updatedTableContextCall.result.structuredContent.targets.find(
-      (target) => target.targetId === checkboxField.targetId,
-    );
-    assert.match(updatedCheckboxField.text, /☑ E\(환경\)\/G\(지배구조\)/);
-    assert.match(updatedCheckboxField.text, /☑ S\(안전\)/);
-    await mcp(24, 'editor_hwpx_discard', {
-      documentId: tableOpenedCall.result.structuredContent.documentId,
-      baseRevision: checkboxEdit.revision,
-    });
-    const initialLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
-    assert.equal(initialLiveSource.status, 200);
-    assert.match(initialLiveSource.headers.get('content-type'), /application\/vnd\.hancom\.hwpx/);
-    const initialLiveBytes = Buffer.from(await initialLiveSource.arrayBuffer());
-    assert.equal(initialLiveBytes.subarray(0, 2).toString(), 'PK');
+    assert.equal(protectedEditCall.result.isError, true);
+    assert.equal(protectedEditCall.result.structuredContent.code, 'template_protected_region');
 
-    const structureCall = await mcp(3, 'editor_hwpx_read_json', {
-      documentId: opened.documentId,
-      view: 'blocks',
-      limit: 20,
-    });
-    assert.equal(structureCall.result.isError, false);
-    const firstBlock = structureCall.result.structuredContent.items.find((item) => item.textLength > 0);
-    assert.ok(firstBlock);
-
-    const inspectCall = await mcp(4, 'editor_hwpx_target_inspect', {
-      documentId: opened.documentId,
-      locations: [firstBlock.location],
-    });
-    assert.equal(inspectCall.result.isError, false, JSON.stringify(inspectCall.result.structuredContent));
-
-    const applyCall = await mcp(5, 'editor_hwpx_apply', {
+    const editCall = await mcp('editor_hwpx_edit', {
       documentId: opened.documentId,
       baseRevision: opened.revision,
       commands: [{
+        commandId: 'replace-first-body-paragraph',
         op: 'text.replaceParagraph',
-        location: firstBlock.location,
-        text: 'HWPX MCP 원자적 수정 검증',
+        location: paragraph.location,
+        text: 'Canonical HWPX MCP lifecycle verification',
       }],
     });
-    assert.equal(applyCall.result.isError, false, JSON.stringify(applyCall.result.structuredContent));
-    const revision = applyCall.result.structuredContent.revision;
-    const updatedLiveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
-    assert.equal(updatedLiveSource.status, 200);
-    const updatedLiveBytes = Buffer.from(await updatedLiveSource.arrayBuffer());
-    assert.notDeepEqual(updatedLiveBytes, initialLiveBytes);
+    assert.equal(editCall.result.isError, false, JSON.stringify(editCall.result.structuredContent));
+    const revision = editCall.result.structuredContent.revision;
 
-    const qualityCall = await mcp(6, 'editor_hwpx_quality_check', {
+    const targetCall = await mcp('editor_hwpx_inspect', {
       documentId: opened.documentId,
-      baseRevision: revision,
+      view: 'target',
+      locations: [paragraph.location],
     });
-    assert.equal(qualityCall.result.isError, false);
-    assert.equal(qualityCall.result.structuredContent.ok, true);
+    assert.equal(targetCall.result.structuredContent.targets[0].currentText, 'Canonical HWPX MCP lifecycle verification');
 
-    const renderCall = await mcp(7, 'editor_hwpx_render_pages', {
+    const visualPolicy = {
+      allowedTextColors: ['#000000'],
+      failOnColoredText: false,
+      failOnImageFlow: false,
+      minVerticalOccupancy: 0.01,
+    };
+
+    const reviewCall = await mcp('editor_hwpx_review', {
       documentId: opened.documentId,
       baseRevision: revision,
-      pages: [1],
-      includeBaseline: true,
+      visualPolicy,
     });
-    assert.equal(renderCall.result.isError, false, JSON.stringify(renderCall.result.structuredContent));
-    assert.equal(renderCall.result.structuredContent.baseline.pages[0].nonBlank, true);
-    assert.equal(renderCall.result.structuredContent.current.pages[0].nonBlank, true);
-
-    const exportCall = await mcp(8, 'editor_hwpx_export_pdf', {
+    assert.equal(reviewCall.result.isError, false, JSON.stringify(reviewCall.result.structuredContent));
+    assert.equal(reviewCall.result.structuredContent.ok, true);
+    assert.equal(reviewCall.result.structuredContent.reviewedPages.length, reviewCall.result.structuredContent.quality.pageCount);
+    assert.ok(reviewCall.result.structuredContent.render.pages.every((item) => !Object.hasOwn(item, 'svg')));
+    assert.ok(reviewCall.result.structuredContent.render.pages.every((item) => item.svgByteLength > 0 && /^[a-f0-9]{64}$/.test(item.svgSha256)));
+    const partialReviewCall = await mcp('editor_hwpx_review', {
       documentId: opened.documentId,
       baseRevision: revision,
-      filename: 'hwpx-mcp-output.pdf',
+      pages: [1, 999],
+      visualPolicy,
+    });
+    assert.deepEqual(partialReviewCall.result.structuredContent.reviewedPages, [1]);
+    assert.deepEqual(partialReviewCall.result.structuredContent.unavailablePages, [999]);
+    assert.deepEqual(partialReviewCall.result.structuredContent.render.unavailablePages, [999]);
+    const reviewWithSvgCall = await mcp('editor_hwpx_review', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      includeSvg: true,
+      visualPolicy,
+    });
+    const reviewPageWithSvg = reviewWithSvgCall.result.structuredContent.render.pages[0];
+    assert.equal(Buffer.byteLength(reviewPageWithSvg.svg, 'utf8'), reviewPageWithSvg.svgByteLength);
+    assert.equal(createHash('sha256').update(reviewPageWithSvg.svg).digest('hex'), reviewPageWithSvg.svgSha256);
+
+    const mismatchedPolicyExport = await mcp('editor_hwpx_export_pdf', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      filename: 'mismatched-policy.pdf',
+      visualPolicy: { ...visualPolicy, requireChapterPageBreak: true },
+    });
+    assert.equal(mismatchedPolicyExport.result.isError, true);
+    assert.equal(mismatchedPolicyExport.result.structuredContent.code, 'quality_visual_policy_required');
+
+    const exportCall = await mcp('editor_hwpx_export_pdf', {
+      documentId: opened.documentId,
+      baseRevision: revision,
+      filename: 'canonical-output.pdf',
+      visualPolicy: { ...visualPolicy, minVerticalOccupancy: 0.01 },
     });
     assert.equal(exportCall.result.isError, false, JSON.stringify(exportCall.result.structuredContent));
     pdfArtifact = exportCall.result.structuredContent;
     assert.equal(pdfArtifact.renderer, 'rhwp-native');
 
-    const pdfReadCall = await mcp(9, 'editor_hwpx_artifact_read', {
-      artifactId: pdfArtifact.artifactId,
-      expectedSha256: pdfArtifact.sha256,
-    });
-    assert.equal(pdfReadCall.result.isError, false);
-    assert.equal(pdfReadCall.result.structuredContent.mimeType, 'application/pdf');
-    assert.equal(Buffer.from(pdfReadCall.result.structuredContent.bytesBase64, 'base64').compare(FAKE_PDF_BYTES), 0);
-
-    const pdfDeleteCall = await mcp(10, 'editor_hwpx_artifact_delete', {
-      artifactId: pdfArtifact.artifactId,
-      expectedSha256: pdfArtifact.sha256,
-    });
-    assert.equal(pdfDeleteCall.result.isError, false);
-    pdfArtifact = null;
-
-    const saveCall = await mcp(11, 'editor_hwpx_save_source', {
+    const saveCall = await mcp('editor_hwpx_save', {
       documentId: opened.documentId,
       baseRevision: revision,
-      filename: 'hwpx-mcp-output.hwpx',
+      filename: 'canonical-output.hwpx',
+      mode: 'verified',
+      visualPolicy,
     });
     assert.equal(saveCall.result.isError, false, JSON.stringify(saveCall.result.structuredContent));
     artifact = saveCall.result.structuredContent;
+    assert.equal(artifact.sessionClosed, true);
+    assert.ok(artifact.byteLength > 0);
 
-    const readCall = await mcp(12, 'editor_hwpx_artifact_read', {
+    const wrongArtifactHash = `${artifact.sha256[0] === '0' ? '1' : '0'}${artifact.sha256.slice(1)}`;
+    const wrongHashReadCall = await mcp('editor_hwpx_artifact_read', {
+      artifactId: artifact.artifactId,
+      expectedSha256: wrongArtifactHash,
+    });
+    assert.equal(wrongHashReadCall.result.isError, true);
+    assert.equal(wrongHashReadCall.result.structuredContent.code, 'artifact_hash_mismatch');
+    const wrongHashDeleteCall = await mcp('editor_hwpx_artifact_delete', {
+      artifactId: artifact.artifactId,
+      expectedSha256: wrongArtifactHash,
+    });
+    assert.equal(wrongHashDeleteCall.result.isError, true);
+    assert.equal(wrongHashDeleteCall.result.structuredContent.code, 'artifact_hash_mismatch');
+
+    const readCall = await mcp('editor_hwpx_artifact_read', {
       artifactId: artifact.artifactId,
       expectedSha256: artifact.sha256,
     });
-    assert.equal(readCall.result.isError, false);
-    assert.equal(readCall.result.structuredContent.mimeType, 'application/vnd.hancom.hwpx');
+    assert.equal(Buffer.from(readCall.result.structuredContent.bytesBase64, 'base64').subarray(0, 2).toString(), 'PK');
+    await mcp('editor_hwpx_artifact_delete', {
+      artifactId: artifact.artifactId,
+      expectedSha256: artifact.sha256,
+    });
+    artifact = null;
+    await mcp('editor_hwpx_artifact_delete', {
+      artifactId: pdfArtifact.artifactId,
+      expectedSha256: pdfArtifact.sha256,
+    });
+    pdfArtifact = null;
+
+    const fitOpenedCall = await mcp('editor_hwpx_open', {
+      filename: 'fit-precondition.hwpx',
+      bytesBase64: fitSourceBytes.toString('base64'),
+    });
+    const fitOpened = fitOpenedCall.result.structuredContent;
+    const fitOutlineCall = await mcp('editor_hwpx_inspect', {
+      documentId: fitOpened.documentId,
+      view: 'outline',
+      kind: 'cell',
+      limit: 1,
+    });
+    const fitOutlineItem = fitOutlineCall.result.structuredContent.items[0];
+    assert.equal(typeof fitOutlineItem.pictureCount, 'number');
+    assert.ok(fitOutlineItem.allowedActions.includes('layout.fitText'));
+    const fitLocation = fitOutlineItem.location;
+    await mcp('editor_hwpx_inspect', {
+      documentId: fitOpened.documentId,
+      view: 'target',
+      locations: [fitLocation],
+    });
+    for (const commandId of ['fit-read-only-one', 'fit-read-only-two']) {
+      const fitCall = await mcp('editor_hwpx_edit', {
+        documentId: fitOpened.documentId,
+        baseRevision: fitOpened.revision,
+        commands: [{
+          commandId,
+          op: 'layout.fitText',
+          location: fitLocation,
+          text: 'alpha beta gamma delta',
+          options: { maxCharsPerLine: 8, maxLines: 3, truncate: false },
+        }],
+      });
+      assert.equal(fitCall.result.isError, false, JSON.stringify(fitCall.result.structuredContent));
+      assert.equal(fitCall.result.structuredContent.revision, fitOpened.revision);
+      assert.equal(fitCall.result.structuredContent.results[0].fit.changed, false);
+    }
+    const failedPolicyCall = await mcp('editor_hwpx_edit', {
+      documentId: fitOpened.documentId,
+      baseRevision: fitOpened.revision,
+      templatePolicy: { requiredTableIds: ['must-not-persist'] },
+      commands: [{
+        commandId: 'reject-lossy-fit',
+        op: 'layout.fitText',
+        location: fitLocation,
+        text: 'alpha beta gamma delta',
+        options: { maxCharsPerLine: 5, maxLines: 1, truncate: true },
+      }],
+    });
+    assert.equal(failedPolicyCall.result.isError, true);
+    assert.equal(failedPolicyCall.result.structuredContent.code, 'text_loss_not_authorized');
+    const fitTemplateCall = await mcp('editor_hwpx_inspect', {
+      documentId: fitOpened.documentId,
+      view: 'template',
+    });
+    assert.deepEqual(fitTemplateCall.result.structuredContent.policy.requiredTableIds, []);
+    await mcp('editor_hwpx_discard', {
+      documentId: fitOpened.documentId,
+      baseRevision: fitOpened.revision,
+    });
+
+    const hwpOpenedCall = await mcp('editor_hwpx_open', {
+      filename: 'source-preserved.hwp',
+      bytesBase64: hwpSourceBytes.toString('base64'),
+    });
+    const hwpOpened = hwpOpenedCall.result.structuredContent;
+    const hwpCatalogCall = await mcp('editor_hwpx_inspect', {
+      documentId: hwpOpened.documentId,
+      view: 'catalog',
+    });
+    const hwpCatalog = hwpCatalogCall.result.structuredContent;
+    assert.equal(hwpCatalog.sourceFormat, 'hwp');
+    assert.ok(hwpCatalog.availableCommandCount < hwpCatalog.commandCount);
+    assert.equal(hwpCatalog.commands.find(entry => entry.op === 'image.replace').readiness, 'unavailable-for-source-format');
+    assert.equal(hwpCatalog.commands.find(entry => entry.op === 'image.insertAfterParagraph').readiness, 'available');
+    const hwpOutlineCall = await mcp('editor_hwpx_inspect', {
+      documentId: hwpOpened.documentId,
+      view: 'outline',
+      kind: 'paragraph',
+      limit: 10,
+    });
+    const hwpParagraph = hwpOutlineCall.result.structuredContent.items.find((item) => item.textLength > 0);
+    await mcp('editor_hwpx_inspect', {
+      documentId: hwpOpened.documentId,
+      view: 'target',
+      locations: [hwpParagraph.location],
+    });
+    const hwpEditCall = await mcp('editor_hwpx_edit', {
+      documentId: hwpOpened.documentId,
+      baseRevision: hwpOpened.revision,
+      commands: [
+        {
+          commandId: 'preserve-hwp-source-format',
+          op: 'text.replaceParagraph',
+          location: hwpParagraph.location,
+          text: `X${hwpParagraph.text.slice(1)}`,
+        },
+        {
+          commandId: 'format-hwp-paragraph-through-mcp',
+          op: 'format.apply',
+          scope: 'paragraph',
+          target: hwpParagraph.location,
+          properties: { alignment: 'center', lineSpacingType: 'Percent', lineSpacing: 175 },
+        },
+      ],
+    });
+    const hwpRevision = hwpEditCall.result.structuredContent.revision;
+    const hwpReviewCall = await mcp('editor_hwpx_review', {
+      documentId: hwpOpened.documentId,
+      baseRevision: hwpRevision,
+    });
+    assert.equal(hwpReviewCall.result.structuredContent.ok, true, JSON.stringify(hwpReviewCall.result.structuredContent));
+    const hwpSaveCall = await mcp('editor_hwpx_save', {
+      documentId: hwpOpened.documentId,
+      baseRevision: hwpRevision,
+      filename: 'source-preserved.hwp',
+      mode: 'verified',
+    });
+    assert.equal(hwpSaveCall.result.isError, false, JSON.stringify(hwpSaveCall.result.structuredContent));
+    artifact = hwpSaveCall.result.structuredContent;
+    const hwpReadCall = await mcp('editor_hwpx_artifact_read', {
+      artifactId: artifact.artifactId,
+      expectedSha256: artifact.sha256,
+    });
+    assert.equal(hwpReadCall.result.isError, false, JSON.stringify(hwpReadCall.result.structuredContent));
+    assert.equal(hwpReadCall.result.structuredContent.mimeType, 'application/x-hwp');
     assert.equal(
-      Buffer.from(readCall.result.structuredContent.bytesBase64, 'base64').subarray(0, 2).toString('hex'),
-      '504b',
+      Buffer.from(hwpReadCall.result.structuredContent.bytesBase64, 'base64').subarray(0, 8).toString('hex'),
+      'd0cf11e0a1b11ae1',
     );
-
-    const deleteCall = await mcp(13, 'editor_hwpx_artifact_delete', {
+    await mcp('editor_hwpx_artifact_delete', {
       artifactId: artifact.artifactId,
       expectedSha256: artifact.sha256,
     });
-    assert.equal(deleteCall.result.isError, false);
-    assert.equal(deleteCall.result.structuredContent.deleted, true);
     artifact = null;
   } finally {
-    if (pdfArtifact) {
-      await mcp(14, 'editor_hwpx_artifact_delete', {
-        artifactId: pdfArtifact.artifactId,
-        expectedSha256: pdfArtifact.sha256,
-      }).catch(() => undefined);
-    }
-    if (artifact) {
-      await mcp(15, 'editor_hwpx_artifact_delete', {
-        artifactId: artifact.artifactId,
-        expectedSha256: artifact.sha256,
-      }).catch(() => undefined);
-    }
+    if (artifact) await mcp('editor_hwpx_artifact_delete', {
+      artifactId: artifact.artifactId,
+      expectedSha256: artifact.sha256,
+    }).catch(() => undefined);
+    if (pdfArtifact) await mcp('editor_hwpx_artifact_delete', {
+      artifactId: pdfArtifact.artifactId,
+      expectedSha256: pdfArtifact.sha256,
+    }).catch(() => undefined);
     await close(server);
     await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('loopback HWPX Browser presentation reads live session bytes without exposing the MCP bearer token', async () => {
+  const gatewayPort = await reservePort();
+  const origin = `http://127.0.0.1:${gatewayPort}`;
+  const server = createGatewayServer({
+    host: '127.0.0.1',
+    port: gatewayPort,
+    publicOrigin: origin,
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    docxRuntimeOrigin: 'http://127.0.0.1:9980',
+    hwpxRuntimeOrigin: '',
+    hwpxStaticRoot: '',
+    wopiBaseUrl: origin,
+    sampleDocxPath: path.join(tmpdir(), 'sample.docx'),
+    enableSampleDocx: false,
+    internalBearerToken: 'loopback-browser-presentation-test-token',
+  });
+  await listen(server, gatewayPort);
+  const sourceBytes = await readFile(path.resolve('editor_hwpx/samples/hwpx/ref/ref_text.hwpx'));
+
+  try {
+    const openedResponse = await fetch(`${origin}/mcp`, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer loopback-browser-presentation-test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'editor_hwpx_open',
+          arguments: {
+            filename: 'live-side-panel.hwpx',
+            bytesBase64: sourceBytes.toString('base64'),
+          },
+        },
+      }),
+    });
+    assert.equal(openedResponse.status, 200);
+    const openedPayload = await openedResponse.json();
+    const opened = openedPayload.result.structuredContent;
+    assert.equal(opened.browserPresentation.url.startsWith(`${origin}/hwpx/?`), true);
+
+    const liveSource = await fetch(`${origin}${opened.liveEditorSession.sourcePath}`);
+    assert.equal(liveSource.status, 200);
+    assert.deepEqual(Buffer.from(await liveSource.arrayBuffer()), sourceBytes);
+
+    const guardedRead = await fetch(`${origin}/v1/hwpx/documents/${opened.documentId}/read-json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ view: 'summary' }),
+    });
+    assert.equal(guardedRead.status, 401);
+  } finally {
+    await close(server);
   }
 });
 
