@@ -27,6 +27,29 @@ test('HWPX API preserve save returns original bytes when no commands run', async
   assert.equal(saved.validation.pageCount, 2);
 });
 
+test('HWP field values are parsed, updated atomically, and verified after reopen', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/field-01-memo.hwp'));
+  const fields = session.readJson().fields;
+  assert.ok(Array.isArray(fields));
+  assert.ok(fields.length > 0);
+  const target = fields[0];
+
+  const result = session.commandsBatch([{
+    op: 'field.setValues',
+    values: [{ fieldId: target.fieldId, value: 'FIELD-MCP-VERIFIED' }],
+  }]);
+  assert.equal(result.results[0].changed, 1);
+  assert.equal(result.qualification.ok, true);
+
+  const reopened = new HwpxApiSession(session.save().bytes).readJson();
+  assert.equal(reopened.sourceFormat, 'hwp');
+  assert.equal(
+    reopened.fields.find((field) => field.fieldId === target.fieldId).value,
+    'FIELD-MCP-VERIFIED',
+  );
+});
+
 test('HWP source opens, edits, saves, and reopens without forced HWPX conversion', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/re-align-left-hancom.hwp');
@@ -312,7 +335,7 @@ test('HWPX API reports encrypted public-sector packages with an actionable error
   );
 });
 
-test('HWPX API keeps legacy setCellText compatibility for existing callers', async () => {
+test('HWPX API writes a canonical table cell command and verifies reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync(ESG_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
@@ -321,7 +344,7 @@ test('HWPX API keeps legacy setCellText compatibility for existing callers', asy
   session.commandsBatch([
     {
       opId: 'receipt',
-      op: 'setCellText',
+      op: 'table.writeCell',
       target: { tableId: table.id, tableCell: { cellIndex: 1 } },
       text: 'ESG-TEST-001',
     },
@@ -1089,7 +1112,7 @@ test('HWPX API image.generateAndReplace creates a PNG package replacement and re
   assert.notEqual(imageBytes.length, firstImage.byteLength);
 });
 
-test('HWPX API accepts intuitive table command names and parameters', async () => {
+test('HWPX API accepts exact canonical table commands and parameters', async () => {
   await initHwpxRuntime();
   const input = readFileSync(ESG_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
@@ -1098,8 +1121,7 @@ test('HWPX API accepts intuitive table command names and parameters', async () =
   session.apply([
     {
       commandId: 'receipt',
-      group: 'table',
-      action: 'writeCell',
+      op: 'table.writeCell',
       location: { tableId: table.id, cell: { number: 1 } },
       text: 'ESG-NEW-001',
     },
@@ -1242,8 +1264,8 @@ test('HWPX API structural batches qualify, reopen, and commit exactly once', asy
 
   const result = session.commandsBatch([
     {
-      commandId: 'canonicalized-insert',
-      op: 'text.insert',
+      commandId: 'canonical-insert',
+      op: 'insertText',
       target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
       text: marker,
     },
@@ -1260,7 +1282,7 @@ test('HWPX API structural batches qualify, reopen, and commit exactly once', asy
   assert.equal(result.revision, beforeRevision + 1);
   assert.equal(session.revision, beforeRevision + 1);
   assert.equal(result.results.length, 2);
-  assert.equal(result.results[0].opId, 'canonicalized-insert');
+  assert.equal(result.results[0].opId, 'canonical-insert');
   assert.equal(result.results[0].op, 'insertText');
   assert.equal(result.qualification.ok, true);
   assert.ok(result.validation.pageCount >= 1);

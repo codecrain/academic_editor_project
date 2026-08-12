@@ -14,6 +14,6 @@
     "smoke": "node scripts/smoke-studio.mjs"
   },
   "dependencies": {
-    "@rhwp/core": "0.7.15"
+    "@rhwp/core": "0.8.4"
   }
 }

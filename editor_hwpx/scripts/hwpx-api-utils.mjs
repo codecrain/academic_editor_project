@@ -131,7 +131,10 @@ export async function extractRhwpText(bytesLike, { maxTextChars = 200_000 } = {}
 }
 
 function parseResult(value, label = 'api') {
-  const parsed = typeof value === 'string' && value.trim().startsWith('{') ? JSON.parse(value) : value;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  const parsed = typeof value === 'string' && (trimmed.startsWith('{') || trimmed.startsWith('['))
+    ? JSON.parse(trimmed)
+    : value;
   if (parsed && typeof parsed === 'object' && parsed.ok === false) {
     throw new Error(`${label} failed: ${JSON.stringify(parsed)}`);
   }
@@ -2503,10 +2506,9 @@ function restoreCellParagraphTemplate(doc, table, cellIndex, paragraphIndex, tem
       { cellIndex, paragraphIndex, styleId, paraShapeId, charShapeId },
     );
   }
-  // RHWP v0.8.4 retains the public style command but no longer exposes the
-  // private three-ID helper. A named style owns the same paragraph and
-  // character references, so route the compatibility path through the public
-  // API instead of coupling the gateway to an internal WASM method.
+  // Prefer exact paragraph/character/style identity restoration. Runtimes that
+  // expose only named-style application use that public operation as the
+  // source-format-safe fallback.
   const applyStyle = typeof doc.applyCellStyleIds === 'function'
     ? () => doc.applyCellStyleIds(
       table.section, table.para, table.control, cellIndex, paragraphIndex,
@@ -3573,6 +3575,7 @@ export class HwpxApiSession {
     assert.ok(kind === null || kind === 'paragraph' || kind === 'cell', 'resolveText kind must be paragraph or cell');
     const hits = parseResult(this.doc.searchAllText(query, caseSensitive, options.includeCells ?? true), 'searchAllText');
     const matches = (Array.isArray(hits) ? hits : hits.matches ?? [])
+      .filter((item) => item?.kind === 'paragraph' || item?.kind === 'cell')
       .filter((item) => kind === null || item?.kind === kind)
       .filter((item) => !exact || String(item?.text ?? '').trim() === rawQuery.trim());
     const occurrence = options.occurrence ?? 1;
@@ -4068,6 +4071,60 @@ export class HwpxApiSession {
     for (const [opIndex, sourceOp] of ops.entries()) {
       const entry = resolveHwpxCommand(sourceOp);
       const hwpSource = !isZipPackage(working.inputBytes);
+      if (entry?.op === 'field.setValues') {
+        flushStructural();
+        const fields = tryJson(() => working.doc.getFieldList()) ?? [];
+        const updated = [];
+        for (const requested of sourceOp.values) {
+          let field;
+          if (requested.fieldId !== undefined) {
+            field = fields.find(item => Number(item.fieldId) === Number(requested.fieldId));
+            assert.ok(field, `field.setValues fieldId was not found: ${requested.fieldId}`);
+          } else {
+            const name = String(requested.name).trim();
+            const matches = fields.filter(item => String(item.name ?? '') === name);
+            assert.ok(matches.length > 0, `field.setValues name was not found: ${name}`);
+            if (requested.occurrence === undefined) {
+              assert.equal(matches.length, 1, `field.setValues name is ambiguous; provide occurrence: ${name}`);
+              [field] = matches;
+            } else {
+              field = matches[Number(requested.occurrence)];
+              assert.ok(field, `field.setValues occurrence is out of range: ${name}[${requested.occurrence}]`);
+            }
+          }
+          const result = parseResult(
+            working.doc.setFieldValue(Number(field.fieldId), requested.value),
+            'setFieldValue',
+          );
+          updated.push({
+            fieldId: Number(field.fieldId),
+            name: String(field.name ?? ''),
+            oldValue: result?.oldValue ?? field.value ?? '',
+            newValue: requested.value,
+          });
+        }
+        const materialized = materializeStructuralTrial(working);
+        const reopenedFields = tryJson(() => materialized.reopened.doc.getFieldList()) ?? [];
+        for (const expected of updated) {
+          const actual = reopenedFields.find(item => Number(item.fieldId) === expected.fieldId);
+          if (!actual || String(actual.value ?? '') !== expected.newValue) {
+            throw structuralBatchError(
+              'HWPX_FIELD_VALUE_REOPEN_MISMATCH',
+              'A field value did not survive save and reopen exactly.',
+              { expected, actual: actual ?? null },
+            );
+          }
+        }
+        qualifications.push(materialized.qualification);
+        working = materialized.reopened;
+        results.push({
+          opId: commandId(sourceOp, opIndex),
+          op: entry.op,
+          changed: updated.filter(item => item.oldValue !== item.newValue).length,
+          fields: updated,
+        });
+        continue;
+      }
       if (!hwpSource && entry?.op === 'table.structure' && sourceOp.action === 'deleteTable') {
         flushStructural();
         const before = working.exportJson();

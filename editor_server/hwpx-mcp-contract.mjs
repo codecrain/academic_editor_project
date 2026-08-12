@@ -25,6 +25,11 @@ const HWPX_MCP_INSPECT_VIEWS = Object.freeze([
   'page',
   'quality',
   'catalog',
+  'search',
+  'fields',
+  'security',
+  'history',
+  'capabilities',
 ]);
 
 const HWPX_MCP_SAVE_MODES = Object.freeze(['verified', 'checkpoint']);
@@ -38,9 +43,9 @@ const HWPX_MCP_LIFECYCLE = Object.freeze([
 ]);
 
 const ACADEMIC_EDITOR_MCP_INSTRUCTIONS = [
-  'Academic Editor MCP is revision-bound. For HWP/HWPX use editor_hwpx_open, then editor_hwpx_inspect(summary, catalog, and every exact target or objects), editor_hwpx_edit at the exact current revision, re-inspect changed targets, editor_hwpx_review with all pages, and editor_hwpx_save(mode="verified"). Read and hash the artifact, then delete it; discard every unfinished session.',
+  'Academic Editor MCP is revision-bound. For HWP/HWPX use editor_hwpx_open, inspect summary and capabilities, inspect every exact target, object, or field inventory needed by the edit, apply one atomic editor_hwpx_edit batch at the exact current revision, inspect history and changed targets, run editor_hwpx_review over every page, and finish with editor_hwpx_save(mode="verified"). Read and hash the artifact, then delete it; discard every unfinished session.',
   'When editor_hwpx_open returns browserPresentation.url, open that exact loopback URL as a read-only presentation and reload the same page after each successful revision-changing edit.',
-  'Never call removed HWPX read/map/find/apply/quality/render/save_source tools and never infer a command property that is absent from the current catalog.',
+  'The nine lifecycle tools are the complete public HWP/HWPX surface. Discover fine-grained commands and integrated search, field, security, history, and verification controls through editor_hwpx_inspect instead of inventing additional tool names or command properties.',
   'For binary HWP and HWPX table.writeCell, preserve each newline-delimited paragraph with paragraphTemplateIndices when paragraph roles differ. Character or paragraph formatting of a multi-paragraph cell must specify cellParagraphIndex; ambiguous cell-wide paragraph formatting fails closed.',
   'table.autoFit is guarded by reopened document-level pagination budgets. Keep maxPageGrowth, maxBlankPageGrowth, and maxLowOccupancyGrowth conservative, and use render-cell-clip targetId/tableId/location provenance for exact repair instead of parsing clip IDs heuristically.',
   'Use inspect(template) suggestions only as evidence, submit explicit templatePolicy roles, and use review(profile="submission", visualPolicy={...}) before presenting a form or application as submission-ready; visualPolicy is the only place to declare allowed text colors, image flow, sparse-page, heading-flow, and body-style expectations.',

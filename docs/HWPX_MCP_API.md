@@ -1,8 +1,8 @@
 # HWPX MCP/API contract
 
-Academic Editor exposes one revision-bound HWP/HWPX lifecycle through Streamable HTTP at `/mcp` and through the canonical HTTP actions under `/v1/hwpx/documents/{documentId}`. The historical `hwpx` route/tool prefix names the editor module, not a forced output conversion.
+Academic Editor exposes one revision-bound HWP/HWPX lifecycle through Streamable HTTP at `/mcp` and through the canonical HTTP actions under `/v1/hwpx/documents/{documentId}`. The `hwpx` route/tool prefix identifies the editor module; verified output preserves the opened source format.
 
-Contract version: `2.4.0`
+Contract version: `3.0.0`
 
 The executable identity is `academic-editor-mcp`. It supports MCP protocol
 versions `2025-06-18` and `2025-03-26`, preferring `2025-06-18`. The canonical
@@ -25,7 +25,26 @@ editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 ```
 
-Call `tools/list` for the exact JSON Schema. HWPX intentionally does not mirror the fragmented DOCX/PDF read-map-find API. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. It currently contains 41 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. It currently contains 42 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+
+## Integrated capability model
+
+The public surface is one state machine rather than parallel editor APIs:
+
+| Capability family | Canonical surface |
+| --- | --- |
+| Document identity and lifecycle | `open`, revision-bound sessions, `discard` |
+| Structure and discovery | `inspect(summary|outline|styles|targets|target|search|fields|objects|page|template)` |
+| Fine-grained mutation | `edit` with exact catalog operations, atomic batches, target/object/field preconditions |
+| Field and form work | `inspect(fields)` plus `field.setValues`, verified after save/reopen |
+| Security and trust | `inspect(security)`, `securityPolicy`, explicit hidden-text/prompt-injection/Unicode evidence |
+| Semantic acceptance | `expectations` for source format, page/table/text/field assertions |
+| Provenance | `inspect(history)`, command receipts, revision transitions, semantic digests |
+| Layout and quality | `inspect(quality|page)`, full-page `review`, clipping and visual-policy evidence |
+| Final artifacts | policy-bound verified `save`, `export_pdf`, hash-bound artifact read/delete |
+| Self-description | `inspect(capabilities|catalog)` generated from the executable contract |
+
+Engine-level methods are adapters behind this state machine. They do not form a second public MCP surface.
 
 ## Tool effects and input contract
 
@@ -34,9 +53,9 @@ Call `tools/list` for the exact JSON Schema. HWPX intentionally does not mirror 
 | `editor_hwpx_open` | `filename` and exactly one of `bytesBase64`/`bytesRef` | none | Creates an isolated session; not read-only or idempotent. |
 | `editor_hwpx_inspect` | `documentId`, `view` | current `baseRevision`, filters, bounded cursor/limits | Read-only and idempotent. |
 | `editor_hwpx_edit` | `documentId`, `baseRevision`, `commands` | `templatePolicy`; per-command `assetRef`/`styleRef` | Atomically applies the batch. Mutation advances the revision; a `layout.fitText`-only batch is read-only and preserves it. |
-| `editor_hwpx_review` | `documentId`, `baseRevision` | `pages`, `includeBaseline`, opt-in `includeSvg`, `profile`, `visualPolicy` | Read-only document review; records the accepted current-revision review. |
-| `editor_hwpx_save` | `documentId`, `baseRevision`, `filename` | `mode=verified|checkpoint` | Creates an artifact and returns SHA-256 plus `byteLength`; verified save closes the session. |
-| `editor_hwpx_export_pdf` | `documentId`, `baseRevision` | PDF `filename` | Creates a PDF artifact without closing the edit session. |
+| `editor_hwpx_review` | `documentId`, `baseRevision` | `pages`, `includeBaseline`, opt-in `includeSvg`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Read-only document review; records the accepted current-revision review and exact finalization policy. |
+| `editor_hwpx_save` | `documentId`, `baseRevision`, `filename` | `mode=verified|checkpoint`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates an artifact and returns SHA-256 plus `byteLength`; verified save closes the session. |
+| `editor_hwpx_export_pdf` | `documentId`, `baseRevision` | PDF `filename`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates a PDF artifact without closing the edit session. |
 | `editor_hwpx_discard` | `documentId`, `baseRevision` | none | Destructively closes the session; idempotent. |
 | `editor_hwpx_artifact_read` | `artifactId`, `expectedSha256` | none | Reads HWP/HWPX/PDF artifact bytes; read-only. |
 | `editor_hwpx_artifact_delete` | `artifactId`, `expectedSha256` | none | Destructively deletes the verified artifact. |
@@ -46,18 +65,10 @@ the exact current integer revision, never a caller-generated sequence. An edit
 batch contains 1–100 commands; every command has a unique stable `commandId`
 and an `op` from the live catalog. Unknown top-level tool arguments are rejected.
 
-The removed HWPX MCP tools are not aliases and must never be called:
-`editor_hwpx_read_json`, `editor_hwpx_target_map`,
-`editor_hwpx_target_find`, `editor_hwpx_target_inspect`,
-`editor_hwpx_object_inventory`, `editor_hwpx_command_catalog`,
-`editor_hwpx_apply`, `editor_hwpx_quality_check`,
-`editor_hwpx_render_pages`, `editor_hwpx_save_source`, and
-`editor_hwpx_save_checkpoint`.
-
 ## Lifecycle
 
 1. Open exact bytes with `editor_hwpx_open`. Keep the returned opaque `documentId` and `revision`.
-2. Inspect `summary`, then page through `outline` and `styles`. Inspect every exact mutation target with `view="target"`; inspect `objects` before object commands.
+2. Inspect `summary` and `capabilities`, then page through the views needed by the task. Inspect every exact mutation target with `view="target"`, inspect `objects` before object commands, and inspect `fields` before `field.setValues`.
 3. Apply one atomic catalog command batch with `editor_hwpx_edit`. Every command needs a stable `commandId` and canonical `op`.
 
 ```json
@@ -76,8 +87,8 @@ The removed HWPX MCP tools are not aliases and must never be called:
 ```
 
 4. Reload the returned `browserPresentation.url` after each successful revision-changing call when using the Codex in-app Browser.
-5. Run `editor_hwpx_review` at the current revision. It checks structure, actual rendered cell clipping, pagination, and every requested page (all pages by default).
-6. Save with `editor_hwpx_save(mode="verified", profile="submission")` for a deliverable. Verified save preserves the source format (`.hwp` remains HWP; `.hwpx` remains HWPX), requires a clean current-revision review with the same profile, and performs save/reopen/hash/render checks. `checkpoint` is recovery-only.
+5. Inspect `history`, then run `editor_hwpx_review` at the current revision. It checks structure, actual rendered cell clipping, pagination, every requested page (all pages by default), caller expectations, and security policy.
+6. Save with `editor_hwpx_save(mode="verified", profile="submission")` for a deliverable. Verified save preserves the source format (`.hwp` remains HWP; `.hwpx` remains HWPX), requires a clean current-revision review with the same profile and policy inputs, and performs save/reopen/hash/render checks. `checkpoint` is recovery-only.
 
 Binary HWP uses native structural operations and is never silently converted to HWPX. Commands that depend on HWPX package XML (existing-image byte replacement, package-level picture cloning, tracked-change XML, and XML-only convenience style cloning) fail explicitly with `HWP_COMMAND_REQUIRES_HWPX_PACKAGE`. Native `setRunStyle`, `setParagraphStyle`, `applyStyle`, table resize/row insertion, paragraph insertion, and new-image insertion remain available for HWP.
 
@@ -97,6 +108,11 @@ On cancellation or failed validation, call `editor_hwpx_discard`.
 - `page`: one rendered page with dimensions, content bounds, vertical occupancy, density/readability metrics, and document-wide-scanned target linkage. The response reports matched/returned/truncated target counts. Inline SVG is opt-in; the default returns its byte length and SHA-256.
 - `quality`: structural, semantic, submission-readiness, actual rendered-layout findings, and explicit visual-policy findings. Use `profile="submission"` when the artifact is meant to be submitted.
 - `catalog`: canonical command definitions, readiness, required native methods, and examples.
+- `search`: bounded exact text matches with target locations and surrounding context.
+- `fields`: bounded field inventory with stable IDs, names, values, and duplicate-name occurrence order.
+- `security`: hidden-text, prompt-injection, and Unicode-deception evidence with explicit severities.
+- `history`: revision-bound mutation receipts and before/after semantic digests.
+- `capabilities`: the current nine-tool lifecycle, inspection views, live command catalog, and integrated capability families.
 
 All list-like views use opaque revision-bound cursors. Do not alter a cursor or reuse it after a revision change.
 
@@ -119,14 +135,14 @@ Every `render-cell-clip` issue includes renderer provenance and, when the curren
 
 An image command can use `assetRef={documentId,imageName}` while both HWP/HWPX sessions are open. The gateway reads the exact inventoried source bytes and records SHA-256, length, MIME, source, and target in `resourceTransfers`. `format.apply` can use `styleRef={documentId,location,scope}` to transfer measured properties rather than unsafe source-local style IDs.
 
-Review renders each current page once, reports clipping plus page/font/line/image/content-bound/occupancy metrics, and reuses that evidence. `profile="submission"` additionally blocks unresolved placeholders, dummy identifiers, explicit required blanks, explicit instruction remnants, and paper/page-anchored floating-image flow risks. The optional `visualPolicy` is the single place to declare editorial expectations: `allowedTextColors` (default black), `failOnColoredText`, `failOnImageFlow`, `failOnSparsePages`/`minVerticalOccupancy`, `requireChapterPageBreak`, `requireHeadingKeepWithNext`, `expectedBodyFont`, `expectedBodyFontSizePt`, and `failOnStyleVariance`. Colored text and image geometry are warnings in structural review but become submission errors by default; heading/style rules become errors only when explicitly enabled. This makes blue instruction text, left-floating images, sparse pages, and missing chapter flow controls observable without guessing protected regions. Sparse pages and incomplete date/signature fields remain visible warnings unless the caller enables the corresponding visual policy. A verified HWPX save/export must repeat the exact visual policy that passed the current-revision review; changing or omitting it fails closed with `quality_visual_policy_required`. MCP responses always return `svgByteLength` and `svgSha256`; `includeSvg=true` additionally returns the exact inline SVG without removing that evidence. Requested pages that do not exist are returned in `unavailablePages` with or without baseline comparison instead of being silently omitted or fabricated.
+Review renders each current page once, reports clipping plus page/font/line/image/content-bound/occupancy metrics, and reuses that evidence. `profile="submission"` additionally blocks unresolved placeholders, dummy identifiers, explicit required blanks, explicit instruction remnants, and paper/page-anchored floating-image flow risks. The optional `visualPolicy` is the single place to declare editorial layout expectations: `allowedTextColors` (default black), `failOnColoredText`, `failOnImageFlow`, `failOnSparsePages`/`minVerticalOccupancy`, `requireChapterPageBreak`, `requireHeadingKeepWithNext`, `expectedBodyFont`, `expectedBodyFontSizePt`, and `failOnStyleVariance`. `expectations` verifies semantic outcomes such as page/table counts, source format, required or forbidden text, and exact field values. `securityPolicy` controls whether hidden text, prompt-injection evidence, or Unicode deception blocks finalization. Colored text and image geometry are warnings in structural review but become submission errors by default; heading/style rules become errors only when explicitly enabled. A verified HWPX save/export must repeat the exact profile, visual policy, expectations, and security policy accepted by the current-revision review; a mismatch fails closed with `quality_profile_required`, `quality_visual_policy_required`, or `quality_agent_policy_required`. MCP responses always return `svgByteLength` and `svgSha256`; `includeSvg=true` additionally returns the exact inline SVG without removing that evidence. Requested pages that do not exist are returned in `unavailablePages` with or without baseline comparison instead of being silently omitted or fabricated.
 
 ## Stable failure codes
 
 - Cursor integrity and revision failures: `invalid_cursor`, `cursor_query_mismatch`, `stale_cursor`.
 - Artifact type/hash failures: `artifact_format_mismatch`, `artifact_hash_mismatch`.
 - Template classification failures: `template_policy_conflict`, `template_required_table`, `template_required_image`, `template_protected_region`.
-- Finalization precondition failures: `quality_check_required`, `quality_profile_required`, `quality_visual_policy_required`.
+- Finalization precondition failures: `quality_check_required`, `quality_profile_required`, `quality_visual_policy_required`, `quality_agent_policy_required`.
 - Bounded fitting failures retain engine codes such as `HWPX_AUTOFIT_PAGE_CONSTRAINT_EXCEEDED` and `HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION` instead of collapsing to `tool_execution_failed`.
 
 Every failed edit is atomic: revision, live-source bytes, and previously active template policy remain unchanged.
@@ -181,7 +197,7 @@ POST /v1/hwpx/documents/{documentId}/discard
 GET  /v1/hwpx/documents/{documentId}/live-source
 ```
 
-The former HWPX `read-json`, target-map/find/inspect, semantic-plan, raw quality/render, and split save routes are removed. Internal engine modules may still expose lower-level methods, but they are not public HTTP/MCP contracts.
+These lifecycle routes are the complete public HWP/HWPX HTTP contract. Internal engine modules are implementation details and are not separate public editor APIs.
 
 ## Diagnostic trace
 

@@ -201,9 +201,10 @@ test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', a
   assert.ok(opEnum.includes('object.replaceTextBoxText'));
   assert.ok(opEnum.includes('setDocumentMetadata'));
   assert.ok(opEnum.includes('table.autoFit'));
+  assert.ok(opEnum.includes('field.setValues'));
   assert.deepEqual(
     tools.get('editor_hwpx_inspect').inputSchema.properties.view.enum,
-    ['summary', 'outline', 'styles', 'targets', 'target', 'objects', 'template', 'page', 'quality', 'catalog'],
+    ['summary', 'outline', 'styles', 'targets', 'target', 'objects', 'template', 'page', 'quality', 'catalog', 'search', 'fields', 'security', 'history', 'capabilities'],
   );
   assert.equal(tools.has('editor_hwpx_semantic_context'), false);
   assert.equal(tools.has('editor_hwpx_commit_plan'), false);
@@ -213,7 +214,7 @@ test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', a
   assert.equal(tools.get('editor_hwpx_export_pdf').annotations.readOnlyHint, false);
 });
 
-test('MCP initialize publishes the current HWPX lifecycle instead of removed tool guidance', async () => {
+test('MCP initialize publishes the complete current HWPX lifecycle', async () => {
   const initialized = await handleEditorMcpJsonRpc({
     jsonrpc: '2.0',
     id: 1,
@@ -227,10 +228,7 @@ test('MCP initialize publishes the current HWPX lifecycle instead of removed too
     assert.match(initialized.result.instructions, new RegExp(`\\b${toolName}\\b`));
   }
   assert.match(initialized.result.instructions, /browserPresentation\.url/);
-  assert.doesNotMatch(
-    initialized.result.instructions,
-    /editor_hwpx_(?:read_json|target_map|target_find|target_inspect|object_inventory|command_catalog|apply|quality_check|render_pages|save_source|save_checkpoint)/,
-  );
+  assert.match(initialized.result.instructions, /integrated search, field, security, history, and verification controls/);
 });
 
 test('HWPX catalog human guidance names only the compact inspection API', () => {
@@ -238,8 +236,8 @@ test('HWPX catalog human guidance names only the compact inspection API', () => 
   assert.doesNotMatch(JSON.stringify(guidance), /\btarget_(?:map|find|inspect)\b/);
   assert.match(JSON.stringify(guidance), /editor_hwpx_inspect/);
   const published = JSON.stringify(getHwpxCommandCatalog());
-  assert.doesNotMatch(published, /"precondition":"(?:target_inspect|object_inventory)"/);
-  assert.match(published, /editor_hwpx_inspect\(view=\\"(?:target|objects)\\"\)/);
+  assert.doesNotMatch(published, /"precondition":"(?:target_inspect|object_inventory|field_inventory)"/);
+  assert.match(published, /editor_hwpx_inspect\(view=\\"(?:target|objects|fields)\\"\)/);
 });
 
 test('HWPX MCP schema is owned by the HWPX environment and contains no DOCX contract text', () => {

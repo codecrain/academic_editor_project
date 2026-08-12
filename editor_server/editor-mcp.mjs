@@ -64,6 +64,45 @@ const HWPX_VISUAL_POLICY = {
     failOnStyleVariance: { type: 'boolean' },
   },
 };
+const HWPX_EXPECTATIONS = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  description: 'Optional deterministic document expectations evaluated during review and repeated after verified save/export.',
+  properties: {
+    pageCount: { type: 'integer', minimum: 1 },
+    minPages: { type: 'integer', minimum: 1 },
+    maxPages: { type: 'integer', minimum: 1 },
+    minCharacters: { type: 'integer', minimum: 0 },
+    minTables: { type: 'integer', minimum: 0 },
+    tableCount: { type: 'integer', minimum: 0 },
+    sourceFormat: { type: 'string', enum: ['hwp', 'hwpx'] },
+    contains: { type: 'array', maxItems: 50, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+    notContains: { type: 'array', maxItems: 50, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+    fields: {
+      type: 'array', maxItems: 100,
+      items: {
+        type: 'object', additionalProperties: false, required: ['name', 'value'],
+        properties: {
+          name: { type: 'string', minLength: 1, maxLength: 512 },
+          occurrence: { type: ['integer', 'null'], minimum: 0 },
+          value: { type: 'string', maxLength: 100000 },
+        },
+      },
+    },
+  },
+};
+const HWPX_SECURITY_POLICY = {
+  type: ['object', 'null'],
+  additionalProperties: false,
+  description: 'Native-document security evidence policy for hidden text, prompt-injection signals, and Unicode deception.',
+  properties: {
+    includeFields: { type: 'boolean', default: true },
+    minInjectionConfidence: { type: 'string', enum: ['low', 'medium', 'high'], default: 'medium' },
+    failOnHiddenText: { type: 'boolean', default: false },
+    failOnPromptInjection: { type: 'boolean', default: false },
+    failOnUnicodeDeception: { type: 'boolean', default: false },
+  },
+};
 
 // HWPX has one canonical lifecycle surface.  The low-level HTTP routes and
 // command catalog remain engine implementation details; MCP callers do not
@@ -84,7 +123,7 @@ const HWPX_MCP_TOOLS = Object.freeze([
   },
   {
     name: HWPX_MCP_TOOL_NAMES.inspect,
-    description: 'Read one coherent, bounded view of the current HWPX. Use summary first, then outline or targets; target, objects, quality, and catalog are available through the same contract.',
+    description: 'Read one coherent, bounded view of the current HWPX. The same tool covers structure, exact targets, search, fields, objects, security, mutation history, quality, and live capabilities.',
     inputSchema: objectSchema({
       documentId: HWPX_DOCUMENT_ID,
       view: { type: 'string', enum: [...HWPX_MCP_INSPECT_VIEWS] },
@@ -98,6 +137,8 @@ const HWPX_MCP_TOOLS = Object.freeze([
       includeSvg: { type: 'boolean', default: false },
       profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' },
       visualPolicy: HWPX_VISUAL_POLICY,
+      expectations: HWPX_EXPECTATIONS,
+      securityPolicy: HWPX_SECURITY_POLICY,
       category: { type: ['string', 'null'], enum: [...hwpxAdapter.commandCategories, null] },
       op: { type: ['string', 'null'] },
       limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
@@ -174,6 +215,8 @@ const HWPX_MCP_TOOLS = Object.freeze([
       includeSvg: { type: 'boolean', default: false, description: 'Inline SVG is opt-in; the default returns bounded render metrics and SVG hashes.' },
       profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural', description: 'submission additionally fails unresolved placeholders, dummy identifiers, required blanks, explicit instruction remnants, and risky floating-image flow.' },
       visualPolicy: HWPX_VISUAL_POLICY,
+      expectations: HWPX_EXPECTATIONS,
+      securityPolicy: HWPX_SECURITY_POLICY,
     }, ['documentId', 'baseRevision']),
     annotations: HWPX_READ_ONLY,
   },
@@ -187,13 +230,15 @@ const HWPX_MCP_TOOLS = Object.freeze([
       mode: { type: 'string', enum: [...HWPX_MCP_SAVE_MODES], default: 'verified' },
       profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' },
       visualPolicy: HWPX_VISUAL_POLICY,
+      expectations: HWPX_EXPECTATIONS,
+      securityPolicy: HWPX_SECURITY_POLICY,
     }, ['documentId', 'baseRevision', 'filename']),
     annotations: HWPX_STATE_CREATING,
   },
   {
     name: HWPX_MCP_TOOL_NAMES.exportPdf,
     description: 'Export the current cleanly reviewed HWP/HWPX revision to a verified PDF artifact without closing the edit session.',
-    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' }, visualPolicy: HWPX_VISUAL_POLICY }, ['documentId', 'baseRevision']),
+    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, profile: { type: 'string', enum: ['structural', 'submission'], default: 'structural' }, visualPolicy: HWPX_VISUAL_POLICY, expectations: HWPX_EXPECTATIONS, securityPolicy: HWPX_SECURITY_POLICY }, ['documentId', 'baseRevision']),
     annotations: HWPX_STATE_CREATING,
   },
   {

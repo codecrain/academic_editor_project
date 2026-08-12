@@ -49,14 +49,14 @@ function artifactFixture(root, {
 
 test('runtime readiness rejects an incomplete artifact with artifact, operation, and method', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-missing-'));
-  artifactFixture(root, { version: '0.7.15', methods: ['insertText'] });
+  artifactFixture(root, { version: '0.8.4-incomplete', methods: ['insertText'] });
 
   assert.throws(
     () => validateCoreArtifact(root),
     error => error.code === 'HWPX_CORE_METHOD_UNAVAILABLE'
-      && error.message.includes('@rhwp/core@0.7.15')
-      && error.message.includes('deleteRange')
-      && error.message.includes('deleteRange'),
+      && error.message.includes('@rhwp/core@0.8.4-incomplete')
+      && error.details?.operation === 'field.setValues'
+      && error.details?.method === 'setFieldValue',
   );
 });
 
@@ -64,28 +64,7 @@ test('runtime readiness rejects methods declared only in typings, not the execut
   const root = mkdtempSync(path.join(tmpdir(), 'rhwp-readiness-js-surface-'));
   artifactFixture(root, {
     version: 'declarations-only',
-    methods: [
-      'insertText',
-      'deleteRange',
-      'createTableEx',
-      'getCellProperties',
-      'resizeTableCells',
-      'insertTextInCell',
-      'setTableProperties',
-      'deleteTextInCell',
-      'insertParagraph',
-      'insertPicture',
-      'setPageDef',
-      'createStyle',
-      'updateStyleShapes',
-      'applyStyle',
-      'applyCellStyle',
-      'applyCharFormat',
-      'applyCharFormatInCell',
-      'applyParaFormat',
-      'applyParaFormatInCell',
-      'findOrCreateFontId',
-    ],
+    methods: COMPLETE_RUNTIME_METHODS,
     jsMethods: [],
   });
 
@@ -93,7 +72,8 @@ test('runtime readiness rejects methods declared only in typings, not the execut
     () => validateCoreArtifact(root),
     error => error.code === 'HWPX_CORE_METHOD_UNAVAILABLE'
       && error.message.includes('@rhwp/core@declarations-only')
-      && error.message.includes('insertText')
+      && error.details?.operation === 'field.setValues'
+      && error.details?.method === 'setFieldValue'
       && error.message.includes('JavaScript wrapper')
       && error.details?.surface === 'javascript-wrapper',
   );

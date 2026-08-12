@@ -35,7 +35,7 @@ DOCX additionally supports `references` through its DOCX-specific command catalo
 HWPX MCP tools:
 
 - `editor_hwpx_open`
-- `editor_hwpx_inspect` (`summary`, `outline`, `styles`, `targets`, `target`, `objects`, `template`, `page`, `quality`, `catalog`)
+- `editor_hwpx_inspect` (`summary`, `outline`, `styles`, `targets`, `target`, `objects`, `template`, `page`, `quality`, `catalog`, `search`, `fields`, `security`, `history`, `capabilities`)
 - `editor_hwpx_edit`
 - `editor_hwpx_review`
 - `editor_hwpx_save` (`verified` or recovery-only `checkpoint`)
@@ -65,7 +65,7 @@ PDF MCP tools:
 
 `editor_docx_command_catalog`, `editor_hwpx_inspect(view="catalog")`, and
 `editor_pdf_command_catalog` are the machine-readable sources of truth. They
-currently expose 31 DOCX commands, 41 HWPX commands, and 46 PDF commands.
+currently expose 31 DOCX commands, 42 HWPX commands, and 46 PDF commands.
 HWPX command entries report
 `readiness` separately from `execution`; canonical commands that are not ready
 are rejected before mutation. Agents should query the applicable
@@ -74,14 +74,17 @@ every apply against that catalog before the document session can mutate.
 
 ### HWPX canonical lifecycle
 
-HWPX uses one public flow: `open → inspect → edit → review → save`. The former
-semantic-plan and duplicated read/map/find routes are removed. `inspect(styles)`
+HWPX uses one public flow: `open → inspect → edit → review → save`.
+`inspect(styles)`
 reports measured paragraph and character properties, indentation, outline
 levels, frequency, and examples without inferring protected regions or heading
 roles from text. `edit` accepts canonical catalog commands and applies the whole
-batch atomically. `review` renders all pages by default and treats actual glyphs
-outside table-cell clip rectangles as blocking errors. Estimated capacity and
-blank-page findings remain warnings because they can be intentional.
+batch atomically. `inspect(search|fields|security|history|capabilities)` folds
+text discovery, form-field targeting, security evidence, mutation provenance,
+and live capability discovery into that same lifecycle. `review` renders all
+pages by default and treats actual glyphs outside table-cell clip rectangles as
+blocking errors. Estimated capacity and blank-page findings remain warnings
+because they can be intentional.
 
 The broker enforces exact revisions, command-specific inspection or object
 inventory preconditions, and a quality check before finalization or PDF
@@ -646,10 +649,11 @@ revision-bound precondition state. A mismatch is rejected with HTTP 409 and
 
 Every command whose catalog precondition is `target_inspect` requires all exact
 targets and style sources to have been inspected at the same revision. Image
-and object commands require `object/inventory` at the same revision. The
-corresponding failures are `inspection_required` and
-`object_inventory_required`. A successful apply advances the revision exactly
-once and clears inspection, inventory, and quality state.
+and object commands require `objects` inspection at the same revision, and
+`field.setValues` requires `fields` inspection. The corresponding failures are
+`inspection_required`, `object_inventory_required`, and
+`field_inventory_required`. A successful apply advances the revision exactly
+once and clears inspection, inventory, field-inventory, and quality state.
 
 Accepted array key aliases:
 
@@ -658,15 +662,10 @@ commands
 ops
 ```
 
-Command identity:
-- Prefer `commandId`.
-- Compatibility aliases: `opId`, `id`.
-- If missing, local utility generates `command-N`; production callers should not rely on generated IDs.
-
-Command name normalization:
-- Prefer `op`.
-- Compatibility aliases: `command`, `group` + `action`, `type`, `name`.
-- Normalization removes non-alphanumeric characters and lowercases. Example: `table.write-rich-cell`, `table.writeRichCell`, and `{ "group": "table", "action": "write-rich-cell" }` normalize to the same key.
+HWPX command identity:
+- Use a stable `commandId` in every MCP edit command.
+- Use the exact canonical `op` returned by `editor_hwpx_inspect(view="catalog")`.
+- Alternate command names, punctuation-normalized spellings, and grouped action envelopes are rejected.
 
 Common command fields:
 
@@ -744,6 +743,7 @@ setCellText
 HWPX-only local commands:
 
 ```text
+field.setValues
 text.insertAfterParagraph
 text.replaceTracked
 text.deleteParagraphs
@@ -755,7 +755,7 @@ object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-The HWPX catalog has 41 canonical entries and all currently report
+The HWPX catalog has 42 canonical entries and all currently report
 `readiness=available`. Commands promoted beyond the published RHWP wrapper use
 qualified package-preserving or structural adapters and must pass mutation,
 package qualification, export, reopen, and operation-specific postconditions.
@@ -768,7 +768,7 @@ package qualification and reopen verification.
 Runtime artifact validation statically compares the `HwpDocument` method
 surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
 initialize WASM or introspect live WASM exports, so method presence alone is not
-semantic readiness. The 41-operation set is additionally gated by pinned
+semantic readiness. The 42-operation set is additionally gated by pinned
 installed-artifact and adapter tests that require the applicable mutation,
 package qualification, export, reopen, and operation-specific postconditions.
 
@@ -997,7 +997,7 @@ HWPX explicit paragraph style IDs:
 }
 ```
 
-Only use explicit IDs if they came from the same document's `read-json`, `target/inspect`, or local utility methods. Do not invent IDs.
+Only use explicit IDs if they came from the same document's current-revision `styles`, `target`, or local utility inspection. Do not invent IDs.
 
 DOCX legacy named style:
 
@@ -1012,12 +1012,10 @@ DOCX legacy named style:
 
 ## List formatting boundary
 
-The old `list.writeBullets` and `list.applyNumbering` commands were removed.
-They only prefixed visible characters and falsely implied native list hierarchy.
-Write the intended content with a text or table-cell command, then apply the
-inspected paragraph formatting explicitly. A list command must not be
-advertised until the engine can create and verify native numbering definitions
-after reopen.
+Native list hierarchy is controlled through inspected paragraph properties and
+style operations. Visible bullet characters alone are text content and do not
+constitute a numbering definition. Every list mutation must preserve and verify
+the native numbering identity after reopen.
 
 ## Layout Commands
 
@@ -1359,7 +1357,7 @@ Local response:
 HWPX save mode:
 - Default is preserve-package.
 - Preserve-package keeps the original HWPX ZIP and patches only addressed XML/package entries.
-- Reason: raw RHWP `exportHwpx()` historically changed complex sample structure even on no-edit export.
+- This limits the qualification surface to the requested mutation and preserves untouched package structure exactly.
 
 DOCX save validation:
 - Internal reopen is not enough.
@@ -1510,6 +1508,7 @@ save
 HWPX canonical commands:
 
 ```text
+field.setValues
 text.replaceParagraph
 text.insertAfterParagraph
 text.replace
@@ -1517,9 +1516,10 @@ text.replaceTracked
 insertText
 deleteRange
 appendParagraph
+text.deleteParagraphs
 table.writeCell
-table.writeCells
 table.writeRichCell
+table.writeCells
 table.applyCellStyle
 table.insertRows
 table.setSize
@@ -1527,13 +1527,16 @@ table.setCellSize
 table.autoFit
 table.create
 table.insertCaption
+table.structure
 style.applyText
 paragraph.applyStyle
 style.clone
 applyStyle
 setRunStyle
 setParagraphStyle
+format.apply
 layout.fitText
+paragraph.structure
 image.replace
 image.insertAfterParagraph
 image.replaceInCell
@@ -1545,12 +1548,13 @@ setPageSetup
 setHeaderFooter
 insertFootnote
 object.deleteTextBoxByText
+object.format
 object.replaceTextBoxText
 ```
 
-All 41 HWPX entries currently report `readiness=available`. For binary HWP,
+All 42 HWPX entries currently report `readiness=available`. For binary HWP,
 the same catalog marks package-XML-only commands unavailable. Apply still fails closed
-when required inspection, object inventory, exact revision, or
+when required target, object, or field inspection, exact revision, or
 operation-specific postconditions are missing.
 Tracked replacement is limited to one `hp:t` run and must be the only command
 in its atomic batch. The API can create the tracked replacement but does not

@@ -8,7 +8,6 @@ const command = ({
   required = [],
   optional = [],
   anyOf = [],
-  aliases = [],
   precondition = 'none',
   readiness = 'available',
   execution = 'preserve-package',
@@ -26,7 +25,6 @@ const command = ({
   required: Object.freeze(['op', ...required]),
   optional: Object.freeze([...optional]),
   anyOf: Object.freeze(anyOf.map((group) => Object.freeze([...group]))),
-  aliases: Object.freeze([...aliases]),
   precondition,
   readiness,
   execution,
@@ -49,11 +47,30 @@ const styleSourceField = 'Exact inspected paragraph or cell whose existing HWPX 
 
 const HWPX_COMMAND_CATALOG = Object.freeze([
   command({
+    op: 'field.setValues',
+    category: 'field',
+    description: 'Set one or more inventoried form-field values by stable field ID or by an unambiguous name and occurrence. The whole batch is saved, reopened, and verified atomically.',
+    required: ['values'],
+    precondition: 'field_inventory',
+    execution: 'structural-adapter',
+    nativeMethods: ['setFieldValue'],
+    fields: {
+      values: 'Array of {fieldId,value} or {name,occurrence?,value}. occurrence is zero-based and is required when a name is repeated.',
+    },
+    example: {
+      op: 'field.setValues',
+      values: [
+        { name: '신청인', value: '홍길동' },
+        { name: '연락처', occurrence: 0, value: '010-0000-0000' },
+      ],
+    },
+    notes: ['Missing or ambiguous fields fail the complete atomic command before any revision is committed.'],
+  }),
+  command({
     op: 'text.replaceParagraph',
     category: 'text',
     description: 'Replace all visible text in one inspected body paragraph while preserving its paragraph and character style IDs.',
     required: ['location', 'text'],
-    aliases: ['replaceParagraphText'],
     precondition: 'target_inspect',
     fields: { location: locationField, text: 'Complete replacement text.' },
     example: { op: 'text.replaceParagraph', location: { paragraph: { section: 0, number: 1 } }, text: '교체 문단' },
@@ -63,7 +80,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Insert one or more newline-delimited paragraphs after an inspected body paragraph.',
     required: ['location', 'text'],
-    aliases: ['insertParagraphAfter', 'text.insertParagraphAfter'],
     precondition: 'target_inspect',
     fields: { location: locationField, text: 'Text to insert; newlines create additional paragraphs.', styleSource: styleSourceField },
     example: { op: 'text.insertAfterParagraph', location: { paragraph: { section: 0, number: 1 } }, text: '신규 요약\n신규 세부내용' },
@@ -73,7 +89,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Replace an inspected text range within one body paragraph.',
     required: ['target', 'text'],
-    aliases: ['replaceText'],
     precondition: 'target_inspect',
     fields: { target: locationField, text: 'Replacement text.' },
     example: { op: 'text.replace', target: { native: { section: 0, para: 1, offset: 0, length: 4 } }, text: '2026' },
@@ -104,7 +119,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Insert text at an inspected HWPX paragraph offset.',
     required: ['target', 'text'],
-    aliases: ['text.insert'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: ['insertText'],
@@ -120,7 +134,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'text',
     description: 'Delete one inspected HWPX text range.',
     required: ['target'],
-    aliases: ['text.delete'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: ['deleteRange'],
@@ -136,7 +149,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Insert a new paragraph after an inspected HWPX body paragraph.',
     required: ['target', 'text'],
     optional: ['styleSource'],
-    aliases: ['paragraph.append'],
     precondition: 'target_inspect',
     execution: 'preserve-package-adapter',
     fields: { target: locationField, text: 'New paragraph text.', styleSource: styleSourceField },
@@ -173,7 +185,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Replace one inspected table cell, optionally fitting text and cloning paragraph style IDs.',
     required: ['location', 'text'],
     optional: ['fit', 'fitOptions', 'styleSource', 'paragraphStyleIds', 'paragraphTemplateIndices'],
-    aliases: ['setCellText'],
     precondition: 'target_inspect',
     fields: {
       location: locationField,
@@ -237,7 +248,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Apply explicit HWPX outer-cell style values or clone them from another inspected cell.',
     required: ['target'],
     anyOf: [['styleSource', 'source', 'cellStyle']],
-    aliases: ['cell.applyStyle'],
     precondition: 'target_inspect',
     fields: {
       target: locationField,
@@ -447,7 +457,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Clone paragraph/character style IDs from an inspected source without changing target text.',
     required: ['target'],
     anyOf: [['styleSource', 'source']],
-    aliases: ['style.applyParagraph'],
     precondition: 'target_inspect',
     fields: { target: locationField, styleSource: styleSourceField, source: 'Alias of styleSource.' },
     example: {
@@ -461,7 +470,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'style',
     description: 'Clone paragraph/character text style from one inspected target to another.',
     required: ['source', 'target'],
-    aliases: ['style.cloneFromTarget'],
     precondition: 'target_inspect',
     fields: { source: styleSourceField, target: locationField },
     example: {
@@ -475,7 +483,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'style',
     description: 'Apply an existing named HWPX paragraph style.',
     required: ['target', 'styleId'],
-    aliases: ['paragraph.applyNamedStyle'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: ['applyStyle', 'applyCellStyle'],
@@ -487,7 +494,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'style',
     description: 'Set direct character formatting on an inspected HWPX text target.',
     required: ['target', 'style'],
-    aliases: ['style.setRunStyle'],
     precondition: 'target_inspect',
     readiness: 'available',
     execution: 'structural-adapter',
@@ -507,7 +513,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'style',
     description: 'Set direct paragraph formatting on an inspected HWPX paragraph.',
     required: ['target', 'style'],
-    aliases: ['style.setParagraphStyle'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: ['applyParaFormat', 'applyParaFormatInCell'],
@@ -583,7 +588,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     description: 'Replace bytes of an existing package image discovered by object_inventory.',
     required: ['imageName'],
     anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
-    aliases: ['object.replaceImage', 'chart.replaceImage'],
     precondition: 'object_inventory',
     fields: {
       imageName: 'Exact package image name.',
@@ -602,7 +606,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['target'],
     optional: ['assetRef', 'mimeType', 'width', 'height', 'altText', 'caption'],
     anyOf: [['bytesBase64', 'bytes', 'filePath', 'assetRef']],
-    aliases: ['image.insert', 'object.insertImage'],
     precondition: 'target_inspect',
     execution: 'preserve-package-adapter',
     fields: {
@@ -679,7 +682,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'image',
     description: 'Generate a deterministic PNG chart-like image from numeric values and replace an existing PNG package entry.',
     required: ['imageName', 'generator'],
-    aliases: ['object.generateAndReplace', 'chart.generateAndReplace'],
     precondition: 'object_inventory',
     fields: { imageName: 'Exact PNG package image name.', generator: 'Object containing width, height, colors, and numeric values.' },
     example: { op: 'image.generateAndReplace', imageName: 'BinData/image1.png', generator: { width: 900, height: 520, values: [4, 9] } },
@@ -793,7 +795,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'object',
     description: 'Delete text-box shapes in one section whose visible text matches any supplied string.',
     required: ['texts'],
-    aliases: ['object.deleteByText', 'shape.deleteByText'],
     precondition: 'object_inventory',
     fields: { section: 'Zero-based section index; default 0.', texts: 'Nonempty array of exact text strings.' },
     example: { op: 'object.deleteTextBoxByText', section: 0, texts: ['삭제 대상 안내문'] },
@@ -825,7 +826,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'object',
     description: 'Replace visible text inside text-box shapes without deleting the shape.',
     required: ['replacements'],
-    aliases: ['shape.replaceText', 'textbox.replaceText'],
     precondition: 'object_inventory',
     fields: { section: 'Zero-based section index; default 0.', replacements: 'Nonempty array of {find, replaceWith} objects.' },
     example: {
@@ -851,26 +851,14 @@ const HWPX_PACKAGE_ONLY_OPS = Object.freeze(new Set([
   'table.writeRichCell',
 ]));
 
-const normalizeCommandName = (value) => String(value || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
-const commandByName = new Map();
-for (const entry of HWPX_COMMAND_CATALOG) {
-  for (const name of [entry.op, ...entry.aliases]) {
-    const key = normalizeCommandName(name);
-    if (commandByName.has(key)) {
-      throw new Error(`Duplicate HWPX command catalog name: ${name}`);
-    }
-    commandByName.set(key, entry);
-  }
-}
+const commandByName = new Map(HWPX_COMMAND_CATALOG.map((entry) => [entry.op, entry]));
 
 const HWPX_COMMAND_CATEGORIES = Object.freeze([...new Set(HWPX_COMMAND_CATALOG.map((entry) => entry.category))]);
 const HWPX_COMMAND_OPS = Object.freeze(HWPX_COMMAND_CATALOG.map((entry) => entry.op));
 
 function resolveHwpxCommand(value) {
-  if (value?.group && value?.action && !value.op) {
-    return commandByName.get(normalizeCommandName(`${value.group}.${value.action}`)) || null;
-  }
-  return commandByName.get(normalizeCommandName(value?.op ?? value)) || null;
+  const op = typeof value === 'string' ? value : value?.op;
+  return typeof op === 'string' ? commandByName.get(op) || null : null;
 }
 
 function meaningful(value, { allowEmptyString = false } = {}) {
@@ -1055,7 +1043,7 @@ function validateHwpxCommands(commands) {
     }
     const entry = resolveHwpxCommand(value);
     if (!entry) {
-      throw new Error(`Unsupported HWPX command op: ${String(value.op || `${value.group || ''}.${value.action || ''}` || '<missing>')}. Call editor_hwpx_inspect with view=catalog first.`);
+      throw new Error(`Unsupported HWPX command op: ${String(value.op || '<missing>')}. Call editor_hwpx_inspect with view=catalog first.`);
     }
     if (entry.readiness !== 'available') {
       throw new Error(
@@ -1063,7 +1051,7 @@ function validateHwpxCommands(commands) {
       );
     }
     const missing = entry.required.filter((field) => {
-      if (field === 'op') return !meaningful(value.op) && !(meaningful(value.group) && meaningful(value.action));
+      if (field === 'op') return !meaningful(value.op);
       const candidate = fieldValue(value, field);
       return !meaningful(candidate, { allowEmptyString: field === 'text' && EMPTY_TEXT_OPS.has(entry.op) });
     });
@@ -1104,6 +1092,43 @@ function validateHwpxCommands(commands) {
       if (new Set(keys).size !== keys.length) {
         throw new Error('text.deleteParagraphs locations must be unique.');
       }
+    }
+    if (entry.op === 'field.setValues') {
+      if (!Array.isArray(value.values) || value.values.length < 1 || value.values.length > 100) {
+        throw new Error('field.setValues values must contain 1 through 100 entries.');
+      }
+      const selectors = new Set();
+      value.values.forEach((field, fieldIndex) => {
+        if (!field || typeof field !== 'object' || Array.isArray(field)) {
+          throw new Error(`field.setValues values[${fieldIndex}] must be an object.`);
+        }
+        const unknownFields = Object.keys(field).filter(key => !['fieldId', 'name', 'occurrence', 'value'].includes(key));
+        if (unknownFields.length) {
+          throw new Error(`field.setValues values[${fieldIndex}] has unsupported field(s): ${unknownFields.join(', ')}.`);
+        }
+        const hasId = Number.isInteger(field.fieldId) && field.fieldId >= 0;
+        const hasName = typeof field.name === 'string' && field.name.trim().length > 0;
+        if (hasId === hasName) {
+          throw new Error(`field.setValues values[${fieldIndex}] requires exactly one of fieldId or name.`);
+        }
+        if (hasName && field.name.length > 512) {
+          throw new Error(`field.setValues values[${fieldIndex}].name must not exceed 512 characters.`);
+        }
+        if (typeof field.value !== 'string' || field.value.length > 100_000) {
+          throw new Error(`field.setValues values[${fieldIndex}].value must be a string no longer than 100000 characters.`);
+        }
+        if (field.occurrence !== undefined
+          && (!hasName || !Number.isInteger(field.occurrence) || field.occurrence < 0)) {
+          throw new Error(`field.setValues values[${fieldIndex}].occurrence must be a nonnegative integer used with name.`);
+        }
+        const selector = hasId
+          ? `id:${field.fieldId}`
+          : `name:${field.name.trim()}:${field.occurrence === undefined ? 'unique' : field.occurrence}`;
+        if (selectors.has(selector)) {
+          throw new Error(`field.setValues contains a duplicate selector: ${selector}.`);
+        }
+        selectors.add(selector);
+      });
     }
     if (['table.writeCell', 'table.writeRichCell'].includes(entry.op) && value.paragraphStyleIds !== undefined) {
       validateParagraphStyleIds(value.paragraphStyleIds, String(value.text ?? '').split('\n').length, entry.op);
@@ -1252,6 +1277,8 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
         ? 'editor_hwpx_inspect(view="target")'
         : entry.precondition === 'object_inventory'
           ? 'editor_hwpx_inspect(view="objects")'
+          : entry.precondition === 'field_inventory'
+            ? 'editor_hwpx_inspect(view="fields")'
           : entry.precondition,
       sourceSupport: { hwp: hwpAvailable, hwpx: hwpxAvailable },
       readiness: available ? entry.readiness : 'unavailable-for-source-format',
@@ -1261,7 +1288,7 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
     };
   });
   return {
-    version: '2.4.0',
+    version: '3.0.0',
     sourceFormat: normalizedSourceFormat,
     categories: HWPX_COMMAND_CATEGORIES,
     commandCount: sourceAwareCommands.length,

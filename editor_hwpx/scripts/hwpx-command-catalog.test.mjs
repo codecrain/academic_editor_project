@@ -15,6 +15,7 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   const catalog = getHwpxCommandCatalog();
   assert.equal(catalog.sourceFormat, 'hwpx');
   assert.deepEqual(HWPX_COMMAND_OPS, [
+    'field.setValues',
     'text.replaceParagraph',
     'text.insertAfterParagraph',
     'text.replace',
@@ -62,6 +63,38 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('text'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('table'));
   assert.ok(HWPX_COMMAND_CATEGORIES.includes('image'));
+  assert.ok(HWPX_COMMAND_CATEGORIES.includes('field'));
+});
+
+test('HWPX field updates require bounded unambiguous selectors', () => {
+  const byId = {
+    op: 'field.setValues',
+    values: [{ fieldId: 7, value: '승인' }],
+  };
+  const byName = {
+    op: 'field.setValues',
+    values: [{ name: '담당자', occurrence: 1, value: '홍길동' }],
+  };
+  assert.doesNotThrow(() => validateHwpxCommands([byId]));
+  assert.doesNotThrow(() => validateHwpxCommands([byName]));
+  assert.throws(
+    () => validateHwpxCommands([{ ...byId, values: [{ fieldId: 7, name: '담당자', value: '중복' }] }]),
+    /exactly one of fieldId or name/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...byId, values: [{ name: '담당자', occurrence: -1, value: '오류' }] }]),
+    /nonnegative integer/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...byId, values: [{ fieldId: '7', value: '문자열 ID' }] }]),
+    /exactly one of fieldId or name/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{ ...byId, values: [{ fieldId: 7, value: '값', extra: true }] }]),
+    /unsupported field/,
+  );
+  const entry = getHwpxCommandCatalog({ op: 'field.setValues' }).commands[0];
+  assert.equal(entry.precondition, 'editor_hwpx_inspect(view="fields")');
 });
 
 test('HWP catalog exposes source-format availability instead of silent package-only no-ops', () => {
@@ -309,11 +342,12 @@ test('HWPX promoted contracts expose optional fields and enforced enums', () => 
   assert.deepEqual(headerFooter.enum.align, ['left', 'center', 'right']);
 });
 
-test('HWPX command catalog resolves compatibility aliases but returns canonical entries', () => {
-  assert.equal(resolveHwpxCommand('setCellText').op, 'table.writeCell');
-  assert.equal(resolveHwpxCommand({ group: 'table', action: 'writeCell' }).op, 'table.writeCell');
-  assert.equal(resolveHwpxCommand('paragraph.applyNumbering'), null);
-  assert.equal(getHwpxCommandCatalog({ op: 'setCellText' }).commands[0].op, 'table.writeCell');
+test('HWPX command catalog resolves only exact canonical operation names', () => {
+  assert.equal(resolveHwpxCommand('table.writeCell').op, 'table.writeCell');
+  assert.equal(resolveHwpxCommand({ op: 'table.writeCell' }).op, 'table.writeCell');
+  assert.equal(resolveHwpxCommand('table-write-cell'), null);
+  assert.equal(resolveHwpxCommand({ group: 'table', action: 'writeCell' }), null);
+  assert.equal(getHwpxCommandCatalog({ op: 'table-write-cell' }).commandCount, 0);
 });
 
 test('HWPX command validation rejects malformed batches before execution', () => {

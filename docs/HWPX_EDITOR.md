@@ -20,13 +20,14 @@ Canonical entrypoints:
 
 ## Capability status
 
-The HWPX catalog exposes 41 canonical commands and every HWPX entry currently
+The HWPX catalog exposes 42 canonical commands and every HWPX entry currently
 reports `readiness=available`. `execution` still identifies the actual path
 used by an operation, such as the native RHWP path, structural adapter, or
 preserve-package adapter. It is evidence about implementation, not a readiness
 exception.
 
 ```text
+field.setValues
 text.replaceParagraph
 text.insertAfterParagraph
 text.replace
@@ -70,17 +71,20 @@ object.format
 object.replaceTextBoxText
 ```
 
-Accepted aliases are returned by the catalog and normalized before execution.
-Clients must not copy a DOCX payload into an HWPX command merely because an
-operation name is shared; query the format's command schema first.
+HWPX accepts only the exact canonical `op` published by the catalog. Clients
+must not copy a DOCX payload into an HWPX command merely because an operation
+name is shared; query the format's command schema first.
 
 ## Safe edit workflow
 
 1. Open bytes and retain `documentId` plus `revision`.
-2. Inspect bounded `summary`, `outline`, `styles`, and `catalog` views.
-3. Resolve and inspect every exact target required by the command catalog.
+2. Inspect bounded `summary` and `capabilities`, then use `outline`, `styles`,
+   `search`, `fields`, `objects`, or `security` for the exact evidence needed.
+3. Resolve and inspect every exact target, object inventory, or field inventory
+   required by the command catalog.
 4. Apply one revision-bound atomic batch with `edit` and `baseRevision`.
-5. Run `review` for the new revision with full-page coverage. Use
+5. Inspect `history` to verify the revision and semantic digest transition,
+   then run `review` for the new revision with full-page coverage. Use
    `profile="submission"` for applications, forms, and other deliverables that
    must not retain unresolved placeholders or author instructions.
 6. Inspect every affected rendered page and its neighbors.
@@ -89,9 +93,10 @@ operation name is shared; query the format's command schema first.
 8. If the workflow is cancelled, call `discard` with `documentId` and the
    current `baseRevision`.
 
-An old cursor or revision is rejected. Failed command batches do not advance
+A stale cursor or revision is rejected. Failed command batches do not advance
 the revision. Save and PDF export require a clean quality check for that exact
-revision.
+revision and must repeat the profile, visual policy, semantic expectations, and
+security policy accepted by review.
 
 ## Important limits
 

@@ -44,7 +44,7 @@ function sha256(bytes) {
 test('command classification separates patch-safe and RHWP structural export operations', () => {
   assert.deepEqual(classifyHwpxCommands([
     { op: 'text.replace' },
-    { op: 'setCellText' },
+    { op: 'table.writeCell' },
   ]), {
     mode: 'patch-safe',
     reasons: [],
@@ -59,8 +59,8 @@ test('command classification separates patch-safe and RHWP structural export ope
     reasons: ['insertText', 'table.create', 'setDocumentMetadata'],
   });
   assert.deepEqual(classifyHwpxCommands([
-    { op: 'text.insert' },
-    { op: 'image.insert' },
+    { op: 'insertText' },
+    { op: 'image.insertAfterParagraph' },
   ]), {
     mode: 'structural-export',
     reasons: ['insertText'],

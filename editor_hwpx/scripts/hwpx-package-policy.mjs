@@ -4,6 +4,7 @@ import { resolveHwpxCommand } from './hwpx-command-catalog.mjs';
 import { createZip, readZip } from './hwpx-zip.mjs';
 
 export const STRUCTURAL_EXPORT_OPS = new Set([
+  'field.setValues',
   'insertText',
   'deleteRange',
   'appendParagraph',

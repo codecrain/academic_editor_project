@@ -11,7 +11,7 @@ import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 
 import { handleEditorMcpJsonRpc } from './editor-mcp.mjs';
-import { HWPX_MCP_CONTRACT_VERSION } from './hwpx-mcp-contract.mjs';
+import { HWPX_MCP_CONTRACT, HWPX_MCP_CONTRACT_VERSION } from './hwpx-mcp-contract.mjs';
 import {
   DocxActivityHub,
   activityDescriptor,
@@ -1177,11 +1177,14 @@ function recordPreconditions(record) {
     inspectionRevision: null,
     inspectedTargetKeys: new Set(),
     inventoryRevision: null,
+    fieldRevision: null,
     qualityRevision: null,
     qualityProfile: null,
     qualityVisualPolicy: null,
+    qualityAgentPolicy: null,
   };
   record.preconditions.qualityVisualPolicy ??= null;
+  record.preconditions.qualityAgentPolicy ??= null;
   return record.preconditions;
 }
 
@@ -1202,14 +1205,23 @@ function visualPolicyKey(policy) {
   return stableJson(policy ?? null);
 }
 
+function agentReviewPolicyKey(body = {}) {
+  return stableJson({
+    expectations: body.expectations ?? null,
+    securityPolicy: body.securityPolicy ?? null,
+  });
+}
+
 function clearRecordPreconditions(record) {
   const preconditions = recordPreconditions(record);
   preconditions.inspectionRevision = null;
   preconditions.inspectedTargetKeys = new Set();
   preconditions.inventoryRevision = null;
+  preconditions.fieldRevision = null;
   preconditions.qualityRevision = null;
   preconditions.qualityProfile = null;
   preconditions.qualityVisualPolicy = null;
+  preconditions.qualityAgentPolicy = null;
 }
 
 function requireBaseRevision(record, body) {
@@ -1272,6 +1284,13 @@ function assertMutationPreconditions(record, action, body, commands = []) {
         'inspect current document objects before applying image commands.',
       );
     }
+    if (adapter.commandsNeedPrecondition(commandEntries, 'field_inventory')
+      && preconditions.fieldRevision !== baseRevision) {
+      throw new EditorContractError(
+        'field_inventory_required',
+        'inspect current document fields before applying field commands.',
+      );
+    }
   }
 
   if ((action === 'save-source' || action === 'prepare-review' || action === 'export-pdf')
@@ -1301,6 +1320,14 @@ function assertMutationPreconditions(record, action, body, commands = []) {
           reviewedVisualPolicy: preconditions.qualityVisualPolicy,
           requestedVisualPolicy,
         },
+      );
+    }
+    const requestedAgentPolicy = agentReviewPolicyKey(body);
+    if (preconditions.qualityAgentPolicy !== requestedAgentPolicy) {
+      throw new EditorContractError(
+        'quality_agent_policy_required',
+        'repeat the exact expectations and securityPolicy that passed the current-revision review.',
+        409,
       );
     }
   }
@@ -1595,6 +1622,259 @@ function projectDocumentSummary(json) {
     warningCount: json.warningCount ?? rawWarnings.length,
     warnings,
     warningsTruncated: warnings.length < rawWarnings.length,
+  };
+}
+
+function hwpxTextRecords(json, { includeFields = true } = {}) {
+  const records = [];
+  for (const block of json.blocks ?? []) {
+    records.push({
+      scope: 'paragraph',
+      text: String(block.text ?? ''),
+      location: { paragraph: { section: Number(block.native?.section ?? 0), number: Number(block.native?.paragraph ?? block.native?.para ?? 0) } },
+      characterFormat: block.characterFormat ?? null,
+    });
+  }
+  for (const table of json.tables ?? []) {
+    for (const cell of table.cells ?? []) {
+      records.push({
+        scope: 'cell',
+        text: String(cell.text ?? ''),
+        location: cell.location,
+        characterFormat: cell.paragraphs?.[0]?.characterFormat ?? null,
+      });
+    }
+  }
+  if (includeFields) {
+    for (const field of json.fields ?? []) {
+      for (const [part, value] of [['name', field.name], ['guide', field.guide], ['command', field.command], ['value', field.value]]) {
+        if (!value) continue;
+        records.push({
+          scope: `field-${part}`,
+          text: String(value),
+          location: field.location ?? null,
+          fieldId: field.fieldId,
+          fieldName: field.name,
+        });
+      }
+    }
+  }
+  return records;
+}
+
+function searchHwpxDocument(json, query, options = {}, limit = 60) {
+  const source = String(query ?? '');
+  if (!source) throw new EditorContractError('search_query_required', 'inspect view=search requires query.', 422);
+  const caseSensitive = options.caseSensitive === true;
+  const exact = options.exact === true;
+  const includeCells = options.includeCells !== false;
+  const requestedKind = options.kind == null ? null : String(options.kind);
+  if (requestedKind && !['paragraph', 'cell', 'field'].includes(requestedKind)) {
+    throw new EditorContractError('search_kind_invalid', 'search match.kind must be paragraph, cell, or field.', 422);
+  }
+  const needle = caseSensitive ? source : source.toLocaleLowerCase();
+  const matches = [];
+  for (const record of hwpxTextRecords(json, { includeFields: options.includeFields !== false })) {
+    const kind = record.scope.startsWith('field-') ? 'field' : record.scope;
+    if (!includeCells && kind === 'cell') continue;
+    if (requestedKind && requestedKind !== kind) continue;
+    const haystack = caseSensitive ? record.text : record.text.toLocaleLowerCase();
+    let offset = exact ? (haystack.trim() === needle.trim() ? 0 : -1) : haystack.indexOf(needle);
+    while (offset >= 0) {
+      matches.push({
+        kind,
+        scope: record.scope,
+        location: record.location,
+        ...(record.fieldId === undefined ? {} : { fieldId: record.fieldId, fieldName: record.fieldName }),
+        offset,
+        length: source.length,
+        context: record.text.slice(Math.max(0, offset - 80), Math.min(record.text.length, offset + source.length + 80)),
+      });
+      if (exact) break;
+      offset = haystack.indexOf(needle, offset + Math.max(1, needle.length));
+    }
+  }
+  const boundedLimit = Math.max(1, Math.min(120, Number(limit) || 60));
+  return {
+    ok: true,
+    revision: json.revision,
+    query: source,
+    match: { caseSensitive, exact, includeCells, kind: requestedKind },
+    total: matches.length,
+    returned: Math.min(matches.length, boundedLimit),
+    truncated: matches.length > boundedLimit,
+    matches: matches.slice(0, boundedLimit),
+  };
+}
+
+function normalizedSecurityColor(value) {
+  if (typeof value === 'string') {
+    const color = value.trim().replace(/^#/, '').toLowerCase();
+    return /^[0-9a-f]{6}$/.test(color) ? color : null;
+  }
+  if (Number.isInteger(value)) return Number(value).toString(16).padStart(6, '0').slice(-6).toLowerCase();
+  return null;
+}
+
+function scanHwpxSecurity(json, policy = {}) {
+  const confidenceRank = { low: 1, medium: 2, high: 3 };
+  const minimum = confidenceRank[policy?.minInjectionConfidence] ?? confidenceRank.medium;
+  const unicode = [];
+  const injection = [];
+  const hiddenText = [];
+  const confusable = /[\u0370-\u03ff\u0400-\u04ff]/u;
+  const latin = /[A-Za-z]/u;
+  const highInjection = [
+    /ignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior)\s+(?:instructions?|messages?)/iu,
+    /(?:system|developer)\s+(?:prompt|message|instructions?)/iu,
+    /(?:call|invoke|execute|use)\s+(?:the\s+)?(?:tool|function|mcp)/iu,
+    /reveal\s+(?:the\s+)?(?:prompt|secret|token|credentials?)/iu,
+  ];
+  const mediumInjection = [
+    /you\s+are\s+(?:chatgpt|an?\s+assistant|an?\s+agent)/iu,
+    /do\s+not\s+(?:follow|obey|disclose)/iu,
+    /instructions?\s*:/iu,
+  ];
+  for (const record of hwpxTextRecords(json, { includeFields: policy?.includeFields !== false })) {
+    const chars = [...record.text];
+    for (let index = 0; index < chars.length; index += 1) {
+      const codepoint = chars[index].codePointAt(0);
+      let kind = null;
+      let severity = 'medium';
+      if ([0x200b, 0x200c, 0x200d, 0x2060, 0xfeff].includes(codepoint)) kind = 'zero-width';
+      else if ((codepoint >= 0x202a && codepoint <= 0x202e) || (codepoint >= 0x2066 && codepoint <= 0x2069)) {
+        kind = 'bidi-override'; severity = 'high';
+      } else if (codepoint >= 0xe0000 && codepoint <= 0xe007f) {
+        kind = 'tag-character'; severity = 'high';
+      } else if (confusable.test(chars[index]) && (latin.test(chars[index - 1] ?? '') || latin.test(chars[index + 1] ?? ''))) {
+        kind = 'mixed-script-confusable';
+      }
+      if (!kind) continue;
+      unicode.push({
+        kind,
+        severity,
+        codepoint: `U+${codepoint.toString(16).toUpperCase().padStart(4, '0')}`,
+        offset: index,
+        scope: record.scope,
+        location: record.location,
+        excerpt: record.text.slice(Math.max(0, index - 40), Math.min(record.text.length, index + 41)),
+      });
+    }
+    let signal = highInjection.find(pattern => pattern.test(record.text));
+    let confidence = 'high';
+    if (!signal) {
+      signal = mediumInjection.find(pattern => pattern.test(record.text));
+      confidence = 'medium';
+    }
+    if (signal && confidenceRank[confidence] >= minimum) {
+      injection.push({
+        confidence,
+        scope: record.scope,
+        location: record.location,
+        fieldId: record.fieldId,
+        pattern: signal.source,
+        excerpt: record.text.slice(0, 240),
+      });
+    }
+    const format = record.characterFormat;
+    if (format && record.text.trim()) {
+      const size = Number(format.fontSizePt ?? (Number(format.fontSize) / 100));
+      const color = normalizedSecurityColor(format.textColor ?? format.color);
+      const explicitlyHidden = format.hidden === true || format.visible === false;
+      const transparent = Number(format.alpha) === 0 || Number(format.opacity) === 0;
+      const tiny = Number.isFinite(size) && size > 0 && size <= 1;
+      const white = color === 'ffffff';
+      if (explicitlyHidden || transparent || tiny || white) {
+        hiddenText.push({
+          kind: explicitlyHidden ? 'hidden-flag' : transparent ? 'transparent-text' : tiny ? 'tiny-text' : 'white-text',
+          severity: explicitlyHidden || transparent ? 'high' : 'medium',
+          scope: record.scope,
+          location: record.location,
+          fontSizePt: Number.isFinite(size) ? size : null,
+          color,
+          excerpt: record.text.slice(0, 240),
+        });
+      }
+    }
+  }
+  const bounded = (items) => items.slice(0, 200);
+  return {
+    clean: unicode.length === 0 && injection.length === 0 && hiddenText.length === 0,
+    policy: {
+      includeFields: policy?.includeFields !== false,
+      minInjectionConfidence: policy?.minInjectionConfidence ?? 'medium',
+      failOnHiddenText: policy?.failOnHiddenText === true,
+      failOnPromptInjection: policy?.failOnPromptInjection === true,
+      failOnUnicodeDeception: policy?.failOnUnicodeDeception === true,
+    },
+    counts: { hiddenText: hiddenText.length, promptInjection: injection.length, unicodeDeception: unicode.length },
+    truncated: hiddenText.length > 200 || injection.length > 200 || unicode.length > 200,
+    hiddenText: bounded(hiddenText),
+    promptInjection: bounded(injection),
+    unicodeDeception: bounded(unicode),
+  };
+}
+
+function evaluateHwpxExpectations(json, expectations = null) {
+  if (!expectations) return { ok: true, checks: [], failed: [] };
+  const records = hwpxTextRecords(json, { includeFields: false });
+  const text = records.map(record => record.text).join('\n');
+  const pageCount = Number(json.pageCount || 0);
+  const tableCount = Number(json.tables?.length || 0);
+  const checks = [];
+  const check = (name, expected, actual, pass) => checks.push({ name, expected, actual, pass: Boolean(pass) });
+  if (expectations.pageCount !== undefined) check('pageCount', expectations.pageCount, pageCount, pageCount === expectations.pageCount);
+  if (expectations.minPages !== undefined) check('minPages', expectations.minPages, pageCount, pageCount >= expectations.minPages);
+  if (expectations.maxPages !== undefined) check('maxPages', expectations.maxPages, pageCount, pageCount <= expectations.maxPages);
+  if (expectations.minCharacters !== undefined) check('minCharacters', expectations.minCharacters, text.length, text.length >= expectations.minCharacters);
+  if (expectations.minTables !== undefined) check('minTables', expectations.minTables, tableCount, tableCount >= expectations.minTables);
+  if (expectations.tableCount !== undefined) check('tableCount', expectations.tableCount, tableCount, tableCount === expectations.tableCount);
+  if (expectations.sourceFormat !== undefined) check('sourceFormat', expectations.sourceFormat, json.sourceFormat, json.sourceFormat === expectations.sourceFormat);
+  for (const value of expectations.contains ?? []) check('contains', value, text.includes(value), text.includes(value));
+  for (const value of expectations.notContains ?? []) check('notContains', value, text.includes(value), !text.includes(value));
+  for (const expected of expectations.fields ?? []) {
+    const matching = (json.fields ?? []).filter(field => String(field.name ?? '') === expected.name);
+    const actual = expected.occurrence == null ? (matching.length === 1 ? matching[0] : null) : matching[expected.occurrence];
+    check(`field:${expected.name}${expected.occurrence == null ? '' : `[${expected.occurrence}]`}`, expected.value, actual?.value ?? null, String(actual?.value ?? '') === expected.value);
+  }
+  return { ok: checks.every(item => item.pass), checks, failed: checks.filter(item => !item.pass) };
+}
+
+function hwpxSemanticDigest(json) {
+  const semantic = {
+    sourceFormat: json.sourceFormat,
+    pageCount: json.pageCount,
+    paragraphs: (json.blocks ?? []).map(block => [block.id, block.text, block.styleFingerprint?.hash]),
+    tables: (json.tables ?? []).map(table => [table.id, table.dims, (table.cells ?? []).map(cell => [cell.cellIndex, cell.text, cell.styleFingerprint?.hash])]),
+    fields: (json.fields ?? []).map(field => [field.fieldId, field.name, field.value]),
+    images: (json.objectGraph?.images ?? []).map(image => [image.name, image.sha256]),
+  };
+  return sha256(Buffer.from(stableJson(semantic), 'utf8'));
+}
+
+function integrateHwpxReviewEvidence(quality, json, options = {}) {
+  const security = scanHwpxSecurity(json, options.securityPolicy ?? {});
+  const expectations = evaluateHwpxExpectations(json, options.expectations ?? null);
+  const issues = [...(quality.issues ?? [])];
+  if (security.counts.hiddenText && security.policy.failOnHiddenText) {
+    issues.push({ severity: 'error', code: 'hidden-text-detected', message: 'Hidden or visually suppressed text was detected by the requested security policy.', count: security.counts.hiddenText });
+  }
+  if (security.counts.promptInjection && security.policy.failOnPromptInjection) {
+    issues.push({ severity: 'error', code: 'prompt-injection-detected', message: 'Document text contains prompt-injection signals blocked by the requested security policy.', count: security.counts.promptInjection });
+  }
+  if (security.counts.unicodeDeception && security.policy.failOnUnicodeDeception) {
+    issues.push({ severity: 'error', code: 'unicode-deception-detected', message: 'Unicode deception characters were detected by the requested security policy.', count: security.counts.unicodeDeception });
+  }
+  for (const failed of expectations.failed) {
+    issues.push({ severity: 'error', code: 'document-expectation-failed', message: `Document expectation failed: ${failed.name}.`, expectation: failed });
+  }
+  return {
+    ...quality,
+    ok: quality.ok === true && issues.every(issue => issue.severity !== 'error'),
+    issues,
+    security,
+    expectations,
+    semanticDigest: hwpxSemanticDigest(json),
   };
 }
 
@@ -2442,6 +2722,8 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     templatePolicy: normalizeTemplatePolicy(),
     deletedBaselineTableIds: new Set(),
     reviewChanges: [],
+    baselineDigest: hwpxSemanticDigest(json),
+    mutationJournal: [],
     intentionalSectionLayoutChanges: new Set(),
     session,
     createdAt: now,
@@ -2539,8 +2821,8 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   if (fmt === 'hwpx' && !new Set(['inspect', 'edit', 'review', 'save', 'export-pdf', 'discard']).has(actionPath)) {
     sendJson(res, 404, {
       ok: false,
-      code: 'legacy_hwpx_route_removed',
-      message: 'Use the canonical HWPX actions: inspect, edit, review, save, export-pdf, or discard.',
+      code: 'unsupported_hwpx_action',
+      message: 'Supported HWPX actions are inspect, edit, review, save, export-pdf, and discard.',
     });
     return true;
   }
@@ -2604,6 +2886,79 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         pictureCount: inventory.pictures?.length || 0,
       });
       sendJson(res, 200, { revision: session.revision, ...inventory });
+      return true;
+    }
+    if (view === 'search') {
+      const json = await session.readJson();
+      const result = searchHwpxDocument(json, body.query, body.match || {}, body.limit);
+      emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, returned: result.returned, total: result.total });
+      sendJson(res, 200, result);
+      return true;
+    }
+    if (view === 'fields') {
+      const json = await session.readJson();
+      const query = String(body.query || '').trim().toLocaleLowerCase();
+      const fields = (json.fields || []).filter(field => !query || [field.name, field.guide, field.command, field.value]
+        .some(value => String(value ?? '').toLocaleLowerCase().includes(query)));
+      const limit = Math.max(1, Math.min(120, Number(body.limit || 60)));
+      recordPreconditions(record).fieldRevision = session.revision;
+      sendJson(res, 200, {
+        ok: true,
+        revision: session.revision,
+        total: fields.length,
+        returned: Math.min(fields.length, limit),
+        truncated: fields.length > limit,
+        fields: fields.slice(0, limit),
+      });
+      return true;
+    }
+    if (view === 'security') {
+      const json = await session.readJson();
+      sendJson(res, 200, { ok: true, revision: session.revision, ...scanHwpxSecurity(json, body.securityPolicy || {}) });
+      return true;
+    }
+    if (view === 'history') {
+      const json = await session.readJson();
+      const limit = Math.max(1, Math.min(120, Number(body.limit || 60)));
+      const entries = record.mutationJournal || [];
+      sendJson(res, 200, {
+        ok: true,
+        revision: session.revision,
+        baselineDigest: record.baselineDigest,
+        currentDigest: hwpxSemanticDigest(json),
+        total: entries.length,
+        returned: Math.min(entries.length, limit),
+        truncated: entries.length > limit,
+        entries: entries.slice(-limit),
+      });
+      return true;
+    }
+    if (view === 'capabilities') {
+      const catalog = hwpxAdapter.commandCatalog({
+        category: body.category,
+        op: body.op,
+        sourceFormat: record.sourceFormat,
+      });
+      sendJson(res, 200, {
+        ok: true,
+        revision: session.revision,
+        contractVersion: HWPX_MCP_CONTRACT.version,
+        lifecycleTools: HWPX_MCP_CONTRACT.tools,
+        inspectViews: HWPX_MCP_CONTRACT.inspectViews,
+        commandCatalog: catalog,
+        integratedCapabilityFamilies: {
+          documentUnderstanding: ['summary', 'outline', 'styles', 'search', 'fields', 'objects', 'page'],
+          mutation: ['atomic command batch', 'field values', 'text', 'tables', 'styles', 'layout', 'images', 'objects'],
+          assurance: ['security', 'history', 'expectations', 'quality', 'rendered review', 'verified save'],
+          artifactLifecycle: ['source-format save', 'PDF export', 'hash-bound read', 'hash-bound delete'],
+        },
+        stateContract: {
+          revisionBound: true,
+          atomicMutations: true,
+          saveReopenVerification: true,
+          deterministicMutationJournal: true,
+        },
+      });
       return true;
     }
     if (view === 'template') {
@@ -2690,13 +3045,14 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       return true;
     }
     if (view === 'quality') {
-      const quality = await qualityWithRenderedLayout(session, {
+      const rawQuality = await qualityWithRenderedLayout(session, {
         baselineJson: record.baselineJson,
         templatePolicy: record.templatePolicy,
         deletedTableIds: [...record.deletedBaselineTableIds],
         profile: body.profile,
         visualPolicy: body.visualPolicy,
       });
+      const quality = integrateHwpxReviewEvidence(rawQuality, await session.readJson(), body);
       emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, ok: quality.ok, issueCount: quality.issues?.length || 0 });
       sendJson(res, 200, quality);
       return true;
@@ -2723,12 +3079,16 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       profile: body.profile,
       visualPolicy: body.visualPolicy,
     });
-    const { _renderedPages: allRenderedPages = [], ...quality } = qualityResult;
+    const { _renderedPages: allRenderedPages = [], ...rawQuality } = qualityResult;
+    const quality = integrateHwpxReviewEvidence(rawQuality, await session.readJson(), body);
     const reviewPassed = qualityAllowsFinalization(quality, 'hwpx');
     recordPreconditions(record).qualityRevision = reviewPassed ? baseRevision : null;
     recordPreconditions(record).qualityProfile = reviewPassed ? quality.reviewProfile : null;
     recordPreconditions(record).qualityVisualPolicy = reviewPassed
       ? visualPolicyKey(body.visualPolicy)
+      : null;
+    recordPreconditions(record).qualityAgentPolicy = reviewPassed
+      ? agentReviewPolicyKey(body)
       : null;
     const pageCount = Math.max(1, Number(quality.pageCount || 1));
     const requestedPages = Array.isArray(body.pages) && body.pages.length
@@ -2880,6 +3240,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       commandCount: commands.length,
       commands: commands.map((command) => ({ commandId: command.commandId, op: command.op })),
     });
+    const beforeJournalJson = fmt === 'hwpx' ? await session.readJson() : null;
     let result;
     try {
       result = await session.apply(commands);
@@ -2909,6 +3270,27 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       throw error;
     }
     if (fmt === 'hwpx') record.templatePolicy = proposedTemplatePolicy;
+    if (fmt === 'hwpx') {
+      const afterJournalJson = await session.readJson();
+      const digestBefore = hwpxSemanticDigest(beforeJournalJson);
+      const digestAfter = hwpxSemanticDigest(afterJournalJson);
+      record.mutationJournal.push({
+        sequence: record.mutationJournal.length + 1,
+        revisionBefore: previousRevision,
+        revisionAfter: session.revision,
+        commandIds: commands.map(command => command.commandId),
+        operations: commands.map(command => command.op),
+        digestBefore,
+        digestAfter,
+        changed: digestBefore !== digestAfter,
+        receipts: (result.results || []).map(receipt => ({
+          opId: receipt.opId,
+          op: receipt.op ?? receipt.action,
+          changed: receipt.changed,
+          target: receipt.target,
+        })),
+      });
+    }
     for (const command of commands) {
       if (fmt === 'hwpx' && command?.op === 'table.structure' && command.action === 'deleteTable') {
         const tableId = String((command.target ?? command.location)?.tableId ?? '');
@@ -2947,13 +3329,14 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     let reopen = null;
     if (fmt === 'hwpx' && !checkpoint) {
       const verifier = await hwpxAdapter.createSession(saved.bytes);
-      const verification = await qualityWithRenderedLayout(verifier, {
+      const rawVerification = await qualityWithRenderedLayout(verifier, {
         baselineJson: record.baselineJson,
         templatePolicy: record.templatePolicy,
         deletedTableIds: [...record.deletedBaselineTableIds],
         profile: body.profile,
         visualPolicy: body.visualPolicy,
       });
+      const verification = integrateHwpxReviewEvidence(rawVerification, await verifier.readJson(), body);
       if (!qualityAllowsFinalization(verification, 'hwpx')) {
         throw new EditorContractError(
           'saved_document_verification_failed',
@@ -4256,7 +4639,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
   if (!adapter) throw new Error(`unsupported format: ${fmt}`);
   const catalogForFormat = adapter.commandCatalog;
 
-  if (name === `${toolPrefix}_command_catalog`) {
+  if (fmt !== 'hwpx' && name === `${toolPrefix}_command_catalog`) {
     const catalog = catalogForFormat({ category: args.category, op: args.op });
     if ((args.category || args.op) && catalog.commandCount === 0) {
       throw new Error(`No ${fmt.toUpperCase()} commands matched category=${String(args.category || '')} op=${String(args.op || '')}.`);
@@ -4378,7 +4761,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       }
       return inspected;
     }
-    if (name === `${toolPrefix}_read_json`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_read_json`) {
       return postLocalEditorApi(req, config, `${prefix}/documents/read-json`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         ...(args.view !== undefined ? { view: args.view } : {}),
@@ -4388,7 +4771,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         ...(args.cellPreviewLimit !== undefined ? { cellPreviewLimit: args.cellPreviewLimit } : {}),
       });
     }
-    if (name === `${toolPrefix}_target_map`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_target_map`) {
       return postLocalEditorApi(req, config, `${prefix}/target/map`, {
         responseMode: MCP_BOUNDED_RESPONSE_MODE,
         ...(args.kind !== undefined ? { kind: args.kind } : {}),
@@ -4397,13 +4780,13 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         ...(args.tableId !== undefined ? { tableId: args.tableId } : {}),
       });
     }
-    if (name === `${toolPrefix}_target_find`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_target_find`) {
       return postLocalEditorApi(req, config, `${prefix}/target/find`, { query: args.query, match: args.match || {} });
     }
-    if (name === `${toolPrefix}_object_inventory`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_object_inventory`) {
       return postLocalEditorApi(req, config, `${prefix}/object/inventory`, {});
     }
-    if (name === `${toolPrefix}_target_inspect`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_target_inspect`) {
       return postLocalEditorApi(req, config, `${prefix}/target/inspect`, { locations: args.locations });
     }
     const structure = fmt === 'hwpx'
@@ -4415,18 +4798,24 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     const baseRevision = Number(args.baseRevision);
     assertCurrentRevision(structure, baseRevision);
 
-    if (name === `${toolPrefix}_apply` || name === 'editor_hwpx_edit') {
-      return postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_edit' ? 'edit' : 'commands/apply'}`, {
+    if (name === 'editor_hwpx_edit') {
+      return postLocalEditorApi(req, config, `${prefix}/edit`, {
         baseRevision,
         commands: args.commands,
         ...(args.templatePolicy !== undefined ? { templatePolicy: args.templatePolicy } : {}),
+      });
+    }
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_apply`) {
+      return postLocalEditorApi(req, config, `${prefix}/commands/apply`, {
+        baseRevision,
+        commands: args.commands,
       });
     }
     if (name === 'editor_hwpx_review') {
       const reviewed = await postLocalEditorApi(req, config, `${prefix}/review`, args);
       return compactHwpxReviewPayload(reviewed, args.includeSvg === true);
     }
-    if (name === `${toolPrefix}_render_pages`) {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_render_pages`) {
       const pages = Array.isArray(args.pages) && args.pages.length ? args.pages.map(Number) : [1];
       if (pages.length > 12 || pages.some((page) => !Number.isInteger(page) || page < 1) || new Set(pages).size !== pages.length) {
         throw new Error('pages must contain 1-12 unique positive integers.');
@@ -4436,7 +4825,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       }
       return postLocalEditorApi(req, config, `${prefix}/pages/render-all`, { pages });
     }
-    if (name === `${toolPrefix}_quality_check` || name === 'editor_hwpx_inspect' && args.view === 'quality') {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_quality_check`) {
       return postLocalEditorApi(req, config, `${prefix}/quality/check`, {
         baseRevision,
         profile: args.profile,
@@ -4453,6 +4842,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
           filename: args.filename,
           profile: args.profile,
           visualPolicy: args.visualPolicy,
+          expectations: args.expectations,
+          securityPolicy: args.securityPolicy,
           outputPath,
         });
         const { bytesRef: _serverLocalPath, bytesBase64: _inlineBytes, ...publicResult } = exported;
@@ -4510,36 +4901,50 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         throw error;
       }
     }
-    if (name === `${toolPrefix}_save_source` || name === 'editor_hwpx_save' && args.mode !== 'checkpoint') {
+    if (name === 'editor_hwpx_save' && args.mode !== 'checkpoint') {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
       const artifactExtension = fmt === 'hwpx'
         && findApiRecord(state, 'hwpx', documentId)?.sourceFormat === 'hwp'
         ? 'hwp'
         : fmt;
-      const saved = await postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_save' ? 'save' : 'documents/save-source'}`, {
+      const saved = await postLocalEditorApi(req, config, `${prefix}/save`, {
         baseRevision,
         filename: args.filename,
         profile: args.profile,
         visualPolicy: args.visualPolicy,
-        ...(name === 'editor_hwpx_save' ? { mode: 'verified' } : {}),
+        expectations: args.expectations,
+        securityPolicy: args.securityPolicy,
+        mode: 'verified',
         outputPath: mcpArtifactPath(artifactId, artifactExtension),
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
       discardApiSessionState(state, documentId, { clearLock: false });
       return { ...publicResult, artifactId, sessionClosed: true };
     }
-    if (name === `${toolPrefix}_save_checkpoint` || name === 'editor_hwpx_save' && args.mode === 'checkpoint') {
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_save_source`) {
+      await pruneExpiredMcpArtifacts(config);
+      const artifactId = randomUUID();
+      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-source`, {
+        baseRevision,
+        filename: args.filename,
+        outputPath: mcpArtifactPath(artifactId, fmt),
+      });
+      const { bytesRef: _serverLocalPath, ...publicResult } = saved;
+      discardApiSessionState(state, documentId, { clearLock: false });
+      return { ...publicResult, artifactId, sessionClosed: true };
+    }
+    if (name === 'editor_hwpx_save' && args.mode === 'checkpoint') {
       await pruneExpiredMcpArtifacts(config);
       const artifactId = randomUUID();
       const artifactExtension = fmt === 'hwpx'
         && findApiRecord(state, 'hwpx', documentId)?.sourceFormat === 'hwp'
         ? 'hwp'
         : fmt;
-      const saved = await postLocalEditorApi(req, config, `${prefix}/${name === 'editor_hwpx_save' ? 'save' : 'documents/save-checkpoint'}`, {
+      const saved = await postLocalEditorApi(req, config, `${prefix}/save`, {
         baseRevision,
         filename: args.filename,
-        ...(name === 'editor_hwpx_save' ? { mode: 'checkpoint' } : {}),
+        mode: 'checkpoint',
         outputPath: mcpArtifactPath(artifactId, artifactExtension),
       });
       const { bytesRef: _serverLocalPath, ...publicResult } = saved;
@@ -4551,6 +4956,18 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         checkpoint: true,
         verified: false,
       };
+    }
+    if (fmt !== 'hwpx' && name === `${toolPrefix}_save_checkpoint`) {
+      await pruneExpiredMcpArtifacts(config);
+      const artifactId = randomUUID();
+      const saved = await postLocalEditorApi(req, config, `${prefix}/documents/save-checkpoint`, {
+        baseRevision,
+        filename: args.filename,
+        outputPath: mcpArtifactPath(artifactId, fmt),
+      });
+      const { bytesRef: _serverLocalPath, ...publicResult } = saved;
+      discardApiSessionState(state, documentId, { clearLock: false });
+      return { ...publicResult, artifactId, sessionClosed: true, checkpoint: true, verified: false };
     }
       throw new Error(`Unsupported editor MCP tool: ${name}`);
     },

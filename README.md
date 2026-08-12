@@ -102,9 +102,7 @@ requests are stateless, while each opened document is an isolated,
 revision-bound server session that must be finalized or discarded.
 It implements `initialize`, `ping`, `tools/list`, and `tools/call` for DOCX,
 HWPX, and PDF workflows. HWPX uses the compact canonical sequence
-`open` -> `inspect` -> `edit` -> `review` -> `save` for both HWP and HWPX source bytes. The nine tools expose 41 catalog-driven editing operations without one-tool-per-property duplication. Verified save preserves the source format. Its measured `styles` and
-ordered `outline` views expose paragraph hierarchy, indentation, table-cell
-geometry, and exact targets without guessing protected/form regions. See
+`open` -> `inspect` -> `edit` -> `review` -> `save` for both HWP and HWPX source bytes. The nine tools expose 42 catalog-driven editing operations without one-tool-per-property duplication. Verified save preserves the source format. Inspection unifies measured styles, ordered structure, exact targets, search, fields, security evidence, mutation history, and live capabilities. Review and finalization can bind semantic expectations and security policy to the accepted revision. See
 `docs/HWPX_MCP_API.md` for the nine-tool contract and Browser reload workflow.
 DOCX `open` can receive the persisted `storedDocumentId` returned by
 `/api/documents` instead of downloading that working copy and sending it back as
