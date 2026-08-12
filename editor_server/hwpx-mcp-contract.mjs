@@ -18,7 +18,6 @@ const HWPX_MCP_INSPECT_VIEWS = Object.freeze([
   'summary',
   'outline',
   'styles',
-  'targets',
   'target',
   'objects',
   'template',

@@ -25,7 +25,6 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'appendParagraph',
     'text.deleteParagraphs',
     'table.writeCell',
-    'table.writeRichCell',
     'table.writeCells',
     'table.applyCellStyle',
     'table.insertRows',
@@ -36,13 +35,10 @@ test('HWPX command catalog exposes unique canonical operations and categories', 
     'table.insertCaption',
     'table.structure',
     'style.applyText',
-    'paragraph.applyStyle',
-    'style.clone',
     'applyStyle',
     'setRunStyle',
     'setParagraphStyle',
     'format.apply',
-    'layout.fitText',
     'paragraph.structure',
     'image.replace',
     'image.insertAfterParagraph',
@@ -228,7 +224,7 @@ test('HWPX rich cell commands validate one paragraph-style entry per text paragr
 });
 
 test('HWPX catalog advertises mixed paragraph and structural template options', () => {
-  for (const op of ['table.writeCell', 'table.writeRichCell', 'table.writeCells']) {
+  for (const op of ['table.writeCell', 'table.writeCells']) {
     const entry = getHwpxCommandCatalog({ op }).commands[0];
     assert.ok(entry.optional.includes('paragraphStyleIds'));
     assert.ok(entry.optional.includes('paragraphTemplateIndices'));
@@ -297,15 +293,6 @@ test('HWPX command catalog publishes every operation as executable', () => {
 });
 
 test('HWPX promoted contracts expose optional fields and enforced enums', () => {
-  const fitText = getHwpxCommandCatalog({ op: 'layout.fitText' }).commands[0];
-  assert.deepEqual(fitText.optional, ['options']);
-  assert.doesNotThrow(() => validateHwpxCommands([{
-    op: 'layout.fitText',
-    location: { tableId: 'tbl_0', cell: { number: 0 } },
-    text: 'non-destructive fit analysis',
-    options: { maxLines: 2, materializeBreaks: false },
-  }]));
-
   const createTable = getHwpxCommandCatalog({ op: 'table.create' }).commands[0];
   assert.deepEqual(createTable.optional, ['width', 'height', 'cellTexts', 'caption']);
   assert.doesNotThrow(() => validateHwpxCommands([{
@@ -348,6 +335,38 @@ test('HWPX command catalog resolves only exact canonical operation names', () =>
   assert.equal(resolveHwpxCommand('table-write-cell'), null);
   assert.equal(resolveHwpxCommand({ group: 'table', action: 'writeCell' }), null);
   assert.equal(getHwpxCommandCatalog({ op: 'table-write-cell' }).commandCount, 0);
+});
+
+test('HWPX commands reject stale aliases and undeclared fields before mutation', () => {
+  const paragraph = { paragraph: { section: 0, number: 1 } };
+  const source = { paragraph: { section: 0, number: 0 } };
+  assert.throws(
+    () => validateHwpxCommands([{
+      op: 'style.applyText',
+      target: paragraph,
+      source,
+    }]),
+    /unsupported field\(s\): source/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{
+      op: 'table.applyCellStyle',
+      target: { tableId: 'tbl_0', cell: { number: 1 } },
+      styleSource: { tableId: 'tbl_0', cell: { number: 0 } },
+      cloneStyleFrom: { tableId: 'tbl_0', cell: { number: 2 } },
+    }]),
+    /unsupported field\(s\): cloneStyleFrom/,
+  );
+  assert.throws(
+    () => validateHwpxCommands([{
+      op: 'table.writeCells',
+      tableId: 'tbl_0',
+      cells: [{ cell: { number: 0 }, text: 'value', content: { text: 'legacy' } }],
+    }]),
+    /cells\[0\] has unsupported field\(s\): content/,
+  );
+  const catalogJson = JSON.stringify(getHwpxCommandCatalog());
+  assert.equal(catalogJson.includes('Alias of styleSource'), false);
 });
 
 test('HWPX command validation rejects malformed batches before execution', () => {

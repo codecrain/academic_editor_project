@@ -1861,6 +1861,12 @@ function hwpxSemanticDigest(json) {
   return sha256(Buffer.from(stableJson(semantic), 'utf8'));
 }
 
+async function readHwpxSemanticSnapshot(session) {
+  return typeof session.semanticSnapshot === 'function'
+    ? session.semanticSnapshot()
+    : session.readJson();
+}
+
 function integrateHwpxReviewEvidence(quality, json, options = {}) {
   const security = scanHwpxSecurity(json, options.securityPolicy ?? {});
   const expectations = evaluateHwpxExpectations(json, options.expectations ?? null);
@@ -2725,6 +2731,9 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     });
   }
   const { session, json } = await createApiSession(fmt, id, bytes, body, config);
+  const baselineSemanticJson = fmt === 'hwpx'
+    ? await readHwpxSemanticSnapshot(session)
+    : json;
   pruneExpiredApiSessions(state, config.apiSessionTtlMs);
   const now = Date.now();
   const record = {
@@ -2737,7 +2746,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     templatePolicy: normalizeTemplatePolicy(),
     deletedBaselineTableIds: new Set(),
     reviewChanges: [],
-    baselineDigest: hwpxSemanticDigest(json),
+    baselineDigest: hwpxSemanticDigest(baselineSemanticJson),
     mutationJournal: [],
     intentionalSectionLayoutChanges: new Set(),
     session,
@@ -2856,7 +2865,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       sendJson(res, 200, result);
       return true;
     }
-    if (view === 'outline' || view === 'targets') {
+    if (view === 'outline') {
       const result = await boundedHwpxOutlinePage(state, id, session, body);
       emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, returned: result.returned, total: result.total });
       sendJson(res, 200, result);
@@ -2933,7 +2942,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       return true;
     }
     if (view === 'history') {
-      const json = await session.readJson();
+      const json = await readHwpxSemanticSnapshot(session);
       const limit = Math.max(1, Math.min(120, Number(body.limit || 60)));
       const entries = record.mutationJournal || [];
       sendJson(res, 200, {
@@ -3067,7 +3076,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         profile: body.profile,
         visualPolicy: body.visualPolicy,
       });
-      const quality = integrateHwpxReviewEvidence(rawQuality, await session.readJson(), body);
+      const quality = integrateHwpxReviewEvidence(rawQuality, await readHwpxSemanticSnapshot(session), body);
       emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, ok: quality.ok, issueCount: quality.issues?.length || 0 });
       sendJson(res, 200, quality);
       return true;
@@ -3095,7 +3104,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       visualPolicy: body.visualPolicy,
     });
     const { _renderedPages: allRenderedPages = [], ...rawQuality } = qualityResult;
-    const quality = integrateHwpxReviewEvidence(rawQuality, await session.readJson(), body);
+    const quality = integrateHwpxReviewEvidence(rawQuality, await readHwpxSemanticSnapshot(session), body);
     const reviewPassed = qualityAllowsFinalization(quality, 'hwpx');
     recordPreconditions(record).qualityRevision = reviewPassed ? baseRevision : null;
     recordPreconditions(record).qualityProfile = reviewPassed ? quality.reviewProfile : null;
@@ -3269,7 +3278,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       commandCount: commands.length,
       commands: commands.map((command) => ({ commandId: command.commandId, op: command.op })),
     });
-    const beforeJournalJson = fmt === 'hwpx' ? await session.readJson() : null;
+    const beforeJournalJson = fmt === 'hwpx' ? await readHwpxSemanticSnapshot(session) : null;
     let result;
     try {
       result = await session.apply(commands);
@@ -3300,7 +3309,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     }
     if (fmt === 'hwpx') record.templatePolicy = proposedTemplatePolicy;
     if (fmt === 'hwpx') {
-      const afterJournalJson = await session.readJson();
+      const afterJournalJson = await readHwpxSemanticSnapshot(session);
       const digestBefore = hwpxSemanticDigest(beforeJournalJson);
       const digestAfter = hwpxSemanticDigest(afterJournalJson);
       record.mutationJournal.push({
@@ -3365,7 +3374,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         profile: body.profile,
         visualPolicy: body.visualPolicy,
       });
-      const verification = integrateHwpxReviewEvidence(rawVerification, await verifier.readJson(), body);
+      const verification = integrateHwpxReviewEvidence(rawVerification, await readHwpxSemanticSnapshot(verifier), body);
       if (!qualityAllowsFinalization(verification, 'hwpx')) {
         throw new EditorContractError(
           'saved_document_verification_failed',

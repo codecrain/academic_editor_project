@@ -146,14 +146,10 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
     });
     normalized.forEach((command) => coveredOps.add(command.op));
     state.revision = edited.revision;
-    if (normalized.every((command) => command.op === 'layout.fitText')) {
-      assert.equal(state.revision, before);
-    } else {
-      assert.ok(state.revision > before, `${normalized.map((item) => item.op).join(',')} must advance revision`);
-      const history = await inspect(state, 'history');
-      assert.equal(history.entries.at(-1).revisionAfter, state.revision);
-      assert.notEqual(history.entries.at(-1).digestBefore, history.entries.at(-1).digestAfter);
-    }
+    assert.ok(state.revision > before, `${normalized.map((item) => item.op).join(',')} must advance revision`);
+    const history = await inspect(state, 'history');
+    assert.equal(history.entries.at(-1).revisionAfter, state.revision);
+    assert.notEqual(history.entries.at(-1).digestBefore, history.entries.at(-1).digestAfter);
     return edited;
   };
   const withDoc = async (fixture, fn, filename) => {
@@ -179,10 +175,8 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       const outline = await inspect(state, 'outline', { limit: 1 });
       assert.ok(outline.items.length === 1);
       if (outline.nextCursor) {
-        const next = await inspect(state, 'targets', { limit: 1, cursor: outline.nextCursor });
+        const next = await inspect(state, 'outline', { limit: 1, cursor: outline.nextCursor });
         assert.ok(next.items.length === 1);
-      } else {
-        await inspect(state, 'targets', { limit: 2 });
       }
       const paragraphs = await outlineItems(state, 'paragraph', 20);
       const paragraph = paragraphs.find((item) => item.textLength > 0);
@@ -262,7 +256,7 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       await edit(state, [command]);
     }, fixture.startsWith('hwp') ? `${fixture}.hwp` : undefined);
     await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location]); return { op: 'table.writeCell', location: cells[0].location, text: '단일 셀' }; });
-    await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location, cells[1].location]); return { op: 'table.writeRichCell', location: cells[1].location, styleSource: cells[0].location, text: '서식\n복제', paragraphTemplateIndices: [0, 0] }; });
+    await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location, cells[1].location]); return { op: 'table.writeCell', location: cells[1].location, styleSource: cells[0].location, text: '서식\n복제', paragraphTemplateIndices: [0, 0] }; });
     await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location, cells[1].location]); return { op: 'table.writeCells', tableId: cells[0].location.tableId, cells: [{ cell: cells[0].location.cell, text: '가' }, { cell: cells[1].location.cell, text: '나' }] }; });
     await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location, cells[1].location]); return { op: 'table.applyCellStyle', target: cells[1].location, styleSource: cells[0].location }; });
     await tableScenario(async (state, cells) => { const tableCells = cells.filter((item) => item.location.tableId === cells[0].location.tableId); await inspectTargets(state, [tableCells[0].location]); return { op: 'table.insertRows', target: tableCells[0].location, rowIndex: 1, count: 1, templateRow: 0, clearText: true }; });
@@ -295,21 +289,14 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
     await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location]); return { op: 'table.structure', target: cells[0].location, action: 'deleteTable' }; });
 
     await tableScenario(async (state, cells) => { await inspectTargets(state, [cells[0].location, cells[1].location]); return { op: 'style.applyText', target: cells[1].location, styleSource: cells[0].location, text: '스타일 적용' }; });
-    await textScenario('paragraph.applyStyle', async (state, paragraphs) => {
+    await textScenario('style.applyText', async (state, paragraphs) => {
       const candidates = paragraphs.filter((item) => item.textLength > 0);
       const source = candidates[0];
       const target = candidates.find((item) => item.styleFingerprint?.hash !== source.styleFingerprint?.hash);
-      assert.ok(target, 'paragraph.applyStyle requires two measurably different paragraph styles');
+      assert.ok(target, 'style.applyText without text requires two measurably different paragraph styles');
       await inspectTargets(state, [source.location, target.location]);
-      return { op: 'paragraph.applyStyle', source: source.location, target: target.location };
+      return { op: 'style.applyText', styleSource: source.location, target: target.location };
     }, 'briefing');
-    await tableScenario(async (state, cells) => {
-      const source = cells[0];
-      const target = cells.find((item) => item.styleFingerprint?.hash !== source.styleFingerprint?.hash);
-      assert.ok(target, 'style.clone requires two measurably different cell styles');
-      await inspectTargets(state, [source.location, target.location]);
-      return { op: 'style.clone', source: source.location, target: target.location };
-    });
     await withDoc('blank', async (state) => {
       const paragraphs = await outlineItems(state, 'paragraph');
       const target = paragraphs[0]; await inspectTargets(state, [target.location]);
@@ -335,7 +322,6 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
         await edit(state, [{ op: 'format.apply', scope, target, properties }]);
       }, fixture.startsWith('hwp') ? `${fixture}.hwp` : undefined);
     }
-    await tableScenario(async (state, cells) => { const target = cells[0]; await inspectTargets(state, [target.location]); return { op: 'layout.fitText', location: target.location, text: 'alpha beta gamma delta', options: { maxCharsPerLine: 8, maxLines: 3, truncate: false } }; });
 
     for (const action of ['split', 'pageBreak', 'columnBreak']) {
       await withDoc('blank', async (state) => {

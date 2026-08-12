@@ -93,6 +93,7 @@ class WorkerBackedEditorSession {
   }
 
   readJson() { return this.runtime.call(this.documentId, 'readJson'); }
+  semanticSnapshot() { return this.runtime.call(this.documentId, 'semanticSnapshot'); }
   targetMap() { return this.runtime.call(this.documentId, 'targetMap'); }
   outlinePage(options) { return this.runtime.call(this.documentId, 'outlinePage', options); }
   styleProfile(options) { return this.runtime.call(this.documentId, 'styleProfile', options); }

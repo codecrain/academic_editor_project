@@ -177,8 +177,8 @@ function paragraphOp(opId, paragraph, text) {
 function styleCloneOp(opId, sourceTable, sourceCellIndex, targetTable, targetCellIndex) {
   return {
     commandId: opId,
-    op: 'paragraph.applyStyle',
-    source: { tableId: sourceTable.id, cell: { number: sourceCellIndex } },
+    op: 'style.applyText',
+    styleSource: { tableId: sourceTable.id, cell: { number: sourceCellIndex } },
     target: { tableId: targetTable.id, cell: { number: targetCellIndex } },
   };
 }
@@ -187,7 +187,7 @@ function cellStyleCloneOp(opId, sourceTable, sourceCellIndex, targetTable, targe
   return {
     commandId: opId,
     op: 'table.applyCellStyle',
-    source: { tableId: sourceTable.id, cell: { number: sourceCellIndex } },
+    styleSource: { tableId: sourceTable.id, cell: { number: sourceCellIndex } },
     target: { tableId: targetTable.id, cell: { number: targetCellIndex } },
   };
 }
@@ -293,7 +293,7 @@ assert.equal(saved.validation.tables.length, before.tables.length);
 
 const report = {
   ok: true,
-  method: 'HwpxApiSession readJson -> apply(text.replaceParagraph,table.writeCell,paragraph.applyStyle,table.applyCellStyle) -> preserve-package save',
+  method: 'HwpxApiSession readJson -> apply(text.replaceParagraph,table.writeCell,style.applyText,table.applyCellStyle) -> preserve-package save',
   inputPath,
   outputPath: actualOutputPath,
   requestedOutputPath: outputPath,

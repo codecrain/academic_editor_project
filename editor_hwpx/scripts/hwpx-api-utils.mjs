@@ -539,12 +539,8 @@ function readTable(doc, section, para, control, tableIndex, tableOrderInParagrap
       layout: { bbox, capacity },
       allowedActions: [
         'table.writeCell',
-        'table.writeRichCell',
         'table.applyCellStyle',
-        'style.clone',
         'style.applyText',
-        'paragraph.applyStyle',
-        'layout.fitText',
       ],
       native: { section, paragraph: para, control, cellIndex },
     });
@@ -759,12 +755,8 @@ function discoverNestedPackageTables(inputBytes) {
             layout: { bbox: null, capacity },
             allowedActions: [
               'table.writeCell',
-              'table.writeRichCell',
               'table.applyCellStyle',
-              'style.clone',
               'style.applyText',
-              'paragraph.applyStyle',
-              'layout.fitText',
             ],
             native: {
               packageOnly: true,
@@ -1092,7 +1084,7 @@ function buildEditableTargets(sections, tables) {
       currentText: paragraph.text,
       textLength: paragraph.text.length,
       styleFingerprint: paragraph.styleFingerprint,
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle'],
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText'],
       }))),
     cells: tables.flatMap((table) => table.cells.map((cell) => ({
       id: cell.id,
@@ -3447,23 +3439,9 @@ export class HwpxApiSession {
     const nestedTables = discoverNestedPackageTables(this.inputBytes);
     const tables = annotateTablePictureSlots(this.inputBytes, [...nativeTables, ...nestedTables]);
     const styleGraph = readStyleGraph(this.doc);
-    const sectionCount = this.doc.getSectionCount();
-    const pageDefinitions = Array.from({ length: sectionCount }, (_, section) => ({
-      section,
-      pageDef: tryJson(() => this.doc.getPageDef(section)),
-    }));
-    const headerFooters = Array.from({ length: sectionCount }, (_, section) => (
-      [true, false].flatMap((isHeader) => [0, 1, 2].map((applyTo) => ({
-        section,
-        isHeader,
-        applyTo,
-        value: tryJson(() => this.doc.getHeaderFooter(section, isHeader, applyTo)),
-      })))
-    )).flat().filter((item) => item.value?.exists);
     const objectGraph = isZipPackage(this.inputBytes)
       ? readPackageObjects(this.inputBytes)
       : readNativePictureObjects(this.doc);
-    const footnotes = readNativeFootnotes(this.doc);
     const editableTargets = buildEditableTargets(sections, tables);
     const json = {
       revision: this.revision,
@@ -3476,9 +3454,6 @@ export class HwpxApiSession {
       styleGraph,
       layoutGraph: {
         pageCount: this.doc.pageCount(),
-        pageDefinitions,
-        headerFooters,
-        footnotes,
         tables: tables.map((table) => ({
           id: table.id,
           section: table.section,
@@ -3501,6 +3476,32 @@ export class HwpxApiSession {
 
   readJson() {
     return this.exportJson();
+  }
+
+  semanticSnapshot() {
+    const json = this.exportJson();
+    const sectionCount = this.doc.getSectionCount();
+    const pageDefinitions = Array.from({ length: sectionCount }, (_, section) => ({
+      section,
+      pageDef: tryJson(() => this.doc.getPageDef(section)),
+    }));
+    const headerFooters = Array.from({ length: sectionCount }, (_, section) => (
+      [true, false].flatMap((isHeader) => [0, 1, 2].map((applyTo) => ({
+        section,
+        isHeader,
+        applyTo,
+        value: tryJson(() => this.doc.getHeaderFooter(section, isHeader, applyTo)),
+      })))
+    )).flat().filter((item) => item.value?.exists);
+    return {
+      ...json,
+      layoutGraph: {
+        ...json.layoutGraph,
+        pageDefinitions,
+        headerFooters,
+        footnotes: readNativeFootnotes(this.doc),
+      },
+    };
   }
 
   analyze() {
@@ -3705,7 +3706,7 @@ export class HwpxApiSession {
         hash: hashString(stableStringify({ kind: 'paragraph', ...measuredStyle })),
         basis: { kind: 'paragraph', ...measuredStyle },
       },
-      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText', 'paragraph.applyStyle'],
+      allowedActions: ['text.replaceParagraph', 'text.replace', 'style.applyText'],
       native: { section, paragraph },
     };
   }
@@ -3713,7 +3714,7 @@ export class HwpxApiSession {
   fitText(location, text, options = {}) {
     const target = this.inspectTarget(location);
     if (target.kind !== 'cell') {
-      return { text: String(text ?? ''), changed: false, truncated: false, reason: 'layout.fitText currently applies to table cells only' };
+      return { text: String(text ?? ''), changed: false, truncated: false, reason: 'Text fitting applies to table cells only' };
     }
     return fitTextToCapacity(text, target.layout.capacity, options);
   }
@@ -3791,15 +3792,15 @@ export class HwpxApiSession {
   }
 
   resolveParagraphStyleIds(command = {}) {
-    const explicit = normalizeStyleIds(command.styleIds ?? command.style ?? command.format);
-    const sourceLocation = command.styleSource ?? command.source ?? command.from ?? command.cloneStyleFrom ?? command.sourceLocation;
+    const explicit = normalizeStyleIds(command.styleIds);
+    const sourceLocation = command.styleSource;
     const source = sourceLocation ? this.paragraphStyleIds(sourceLocation) : {};
     return mergeStyleIds(source, explicit);
   }
 
   resolveCellStyle(command = {}) {
-    const explicit = normalizeCellStyle(command.cellStyle ?? command.style ?? command.format);
-    const sourceLocation = command.styleSource ?? command.source ?? command.from ?? command.cloneStyleFrom ?? command.sourceLocation;
+    const explicit = normalizeCellStyle(command.cellStyle);
+    const sourceLocation = command.styleSource;
     const source = sourceLocation ? this.cellOuterStyle(sourceLocation) : {};
     return mergeCellStyles(source, explicit);
   }
@@ -3879,7 +3880,7 @@ export class HwpxApiSession {
     const text = commandText(command);
     const tableId = command.tableId ?? location.tableId ?? location.table?.id;
 
-    if (key === 'setcelltext' || key === 'tablewritecell' || key === 'tablewriterichcell') {
+    if (key === 'tablewritecell') {
       return [{
         ...command,
         opId,
@@ -3890,14 +3891,14 @@ export class HwpxApiSession {
           tableCell: normalizeCellReference(command.cell ?? location.cell ?? location.tableCell ?? command.tableCell ?? location.native),
         },
         text,
-        styleSource: command.styleSource ?? command.cloneStyleFrom ?? command.sourceLocation,
+        styleSource: command.styleSource,
         paragraphStyleIds: command.paragraphStyleIds,
         paragraphTemplateIndices: command.paragraphTemplateIndices,
       }];
     }
 
     if (key === 'tablewritecells') {
-      const cells = command.cells ?? command.content?.cells ?? [];
+      const cells = command.cells ?? [];
       assert.ok(Array.isArray(cells), 'table.writeCells requires cells array');
       return cells.map((cellCommand, cellIndex) => ({
         ...cellCommand,
@@ -3914,13 +3915,13 @@ export class HwpxApiSession {
         fit: cellCommand.fit ?? command.fit,
         layout: cellCommand.layout ?? command.layout,
         fitOptions: cellCommand.fitOptions ?? command.fitOptions,
-        styleSource: cellCommand.styleSource ?? cellCommand.cloneStyleFrom ?? command.styleSource ?? command.cloneStyleFrom,
+        styleSource: cellCommand.styleSource ?? command.styleSource,
         paragraphStyleIds: cellCommand.paragraphStyleIds ?? command.paragraphStyleIds,
         paragraphTemplateIndices: cellCommand.paragraphTemplateIndices ?? command.paragraphTemplateIndices,
       }));
     }
 
-    if (key === 'replaceparagraphtext' || key === 'textreplaceparagraph') {
+    if (key === 'textreplaceparagraph') {
       const paragraph = normalizeParagraphLocation(location);
       return [{
         ...command,
@@ -3931,7 +3932,7 @@ export class HwpxApiSession {
       }];
     }
 
-    if (key === 'insertparagraphafter' || key === 'textinsertparagraphafter' || key === 'textinsertafterparagraph') {
+    if (key === 'textinsertafterparagraph') {
       const paragraph = normalizeParagraphLocation(location);
       return [{
         ...command,
@@ -3939,11 +3940,11 @@ export class HwpxApiSession {
         op: 'insertParagraphAfter',
         target: { native: paragraph },
         text,
-        styleSource: command.styleSource ?? command.cloneStyleFrom ?? command.sourceLocation,
+        styleSource: command.styleSource,
       }];
     }
 
-    if (key === 'appendparagraph' || key === 'paragraphappend') {
+    if (key === 'appendparagraph') {
       const paragraph = normalizeParagraphLocation(location);
       return [{
         ...command,
@@ -4012,27 +4013,21 @@ export class HwpxApiSession {
       }];
     }
 
-    if (key === 'replacetext' || key === 'textreplace') {
+    if (key === 'textreplace') {
       return [{ ...command, opId, op: 'replaceText', text }];
     }
 
-    if (key === 'textreplacetracked' || key === 'replacetracked') {
+    if (key === 'textreplacetracked') {
       return [{ ...command, opId, op: 'replaceTracked', text }];
     }
 
-    if (key === 'layoutfittext') {
-      return [{ ...command, opId, op: 'layout.fitText', location, text, options: command.options ?? command.layout ?? command.fitOptions ?? {} }];
-    }
-
-    if (key === 'imagereplace' || key === 'objectreplaceimage' || key === 'chartreplaceimage') {
+    if (key === 'imagereplace') {
       return [{
         ...command,
         opId,
         op: 'image.replace',
         imageName: command.imageName ?? command.target?.imageName ?? command.target?.name ?? location.imageName ?? location.name,
-        bytes: command.bytes,
         bytesBase64: command.bytesBase64,
-        filePath: command.filePath,
       }];
     }
 
@@ -4042,22 +4037,18 @@ export class HwpxApiSession {
         opId,
         op: 'image.replaceInCell',
         target: command.target ?? command.location,
-        bytes: command.bytes,
         bytesBase64: command.bytesBase64,
-        filePath: command.filePath,
         mimeType: command.mimeType,
       }];
     }
 
-    if (key === 'imageinsertafterparagraph' || key === 'imageinsert' || key === 'objectinsertimage') {
+    if (key === 'imageinsertafterparagraph') {
       return [{
         ...command,
         opId,
         op: 'image.insertAfterParagraph',
         target: command.target ?? command.location,
-        bytes: command.bytes,
         bytesBase64: command.bytesBase64,
-        filePath: command.filePath,
         mimeType: command.mimeType,
         width: command.width,
         height: command.height,
@@ -4066,13 +4057,13 @@ export class HwpxApiSession {
       }];
     }
 
-    if (key === 'imagegenerateandreplace' || key === 'objectgenerateandreplace' || key === 'chartgenerateandreplace') {
+    if (key === 'imagegenerateandreplace') {
       return [{
         ...command,
         opId,
         op: 'image.generateAndReplace',
         imageName: command.imageName ?? command.target?.imageName ?? command.target?.name ?? location.imageName ?? location.name,
-        generator: command.generator ?? command.image ?? command.chart ?? command.content ?? {},
+        generator: command.generator ?? {},
       }];
     }
 
@@ -4087,38 +4078,25 @@ export class HwpxApiSession {
       }];
     }
 
-    if (key === 'objectdeletetextboxbytext' || key === 'objectdeletebytext' || key === 'shapedeletebytext') {
+    if (key === 'objectdeletetextboxbytext') {
       const section = Number(command.section ?? command.target?.section ?? command.location?.section ?? 0);
       return [{
         ...command,
         opId,
         op: 'object.deleteTextBoxByText',
         section: Number.isFinite(section) ? section : 0,
-        texts: normalizeTextList(command.texts ?? command.queries ?? command.text ?? command.query),
+        texts: normalizeTextList(command.texts),
       }];
     }
 
-    if (key === 'objectreplacetextboxtext' || key === 'shapereplacetext' || key === 'textboxreplacetext') {
+    if (key === 'objectreplacetextboxtext') {
       const section = Number(command.section ?? command.target?.section ?? command.location?.section ?? 0);
       return [{
         ...command,
         opId,
         op: 'object.replaceTextBoxText',
         section: Number.isFinite(section) ? section : 0,
-        replacements: command.replacements ?? [{
-          find: command.find ?? command.query ?? command.text,
-          replaceWith: command.replaceWith ?? command.newText ?? command.value ?? '',
-        }],
-      }];
-    }
-
-    if (key === 'styleclone' || key === 'styleclonefromtarget') {
-      return [{
-        ...command,
-        opId,
-        op: 'style.cloneCellTextStyle',
-        target: command.target ?? command.to ?? location,
-        styleSource: command.styleSource ?? command.source ?? command.from ?? command.sourceLocation,
+        replacements: command.replacements,
       }];
     }
 
@@ -4127,32 +4105,20 @@ export class HwpxApiSession {
         ...command,
         opId,
         op: 'style.applyText',
-        target: command.target ?? command.to ?? location,
-        text: command.text ?? command.newText,
-        styleSource: command.styleSource ?? command.source ?? command.from ?? command.sourceLocation,
-        styleIds: command.styleIds ?? command.style ?? command.format,
+        target: command.target,
+        text: command.text,
+        styleSource: command.styleSource,
       }];
     }
 
-    if (key === 'paragraphapplystyle' || key === 'styleapplyparagraph') {
-      return [{
-        ...command,
-        opId,
-        op: 'paragraph.applyStyle',
-        target: command.target ?? command.to ?? location,
-        styleSource: command.styleSource ?? command.source ?? command.from ?? command.sourceLocation,
-        styleIds: command.styleIds ?? command.style ?? command.format,
-      }];
-    }
-
-    if (key === 'tableapplycellstyle' || key === 'cellapplystyle') {
+    if (key === 'tableapplycellstyle') {
       return [{
         ...command,
         opId,
         op: 'table.applyCellStyle',
-        target: command.target ?? command.to ?? location,
-        styleSource: command.styleSource ?? command.source ?? command.from ?? command.sourceLocation,
-        cellStyle: command.cellStyle ?? command.style ?? command.format,
+        target: command.target,
+        styleSource: command.styleSource,
+        cellStyle: command.cellStyle,
       }];
     }
 
@@ -4173,7 +4139,7 @@ export class HwpxApiSession {
       }
       const paragraphScopedCellFormat = (
         (entry?.op === 'format.apply' && ['character', 'paragraph'].includes(op.scope))
-        || ['setRunStyle', 'setParagraphStyle', 'applyStyle', 'paragraph.applyStyle'].includes(entry?.op)
+        || ['setRunStyle', 'setParagraphStyle', 'applyStyle'].includes(entry?.op)
       );
       if (paragraphScopedCellFormat) {
         const location = commandLocation(op);
@@ -4211,11 +4177,6 @@ export class HwpxApiSession {
         error.details = { unsupported: [...new Set(unsupported)] };
         throw error;
       }
-    }
-    if (ops.every(op => resolveHwpxCommand(op)?.op === 'layout.fitText')) {
-      const trial = new HwpxApiSession(this.inputBytes, { saveMode: this.saveMode });
-      const trialResult = trial.commandsBatchUnsafe(ops);
-      return { revision: this.revision, results: trialResult.results };
     }
     const locationChangingOps = ops.filter((op) => [
       'text.deleteParagraphs',
@@ -4808,30 +4769,9 @@ export class HwpxApiSession {
           target: op.target,
           author: op.author,
         });
-      } else if (op.op === 'layout.fitText') {
-        const fit = this.fitText(op.location, op.text, op.options);
-        results.push({ opId: op.opId, ok: true, changed: false, action: 'layout.fitText', fit });
-      } else if (op.op === 'style.cloneCellTextStyle') {
-        assert.ok(op.styleSource, 'style.clone requires source/styleSource location');
-        const table = this.tableFromLocation(op.target);
-        const cell = this.cellFromLocation(table, op.target);
+      } else if (op.op === 'style.applyText') {
         const target = this.inspectTarget(op.target);
-        const styleIds = this.resolveParagraphStyleIds(op);
-        if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, target.currentText);
-        this.cellPatches.push({
-          section: table.section,
-          para: table.para,
-          tableOrderInParagraph: table.tableOrderInParagraph,
-          xmlTableId: table.packageOnly ? table.id : null,
-          cellIndex: cell.cellIndex,
-          text: target.currentText,
-          styleIds,
-          opId: op.opId,
-        });
-        results.push({ opId: op.opId, ok: true, target: cell.id, action: 'style.clone' });
-      } else if (op.op === 'style.applyText' || op.op === 'paragraph.applyStyle') {
-        const target = this.inspectTarget(op.target);
-        const nextText = op.op === 'style.applyText' && op.text !== undefined ? op.text : target.currentText;
+        const nextText = op.text !== undefined ? op.text : target.currentText;
         const styleIds = this.resolveParagraphStyleIds(op);
         if (target.kind === 'cell') {
           const table = this.tableFromLocation(op.target);
@@ -4877,29 +4817,15 @@ export class HwpxApiSession {
         results.push({ opId: op.opId, ok: true, target: cell.id, action: 'table.applyCellStyle', cellStyle });
       } else if (op.op === 'image.replace') {
         assert.ok(op.imageName, 'image.replace requires imageName');
-        let bytes = op.bytes;
-        if (bytes && !Buffer.isBuffer(bytes)) {
-          bytes = Buffer.from(bytes);
-        } else if (!bytes && op.bytesBase64) {
-          bytes = Buffer.from(op.bytesBase64, 'base64');
-        } else if (!bytes && op.filePath) {
-          bytes = readFileSync(op.filePath);
-        }
-        assert.ok(bytes && bytes.length > 0, 'image.replace requires bytes, bytesBase64, or filePath');
+        const bytes = op.bytesBase64 ? Buffer.from(op.bytesBase64, 'base64') : null;
+        assert.ok(bytes && bytes.length > 0, 'image.replace requires bytesBase64');
         this.packagePatches.push({ name: op.imageName, bytes: Buffer.from(bytes), opId: op.opId });
         results.push({ opId: op.opId, ok: true, target: op.imageName, action: 'image.replace', byteLength: bytes.length });
       } else if (op.op === 'image.replaceInCell') {
         const table = this.tableFromLocation(op.target);
         const cell = this.cellFromLocation(table, op.target);
-        let bytes = op.bytes;
-        if (bytes && !Buffer.isBuffer(bytes)) {
-          bytes = Buffer.from(bytes);
-        } else if (!bytes && op.bytesBase64) {
-          bytes = Buffer.from(op.bytesBase64, 'base64');
-        } else if (!bytes && op.filePath) {
-          bytes = readFileSync(op.filePath);
-        }
-        assert.ok(bytes && bytes.length > 0, 'image.replaceInCell requires bytes, bytesBase64, or filePath');
+        const bytes = op.bytesBase64 ? Buffer.from(op.bytesBase64, 'base64') : null;
+        assert.ok(bytes && bytes.length > 0, 'image.replaceInCell requires bytesBase64');
         const format = imagePackageFormat(bytes, op.mimeType);
         const slot = resolveCellPackageImage(this.inputBytes, table, cell.cellIndex);
         const imageSha256 = createHash('sha256').update(bytes).digest('hex');
@@ -4952,15 +4878,8 @@ export class HwpxApiSession {
       } else if (op.op === 'image.insertAfterParagraph') {
         const target = this.inspectTarget(op.target);
         assert.equal(target.kind, 'paragraph', 'image.insertAfterParagraph requires a paragraph target');
-        let bytes = op.bytes;
-        if (bytes && !Buffer.isBuffer(bytes)) {
-          bytes = Buffer.from(bytes);
-        } else if (!bytes && op.bytesBase64) {
-          bytes = Buffer.from(op.bytesBase64, 'base64');
-        } else if (!bytes && op.filePath) {
-          bytes = readFileSync(op.filePath);
-        }
-        assert.ok(bytes && bytes.length > 0, 'image.insertAfterParagraph requires bytes, bytesBase64, or filePath');
+        const bytes = op.bytesBase64 ? Buffer.from(op.bytesBase64, 'base64') : null;
+        assert.ok(bytes && bytes.length > 0, 'image.insertAfterParagraph requires bytesBase64');
         const format = imagePackageFormat(bytes, op.mimeType);
         const pixels = imagePixelDimensions(bytes, format.extension);
         const size = fittedInlineImageSize(pixels.width, pixels.height, op.width, op.height);

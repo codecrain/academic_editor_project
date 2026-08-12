@@ -42,7 +42,7 @@ const command = ({
   notes: Object.freeze([...notes]),
 });
 
-const locationField = 'Exact paragraph or table-cell location returned by editor_hwpx_inspect(view="outline"|"targets"|"target").';
+const locationField = 'Exact paragraph or table-cell location returned by editor_hwpx_inspect(view="outline"|"target").';
 const styleSourceField = 'Exact inspected paragraph or cell whose existing HWPX style must be cloned.';
 
 const HWPX_COMMAND_CATALOG = Object.freeze([
@@ -102,7 +102,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     optional: ['date'],
     precondition: 'target_inspect',
     execution: 'tracked-package-transform',
-    fields: { target: locationField, text: 'Replacement text.', author: 'Tracked-change author name.' },
+    fields: {
+      target: locationField,
+      text: 'Replacement text.',
+      author: 'Tracked-change author name.',
+      date: 'Optional ISO-8601 tracked-change timestamp.',
+    },
     example: {
       op: 'text.replaceTracked',
       target: { native: { section: 0, para: 1, offset: 0, length: 4 } },
@@ -165,7 +170,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     required: ['locations'],
     precondition: 'target_inspect',
     fields: {
-      locations: 'Nonempty array of exact paragraph locations returned by editor_hwpx_inspect(view="outline"|"targets"|"target").',
+      locations: 'Nonempty array of exact paragraph locations returned by editor_hwpx_inspect(view="outline"|"target").',
     },
     example: {
       op: 'text.deleteParagraphs',
@@ -198,27 +203,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'table.writeCell', location: { tableId: 'tbl_0', cell: { number: 1 } }, text: '18,420' },
   }),
   command({
-    op: 'table.writeRichCell',
-    category: 'table',
-    description: 'Replace one inspected table cell and clone paragraph/character style IDs from another inspected location.',
-    required: ['location', 'styleSource', 'text'],
-    optional: ['paragraphStyleIds', 'paragraphTemplateIndices'],
-    precondition: 'target_inspect',
-    fields: {
-      location: locationField,
-      styleSource: styleSourceField,
-      text: 'Complete cell text.',
-      paragraphStyleIds: 'Optional array aligned to newline-delimited cell paragraphs for mixed paragraph styles inside one cell.',
-      paragraphTemplateIndices: 'Optional source paragraph indices for preserving structured tabs and inline controls.',
-    },
-    example: {
-      op: 'table.writeRichCell',
-      location: { tableId: 'tbl_0', cell: { number: 1 } },
-      styleSource: { tableId: 'tbl_0', cell: { number: 0 } },
-      text: '서식 복제 값',
-    },
-  }),
-  command({
     op: 'table.writeCells',
     category: 'table',
     description: 'Write multiple inspected table cells in one atomic batch.',
@@ -247,12 +231,11 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     category: 'table',
     description: 'Apply explicit HWPX outer-cell style values or clone them from another inspected cell.',
     required: ['target'],
-    anyOf: [['styleSource', 'source', 'cellStyle']],
+    anyOf: [['styleSource', 'cellStyle']],
     precondition: 'target_inspect',
     fields: {
       target: locationField,
       styleSource: styleSourceField,
-      source: 'Alias of styleSource.',
       cellStyle: 'HWPX cell style fields such as borderFillIDRef, vertical alignment, and margins.',
     },
     example: {
@@ -452,33 +435,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
-    op: 'paragraph.applyStyle',
-    category: 'style',
-    description: 'Clone paragraph/character style IDs from an inspected source without changing target text.',
-    required: ['target'],
-    anyOf: [['styleSource', 'source']],
-    precondition: 'target_inspect',
-    fields: { target: locationField, styleSource: styleSourceField, source: 'Alias of styleSource.' },
-    example: {
-      op: 'paragraph.applyStyle',
-      target: { paragraph: { section: 0, number: 2 } },
-      styleSource: { paragraph: { section: 0, number: 1 } },
-    },
-  }),
-  command({
-    op: 'style.clone',
-    category: 'style',
-    description: 'Clone paragraph/character text style from one inspected target to another.',
-    required: ['source', 'target'],
-    precondition: 'target_inspect',
-    fields: { source: styleSourceField, target: locationField },
-    example: {
-      op: 'style.clone',
-      source: { tableId: 'tbl_0', cell: { number: 0 } },
-      target: { tableId: 'tbl_0', cell: { number: 1 } },
-    },
-  }),
-  command({
     op: 'applyStyle',
     category: 'style',
     description: 'Apply an existing named HWPX paragraph style.',
@@ -549,25 +505,6 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       'Unknown properties and out-of-range values fail the whole atomic batch; they are never silently ignored.',
       'Character or paragraph scope on a multi-paragraph cell requires target.cellParagraphIndex; the first cell paragraph is never selected implicitly.',
     ],
-  }),
-  command({
-    op: 'layout.fitText',
-    category: 'layout',
-    description: 'Calculate wrapping/truncation for one inspected table cell without changing the document.',
-    required: ['location', 'text'],
-    optional: ['options'],
-    precondition: 'target_inspect',
-    fields: {
-      location: locationField,
-      text: 'Text to fit.',
-      options: 'Fit limits such as maxCharsPerLine/maxLines. Source text remains unchanged unless materializeBreaks=true; truncation additionally requires truncate=true and allowTextLoss=true.',
-    },
-    example: {
-      op: 'layout.fitText',
-      location: { tableId: 'tbl_0', cell: { number: 1 } },
-      text: '긴 텍스트',
-      options: { maxLines: 3, truncate: false },
-    },
   }),
   command({
     op: 'paragraph.structure',
@@ -838,11 +775,8 @@ const HWPX_PACKAGE_ONLY_OPS = Object.freeze(new Set([
   'object.deleteTextBoxByText',
   'object.replaceTextBoxText',
   'text.replaceTracked',
-  'style.clone',
   'style.applyText',
-  'paragraph.applyStyle',
   'table.applyCellStyle',
-  'table.writeRichCell',
 ]));
 
 const commandByName = new Map(HWPX_COMMAND_CATALOG.map((entry) => [entry.op, entry]));
@@ -863,6 +797,11 @@ function meaningful(value, { allowEmptyString = false } = {}) {
   return true;
 }
 
+function unsupportedFields(value, allowed) {
+  const allowedFields = new Set(allowed);
+  return Object.keys(value).filter((field) => !allowedFields.has(field));
+}
+
 function fieldValue(commandValue, field) {
   if (field === 'target') return commandValue.target ?? commandValue.location;
   if (field === 'location') return commandValue.location ?? commandValue.target;
@@ -875,7 +814,6 @@ const EMPTY_TEXT_OPS = new Set([
   'text.replace',
   'text.replaceTracked',
   'table.writeCell',
-  'table.writeRichCell',
 ]);
 
 const SINGLE_TARGET_INSPECTION_OPS = new Set([
@@ -956,7 +894,7 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
     if (value !== undefined && value !== null) add(value, role);
   };
 
-  if (entry.op === 'table.writeCell' || entry.op === 'table.writeRichCell') {
+  if (entry.op === 'table.writeCell') {
     add(commandValue.location ?? commandValue.target, 'location');
     optional(commandValue.styleSource, 'styleSource');
   } else if (entry.op === 'table.writeCells') {
@@ -964,7 +902,7 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
       add(cellLocation(cell, cell.tableId ?? commandValue.tableId ?? commandValue.location?.tableId), `cells[${index}]`);
       optional(cell.styleSource ?? commandValue.styleSource, `cells[${index}].styleSource`);
     }
-  } else if (['text.replaceParagraph', 'text.insertAfterParagraph', 'layout.fitText'].includes(entry.op)) {
+  } else if (['text.replaceParagraph', 'text.insertAfterParagraph'].includes(entry.op)) {
     add(commandValue.location ?? commandValue.target, 'location');
     optional(commandValue.styleSource, 'styleSource');
   } else if (SINGLE_TARGET_INSPECTION_OPS.has(entry.op)) {
@@ -972,16 +910,10 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
     if (entry.op === 'appendParagraph') optional(commandValue.styleSource, 'styleSource');
   } else if (entry.op === 'table.applyCellStyle') {
     add(commandValue.target ?? commandValue.location, 'target');
-    optional(commandValue.styleSource ?? commandValue.source, 'styleSource');
+    optional(commandValue.styleSource, 'styleSource');
   } else if (entry.op === 'style.applyText') {
     add(commandValue.target ?? commandValue.location, 'target');
     add(commandValue.styleSource, 'styleSource');
-  } else if (entry.op === 'paragraph.applyStyle') {
-    add(commandValue.target ?? commandValue.location, 'target');
-    add(commandValue.styleSource ?? commandValue.source, 'styleSource');
-  } else if (entry.op === 'style.clone') {
-    add(commandValue.target, 'target');
-    add(commandValue.source, 'source');
   } else if (entry.op === 'text.deleteParagraphs') {
     for (const [index, location] of commandValue.locations.entries()) {
       add(location, `locations[${index}]`);
@@ -1044,6 +976,10 @@ function validateHwpxCommands(commands) {
         `HWPX command ${entry.op} is not ready in the installed runtime (${entry.readiness}).`,
       );
     }
+    const unknownFields = unsupportedFields(value, [...Object.keys(entry.fields), 'opId']);
+    if (unknownFields.length) {
+      throw new Error(`${entry.op} has unsupported field(s): ${unknownFields.join(', ')}.`);
+    }
     const missing = entry.required.filter((field) => {
       if (field === 'op') return !meaningful(value.op);
       const candidate = fieldValue(value, field);
@@ -1072,6 +1008,13 @@ function validateHwpxCommands(commands) {
         }
         if (!Object.hasOwn(cell, 'text') || typeof cell.text !== 'string') {
           throw new Error(`table.writeCells cells[${cellIndex}] requires a text string; an empty string explicitly clears the cell.`);
+        }
+        const unknownCellFields = unsupportedFields(cell, [
+          'commandId', 'opId', 'tableId', 'location', 'cell', 'tableCell', 'text',
+          'fit', 'layout', 'fitOptions', 'styleSource', 'paragraphStyleIds', 'paragraphTemplateIndices',
+        ]);
+        if (unknownCellFields.length) {
+          throw new Error(`table.writeCells cells[${cellIndex}] has unsupported field(s): ${unknownCellFields.join(', ')}.`);
         }
       });
     }
@@ -1124,10 +1067,10 @@ function validateHwpxCommands(commands) {
         selectors.add(selector);
       });
     }
-    if (['table.writeCell', 'table.writeRichCell'].includes(entry.op) && value.paragraphStyleIds !== undefined) {
+    if (entry.op === 'table.writeCell' && value.paragraphStyleIds !== undefined) {
       validateParagraphStyleIds(value.paragraphStyleIds, String(value.text ?? '').split('\n').length, entry.op);
     }
-    if (['table.writeCell', 'table.writeRichCell'].includes(entry.op) && value.paragraphTemplateIndices !== undefined) {
+    if (entry.op === 'table.writeCell' && value.paragraphTemplateIndices !== undefined) {
       validateParagraphTemplateIndices(value.paragraphTemplateIndices, String(value.text ?? '').split('\n').length, entry.op);
     }
     if (entry.op === 'table.writeCells') {
@@ -1233,6 +1176,12 @@ function validateHwpxCommands(commands) {
       throw new Error('object.replaceTextBoxText replacements must contain nonempty find strings and string replaceWith values.');
     }
     if (entry.op === 'object.replaceTextBoxText') {
+      value.replacements.forEach((replacement, replacementIndex) => {
+        const unknownReplacementFields = unsupportedFields(replacement, ['find', 'replaceWith']);
+        if (unknownReplacementFields.length) {
+          throw new Error(`object.replaceTextBoxText replacements[${replacementIndex}] has unsupported field(s): ${unknownReplacementFields.join(', ')}.`);
+        }
+      });
       const normalizedFinds = value.replacements.map((item) => item.find.replace(/\r\n?/g, '\n'));
       if (new Set(normalizedFinds).size !== normalizedFinds.length) {
         throw new Error('object.replaceTextBoxText replacements must use unique find strings.');

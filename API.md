@@ -35,7 +35,7 @@ DOCX additionally supports `references` through its DOCX-specific command catalo
 HWPX MCP tools:
 
 - `editor_hwpx_open`
-- `editor_hwpx_inspect` (`summary`, `outline`, `styles`, `targets`, `target`, `objects`, `template`, `page`, `quality`, `catalog`, `search`, `fields`, `security`, `history`, `capabilities`)
+- `editor_hwpx_inspect` (`summary`, `outline`, `styles`, `target`, `objects`, `template`, `page`, `quality`, `catalog`, `search`, `fields`, `security`, `history`, `capabilities`)
 - `editor_hwpx_edit`
 - `editor_hwpx_review`
 - `editor_hwpx_save` (`verified` or recovery-only `checkpoint`)
@@ -65,7 +65,7 @@ PDF MCP tools:
 
 `editor_docx_command_catalog`, `editor_hwpx_inspect(view="catalog")`, and
 `editor_pdf_command_catalog` are the machine-readable sources of truth. They
-currently expose 31 DOCX commands, 42 HWPX commands, and 46 PDF commands.
+currently expose 31 DOCX commands, 38 HWPX commands, and 46 PDF commands.
 HWPX command entries report
 `readiness` separately from `execution`; canonical commands that are not ready
 are rejected before mutation. Agents should query the applicable
@@ -140,8 +140,8 @@ projections instead:
 }
 ```
 
-HWPX `view` is `summary`, `outline`, `styles`, `targets`, `target`, `objects`,
-`template`, `page`, `quality`, or `catalog`. Ordered and style views use revision-bound opaque
+HWPX `view` is `summary`, `outline`, `styles`, `target`, `objects`, `template`,
+`page`, `quality`, `catalog`, `search`, `fields`, `security`, `history`, or `capabilities`. Ordered and style views use revision-bound opaque
 cursors and return exact locations plus measured style/layout facts. DOCX and
 PDF retain their format-specific paged read projections.
 
@@ -281,10 +281,10 @@ immediately.
 Rules:
 - Never write before `read-json`.
 - Never write to a text match before `target/inspect` confirms the exact paragraph/cell/object.
-- Inspect every target in a batch and every `styleSource`/`source`; inspecting a different target at the same revision does not authorize it.
+- Inspect every target and style source required by the selected catalog operation; inspecting a different target at the same revision does not authorize it.
 - Prefer exact table `cell.number` / `cellIndex`; use row/column only when no merge ambiguity exists.
 - Preserve style by choosing a nearby `styleSource` from `read-json` or `target/inspect`.
-- Use `fit: true` or `layout.fitText` before writing long cell text.
+- Use `table.writeCell` or `table.writeCells` with `fit: true` before writing long HWP/HWPX cell text.
 - Treat append-only generation as insufficient when the task asks to modify an existing document.
 - After each write batch, run `quality/check`.
 - For user-visible DOCX output, validate actual WebP pages; use baseline comparison for layout-affecting changes.
@@ -667,24 +667,23 @@ HWPX command identity:
 - Use the exact canonical `op` returned by `editor_hwpx_inspect(view="catalog")`.
 - Alternate command names, punctuation-normalized spellings, and grouped action envelopes are rejected.
 
-Common command fields:
+Command fields are operation-specific:
 
 ```json
 {
   "commandId": "stable-id",
   "op": "table.writeCell",
   "location": {},
-  "target": {},
   "text": "...",
   "styleSource": {}
 }
 ```
 
-Field aliases:
-- target location: `location`, `target`, `to`
-- source style location: `styleSource`, `source`, `from`, `sourceLocation`, `cloneStyleFrom`
-- text: `text`, `newText`, `value`, `content.text`
-- explicit style: `styleIds`, `style`, `format`
+HWP/HWPX commands accept only the exact fields published for that operation by
+`editor_hwpx_inspect(view="catalog")`. Unknown fields, spelling variants, and
+cross-operation aliases fail before mutation. In particular, use `location`
+for commands that publish `location`, `target` for commands that publish
+`target`, and `styleSource` wherever that exact field is published.
 
 Response:
 
@@ -707,12 +706,8 @@ text.replaceParagraph
 text.replace
 table.writeCell
 table.writeCells
-table.writeRichCell
 table.applyCellStyle
 style.applyText
-paragraph.applyStyle
-style.clone
-layout.fitText
 image.replace
 image.generateAndReplace
 ```
@@ -755,7 +750,7 @@ object.replaceTextBoxText
 object.deleteTextBoxByText
 ```
 
-The HWPX catalog has 42 canonical entries and all currently report
+The HWPX catalog has 38 canonical entries and all currently report
 `readiness=available`. Commands promoted beyond the published RHWP wrapper use
 qualified package-preserving or structural adapters and must pass mutation,
 package qualification, export, reopen, and operation-specific postconditions.
@@ -768,7 +763,7 @@ package qualification and reopen verification.
 Runtime artifact validation statically compares the `HwpDocument` method
 surface in `rhwp.d.ts` with the executable `rhwp.js` wrapper. It does not
 initialize WASM or introspect live WASM exports, so method presence alone is not
-semantic readiness. The 42-operation set is additionally gated by pinned
+semantic readiness. The 38-operation set is additionally gated by pinned
 installed-artifact and adapter tests that require the applicable mutation,
 package qualification, export, reopen, and operation-specific postconditions.
 
@@ -802,7 +797,7 @@ For DOCX paragraphs whose `target_inspect` result contains more than one run, pr
 
 DOCX rejects a multi-run paragraph replacement without complete `segments` instead of silently flattening its structure or formatting. Single-run paragraph replacement remains unchanged.
 
-Aliases:
+DOCX compatibility alias (not accepted by HWP/HWPX):
 
 ```text
 replaceParagraphText
@@ -819,7 +814,7 @@ Replace a range:
 }
 ```
 
-Aliases:
+DOCX compatibility alias (not accepted by HWP/HWPX):
 
 ```text
 replaceText
@@ -848,7 +843,7 @@ Write one cell:
 }
 ```
 
-Aliases:
+DOCX compatibility alias (not accepted by HWP/HWPX):
 
 ```text
 setCellText
@@ -859,7 +854,7 @@ Write one cell with source text style:
 ```json
 {
   "commandId": "rich-cell-1",
-  "op": "table.writeRichCell",
+  "op": "table.writeCell",
   "location": { "tableId": "tbl_2", "cell": { "number": 4 } },
   "styleSource": { "tableId": "tbl_2", "cell": { "number": 3 } },
   "text": "18,420"
@@ -889,7 +884,7 @@ Apply or clone outer cell style:
   "commandId": "cell-style-1",
   "op": "table.applyCellStyle",
   "target": { "tableId": "tbl_8", "cell": { "number": 0 } },
-  "source": { "tableId": "tbl_4", "cell": { "number": 0 } }
+  "styleSource": { "tableId": "tbl_4", "cell": { "number": 0 } }
 }
 ```
 
@@ -969,35 +964,11 @@ Apply source paragraph/run style without changing text:
 ```json
 {
   "commandId": "paragraph-style-1",
-  "op": "paragraph.applyStyle",
+  "op": "style.applyText",
   "target": { "paragraph": { "section": 0, "number": 6 } },
-  "source": { "paragraph": { "section": 0, "number": 5 } }
+  "styleSource": { "paragraph": { "section": 0, "number": 5 } }
 }
 ```
-
-Clone style alias:
-
-```json
-{
-  "commandId": "style-clone-1",
-  "op": "style.clone",
-  "source": { "tableId": "tbl_4", "cell": { "number": 0 } },
-  "target": { "tableId": "tbl_8", "cell": { "number": 0 } }
-}
-```
-
-HWPX explicit paragraph style IDs:
-
-```json
-{
-  "commandId": "style-ids-1",
-  "op": "paragraph.applyStyle",
-  "target": { "tableId": "tbl_2", "cell": { "number": 4 } },
-  "styleIds": { "paraPrIDRef": "12", "styleIDRef": "0", "charPrIDRef": "9" }
-}
-```
-
-Only use explicit IDs if they came from the same document's current-revision `styles`, `target`, or local utility inspection. Do not invent IDs.
 
 DOCX legacy named style:
 
@@ -1019,7 +990,7 @@ the native numbering identity after reopen.
 
 ## Layout Commands
 
-Fit text without saving:
+DOCX retains the read-only `layout.fitText` command:
 
 ```json
 {
@@ -1044,9 +1015,9 @@ Response result includes:
 }
 ```
 
-To write fitted text, either:
-- call `layout.fitText`, then write the returned `fit.text`; or
-- set `fit: true` / `fitOptions` on `table.writeCell` or `table.writeCells`.
+For HWP/HWPX, fitting is part of the actual cell write: set `fit: true` and
+`fitOptions` on `table.writeCell` or `table.writeCells`. This keeps the HWPX
+`edit` lifecycle mutation-only and returns fit evidence with the write receipt.
 
 ## Object And Image Commands
 
@@ -1504,7 +1475,6 @@ deleteRange
 appendParagraph
 text.deleteParagraphs
 table.writeCell
-table.writeRichCell
 table.writeCells
 table.applyCellStyle
 table.insertRows
@@ -1515,13 +1485,10 @@ table.create
 table.insertCaption
 table.structure
 style.applyText
-paragraph.applyStyle
-style.clone
 applyStyle
 setRunStyle
 setParagraphStyle
 format.apply
-layout.fitText
 paragraph.structure
 image.replace
 image.insertAfterParagraph
@@ -1538,7 +1505,7 @@ object.format
 object.replaceTextBoxText
 ```
 
-All 42 HWPX entries currently report `readiness=available`. For binary HWP,
+All 38 HWPX entries currently report `readiness=available`. For binary HWP,
 the same catalog marks package-XML-only commands unavailable. Apply still fails closed
 when required target, object, or field inspection, exact revision, or
 operation-specific postconditions are missing.
@@ -1689,7 +1656,7 @@ Modify existing table form:
 3. find the table/cell by text or editableTargets
 4. target/inspect each target cell
 5. choose styleSource from nearby filled cell
-6. commands/apply table.writeRichCell or table.writeCells
+6. commands/apply table.writeCell or table.writeCells
 7. quality/check
 8. save-source
 9. render/validate if deliverable

@@ -144,6 +144,9 @@ async function execute(message) {
 
   const { session } = requireSession(documentId);
   if (operation === 'readJson') return session.readJson();
+  if (operation === 'semanticSnapshot') {
+    return typeof session.semanticSnapshot === 'function' ? session.semanticSnapshot() : session.readJson();
+  }
   if (operation === 'targetMap') return session.targetMap();
   if (operation === 'outlinePage') {
     const map = await session.targetMap();

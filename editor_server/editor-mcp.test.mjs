@@ -204,7 +204,7 @@ test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', a
   assert.ok(opEnum.includes('field.setValues'));
   assert.deepEqual(
     tools.get('editor_hwpx_inspect').inputSchema.properties.view.enum,
-    ['summary', 'outline', 'styles', 'targets', 'target', 'objects', 'template', 'page', 'quality', 'catalog', 'search', 'fields', 'security', 'history', 'capabilities'],
+    ['summary', 'outline', 'styles', 'target', 'objects', 'template', 'page', 'quality', 'catalog', 'search', 'fields', 'security', 'history', 'capabilities'],
   );
   assert.equal(tools.has('editor_hwpx_semantic_context'), false);
   assert.equal(tools.has('editor_hwpx_commit_plan'), false);

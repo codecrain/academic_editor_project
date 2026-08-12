@@ -2142,7 +2142,7 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     const capabilities = capabilitiesCall.result.structuredContent;
     assert.equal(capabilities.contractVersion, '3.0.0');
     assert.equal(capabilities.lifecycleTools.length, 9);
-    assert.equal(capabilities.commandCatalog.commandCount, 42);
+    assert.equal(capabilities.commandCatalog.commandCount, 38);
     assert.ok(capabilities.inspectViews.includes('fields'));
     assert.ok(capabilities.integratedCapabilityFamilies.assurance.includes('security'));
 
@@ -2194,6 +2194,10 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     });
     assert.deepEqual(initialHistoryCall.result.structuredContent.entries, []);
     assert.match(initialHistoryCall.result.structuredContent.currentDigest, /^[a-f0-9]{64}$/);
+    assert.equal(
+      initialHistoryCall.result.structuredContent.currentDigest,
+      initialHistoryCall.result.structuredContent.baselineDigest,
+    );
 
     const stylesCall = await mcp('editor_hwpx_inspect', {
       documentId: opened.documentId,
@@ -2436,39 +2440,24 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     });
     const fitOutlineItem = fitOutlineCall.result.structuredContent.items[0];
     assert.equal(typeof fitOutlineItem.pictureCount, 'number');
-    assert.ok(fitOutlineItem.allowedActions.includes('layout.fitText'));
+    assert.ok(fitOutlineItem.allowedActions.includes('table.writeCell'));
     const fitLocation = fitOutlineItem.location;
     await mcp('editor_hwpx_inspect', {
       documentId: fitOpened.documentId,
       view: 'target',
       locations: [fitLocation],
     });
-    for (const commandId of ['fit-read-only-one', 'fit-read-only-two']) {
-      const fitCall = await mcp('editor_hwpx_edit', {
-        documentId: fitOpened.documentId,
-        baseRevision: fitOpened.revision,
-        commands: [{
-          commandId,
-          op: 'layout.fitText',
-          location: fitLocation,
-          text: 'alpha beta gamma delta',
-          options: { maxCharsPerLine: 8, maxLines: 3, truncate: false },
-        }],
-      });
-      assert.equal(fitCall.result.isError, false, JSON.stringify(fitCall.result.structuredContent));
-      assert.equal(fitCall.result.structuredContent.revision, fitOpened.revision);
-      assert.equal(fitCall.result.structuredContent.results[0].fit.changed, false);
-    }
     const failedPolicyCall = await mcp('editor_hwpx_edit', {
       documentId: fitOpened.documentId,
       baseRevision: fitOpened.revision,
       templatePolicy: { requiredTableIds: ['must-not-persist'] },
       commands: [{
         commandId: 'reject-lossy-fit',
-        op: 'layout.fitText',
+        op: 'table.writeCell',
         location: fitLocation,
         text: 'alpha beta gamma delta',
-        options: { maxCharsPerLine: 5, maxLines: 1, truncate: true },
+        fit: true,
+        fitOptions: { maxCharsPerLine: 5, maxLines: 1, truncate: true },
       }],
     });
     assert.equal(failedPolicyCall.result.isError, true);

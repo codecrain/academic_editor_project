@@ -25,7 +25,7 @@ editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 ```
 
-Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. It currently contains 42 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. It currently contains 38 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
 
 ## Integrated capability model
 
@@ -34,7 +34,7 @@ The public surface is one state machine rather than parallel editor APIs:
 | Capability family | Canonical surface |
 | --- | --- |
 | Document identity and lifecycle | `open`, revision-bound sessions, `discard` |
-| Structure and discovery | `inspect(summary|outline|styles|targets|target|search|fields|objects|page|template)` |
+| Structure and discovery | `inspect(summary|outline|styles|target|search|fields|objects|page|template)` |
 | Fine-grained mutation | `edit` with exact catalog operations, atomic batches, target/object/field preconditions |
 | Field and form work | `inspect(fields)` plus `field.setValues`, verified after save/reopen |
 | Security and trust | `inspect(security)`, `securityPolicy`, explicit hidden-text/prompt-injection/Unicode evidence |
@@ -52,7 +52,7 @@ Engine-level methods are adapters behind this state machine. They do not form a 
 | --- | --- | --- | --- |
 | `editor_hwpx_open` | `filename` and exactly one of `bytesBase64`/`bytesRef` | none | Creates an isolated session; not read-only or idempotent. |
 | `editor_hwpx_inspect` | `documentId`, `view` | current `baseRevision`, filters, bounded cursor/limits | Read-only and idempotent. |
-| `editor_hwpx_edit` | `documentId`, `baseRevision`, `commands` | `templatePolicy`; per-command `assetRef`/`styleRef` | Atomically applies the batch. Mutation advances the revision; a `layout.fitText`-only batch is read-only and preserves it. |
+| `editor_hwpx_edit` | `documentId`, `baseRevision`, `commands` | `templatePolicy`; per-command `assetRef`/`styleRef` | Atomically applies the batch and advances the revision. |
 | `editor_hwpx_review` | `documentId`, `baseRevision` | `pages`, `includeBaseline`, opt-in `includeSvg`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Read-only document review; records the accepted current-revision review and exact finalization policy. |
 | `editor_hwpx_save` | `documentId`, `baseRevision`, `filename` | `mode=verified|checkpoint`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates an artifact and returns SHA-256 plus `byteLength`; verified save closes the session. |
 | `editor_hwpx_export_pdf` | `documentId`, `baseRevision` | PDF `filename`, `profile`, `visualPolicy`, `expectations`, `securityPolicy` | Creates a PDF artifact without closing the edit session. |
@@ -101,7 +101,6 @@ On cancellation or failed validation, call `editor_hwpx_discard`.
 - `summary`: bounded document counts, page count, warnings, and object totals.
 - `outline`: exact document-flow order with locations, text, page hints, styles, hierarchy facts, and cell geometry. Cell items also expose bounded `pictureCount` and `allowedActions`, so picture-slot commands can be targeted without guessing or expanding every cell.
 - `styles`: measured body and cell-paragraph style groups with counts and examples. It reports native paragraph/character properties, margins, indentation, outline level, and fingerprints; it does not guess headings from text.
-- `targets`: an alias of the ordered target projection with optional kind/table filters.
 - `target`: exact current-revision inspection by locations, or unambiguous text resolution by query.
 - `objects`: package assets plus page-linked pictures, shapes, charts, and text boxes. Top-level and table-cell pictures expose stable native targets; nested pictures include `cellPath` so `object.format` can update the exact control. Text-box replacement/deletion matches normalized visible text exactly rather than searching raw XML.
 - `template`: explicit required/removable/protected/replaceable/repeatable/conditional policy plus advisory instruction, conditional, freeform, and unresolved-field suggestions with evidence and confidence. Suggestions never mutate or protect content automatically.
@@ -123,7 +122,7 @@ explicit page list is limited to 120 unique one-based page numbers.
 
 ## Table layout
 
-`table.autoFit` measures the first and last rendered cursor rectangles in the selected cell, grows every cell in that physical row together, applies a page-content maximum (or explicit `maxHeight`), and verifies the resulting row height after save/reopen. It rejects the entire atomic batch if the reopened candidate introduces any additional rendered table-cell clipping (`HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION`) or exceeds the document-level pagination budget (`HWPX_AUTOFIT_PAGINATION_REGRESSION`). The default budget is one added page, no added blank page, and no added sparse/low-occupancy page; callers may explicitly set `maxPageGrowth`, `maxBlankPageGrowth`, and `maxLowOccupancyGrowth`. It fails instead of creating an unbounded row. Estimated text capacity is advisory. `layout.fitText` and `fit=true` preserve original text by default; `materializeBreaks=true` is required to write suggested wrapping, and truncation additionally requires both `truncate=true` and `allowTextLoss=true`.
+`table.autoFit` measures the first and last rendered cursor rectangles in the selected cell, grows every cell in that physical row together, applies a page-content maximum (or explicit `maxHeight`), and verifies the resulting row height after save/reopen. It rejects the entire atomic batch if the reopened candidate introduces any additional rendered table-cell clipping (`HWPX_AUTOFIT_RENDER_CLIPPING_REGRESSION`) or exceeds the document-level pagination budget (`HWPX_AUTOFIT_PAGINATION_REGRESSION`). The default budget is one added page, no added blank page, and no added sparse/low-occupancy page; callers may explicitly set `maxPageGrowth`, `maxBlankPageGrowth`, and `maxLowOccupancyGrowth`. It fails instead of creating an unbounded row. Estimated text capacity is advisory. `table.writeCell` with `fit=true` preserves original text by default; `fitOptions.materializeBreaks=true` is required to write suggested wrapping, and truncation additionally requires both `truncate=true` and `allowTextLoss=true`.
 
 For newline-delimited `table.writeCell` or `table.writeCells` content whose source paragraphs have different roles, pass one `paragraphTemplateIndices` entry per output paragraph. Binary HWP and HWPX both preserve the selected paragraph, character, and named-style identities through save/reopen. Character or paragraph formatting of a table cell containing more than one paragraph must include `target.cellParagraphIndex`; omission fails atomically with `HWPX_CELL_PARAGRAPH_INDEX_REQUIRED` instead of silently formatting paragraph zero.
 
@@ -152,7 +151,7 @@ Every failed edit is atomic: revision, live-source bytes, and previously active 
 
 ## Executable exhaustive red-team gate
 
-`npm.cmd run test:hwpx-mcp-red-team` starts an isolated latest-source gateway on an ephemeral loopback port, calls the real Streamable HTTP `/mcp` endpoint, and closes it in `finally`. The gate asserts exact coverage of all nine lifecycle tools, all 15 inspection views, and every operation in the live command catalog. It also exercises HWP and HWPX, nested image and shape formatting, exact text-box replacement/deletion, cross-document `assetRef`/`styleRef`, table and paragraph location invalidation, stale revisions, missing inspection preconditions, duplicate command IDs, MIME conflicts, template protection, atomic rollback, policy-bound review/save, PDF artifact transport, hash-bound artifact read/delete, and save/reopen evidence. The PDF renderer is injected in this contract test; native operating-system PDF readiness remains covered separately by `hwpx-native-pdf.test.mjs`.
+`npm.cmd run test:hwpx-mcp-red-team` starts an isolated latest-source gateway on an ephemeral loopback port, calls the real Streamable HTTP `/mcp` endpoint, and closes it in `finally`. The gate asserts exact coverage of all nine lifecycle tools, all 14 inspection views, and every operation in the live command catalog. It also exercises HWP and HWPX, nested image and shape formatting, exact text-box replacement/deletion, cross-document `assetRef`/`styleRef`, table and paragraph location invalidation, stale revisions, missing inspection preconditions, duplicate command IDs, MIME conflicts, template protection, atomic rollback, policy-bound review/save, PDF artifact transport, hash-bound artifact read/delete, and save/reopen evidence. The PDF renderer is injected in this contract test; native operating-system PDF readiness remains covered separately by `hwpx-native-pdf.test.mjs`.
 
 ## Fine-grained formatting and structure
 

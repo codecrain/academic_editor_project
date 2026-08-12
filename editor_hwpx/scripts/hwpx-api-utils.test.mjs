@@ -89,7 +89,7 @@ test('HWP table.writeCell preserves each selected paragraph template after save 
 
   session.commandsBatch([{
     op: 'table.writeCell',
-    target: target.location,
+    location: target.location,
     text,
     paragraphTemplateIndices: [0, 1, 2, 3],
   }]);
@@ -188,24 +188,20 @@ test('HWPX analysis is cached per revision and invalidated after commit', async 
   assert.equal(after.revision, session.revision);
 });
 
-test('HWPX layout.fitText-only batches are read-only and preserve revision and bytes', async () => {
+test('HWPX semantic control scans are isolated from ordinary cached reads', async () => {
   await initHwpxRuntime();
-  const input = readFileSync(ESG_FIXTURE_PATH);
-  const session = new HwpxApiSession(input);
-  const location = session.readJson().editableTargets.cells[0].location;
-  for (const opId of ['fit-one', 'fit-two']) {
-    const result = session.commandsBatch([{
-      op: 'layout.fitText',
-      opId,
-      location,
-      text: 'alpha beta gamma delta',
-      options: { maxCharsPerLine: 8, maxLines: 3, truncate: false },
-    }]);
-    assert.equal(result.revision, 1);
-    assert.equal(result.results[0].changed, false);
-    assert.equal(result.results[0].fit.text, 'alpha beta gamma delta');
-    assert.equal(Buffer.compare(session.inputBytes, input), 0);
-  }
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  const ordinary = session.readJson();
+  assert.equal(Object.hasOwn(ordinary.layoutGraph, 'pageDefinitions'), false);
+  assert.equal(Object.hasOwn(ordinary.layoutGraph, 'headerFooters'), false);
+  assert.equal(Object.hasOwn(ordinary.layoutGraph, 'footnotes'), false);
+  assert.equal(session.readJson(), ordinary);
+
+  const semantic = session.semanticSnapshot();
+  assert.ok(Array.isArray(semantic.layoutGraph.pageDefinitions));
+  assert.ok(Array.isArray(semantic.layoutGraph.headerFooters));
+  assert.ok(Array.isArray(semantic.layoutGraph.footnotes));
+  assert.equal(session.readJson(), ordinary);
 });
 
 test('HWP structural paragraph insertion stays HWP and survives qualification', async () => {
@@ -345,7 +341,7 @@ test('HWPX API writes a canonical table cell command and verifies reopen', async
     {
       opId: 'receipt',
       op: 'table.writeCell',
-      target: { tableId: table.id, tableCell: { cellIndex: 1 } },
+      location: { tableId: table.id, cell: { number: 1 } },
       text: 'ESG-TEST-001',
     },
   ]);
@@ -637,7 +633,7 @@ test('HWPX API table.autoFit grows a written multi-paragraph row and verifies it
   ].join('\n');
 
   const result = session.commandsBatch([
-    { op: 'table.writeCell', target: target.location, text },
+    { op: 'table.writeCell', location: target.location, text },
     { op: 'table.autoFit', target: target.location, extraPadding: 200 },
   ]);
   const autoFit = result.results[1];
@@ -774,7 +770,7 @@ test('HWPX API location-changing commands reject mixed batches before mutation',
   assert.equal(Buffer.compare(input, session.save().bytes), 0);
 });
 
-test('HWPX API table.writeRichCell can clone source cell text style through save and reopen', async () => {
+test('HWPX API table.writeCell can clone source cell text style through save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync(ESG_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
@@ -784,7 +780,7 @@ test('HWPX API table.writeRichCell can clone source cell text style through save
   session.apply([
     {
       commandId: 'rich-cell',
-      op: 'table.writeRichCell',
+      op: 'table.writeCell',
       location: { tableId: table.id, cell: { number: 3 } },
       styleSource: { tableId: table.id, cell: { number: 1 } },
       text: 'RICH-STYLE',
@@ -814,7 +810,7 @@ test('HWPX API style.applyText can rewrite a cell with explicit source style ids
     {
       commandId: 'apply-title-style',
       op: 'style.applyText',
-      location: { tableId: table.id, cell: { number: 3 } },
+      target: { tableId: table.id, cell: { number: 3 } },
       styleSource: { tableId: table.id, cell: { number: 0 } },
       text: 'STYLE-APPLIED',
     },
@@ -840,7 +836,7 @@ test('HWPX API table.applyCellStyle can clone outer cell style through save and 
     {
       commandId: 'clone-cell-outer-style',
       op: 'table.applyCellStyle',
-      location: { tableId: table.id, cell: { number: 3 } },
+      target: { tableId: table.id, cell: { number: 3 } },
       styleSource: { tableId: table.id, cell: { number: 0 } },
     },
   ]);
@@ -853,7 +849,7 @@ test('HWPX API table.applyCellStyle can clone outer cell style through save and 
   assert.equal(targetStyle.margin.left, sourceStyle.margin.left);
 });
 
-test('HWPX API paragraph.applyStyle can clone top-level paragraph style ids', async () => {
+test('HWPX API style.applyText can clone top-level paragraph style ids without replacing text', async () => {
   await initHwpxRuntime();
   const input = readFileSync(PUBLIC_BRIEFING_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
@@ -867,8 +863,8 @@ test('HWPX API paragraph.applyStyle can clone top-level paragraph style ids', as
   session.apply([
     {
       commandId: 'paragraph-style',
-      op: 'paragraph.applyStyle',
-      location: target,
+      op: 'style.applyText',
+      target,
       styleSource: source,
     },
   ]);
@@ -1128,7 +1124,7 @@ test('HWPX API accepts exact canonical table commands and parameters', async () 
     {
       commandId: 'department-batch',
       op: 'table.writeCells',
-      location: { tableId: table.id },
+      tableId: table.id,
       cells: [
         { cell: { number: 3 }, text: 'AI office' },
         { cell: { number: 5 }, text: 'owner' },
