@@ -28,6 +28,127 @@ fn make_paragraph_with_height(line_height: i32) -> Paragraph {
 }
 
 #[test]
+fn page_bottom_text_box_fit_keeps_line_even_when_advance_overflows() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let page_def = a4_page_def();
+    let body_height_hu = page_def
+        .height
+        .saturating_sub(page_def.margin_top)
+        .saturating_sub(page_def.margin_bottom)
+        .saturating_sub(page_def.margin_header)
+        .saturating_sub(page_def.margin_footer) as i32;
+
+    let lead_advance = body_height_hu - 580;
+    let lead = Paragraph {
+        line_segs: vec![LineSeg {
+            vertical_pos: 0,
+            line_height: lead_advance,
+            text_height: body_height_hu - 2500,
+            line_spacing: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let bottom_line = Paragraph {
+        line_segs: vec![LineSeg {
+            vertical_pos: body_height_hu - 1200,
+            line_height: 1200,
+            text_height: 1200,
+            line_spacing: 840,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &[lead, bottom_line],
+        &composed,
+        &styles,
+        &page_def,
+        &ColumnDef::default(),
+        0,
+    );
+
+    assert_eq!(result.pages.len(), 1);
+    let items = &result.pages[0].column_contents[0].items;
+    assert!(matches!(
+        items.as_slice(),
+        [
+            PageItem::FullParagraph { para_index: 0 },
+            PageItem::FullParagraph { para_index: 1 }
+        ]
+    ));
+}
+
+#[test]
+fn page_bottom_empty_paragraph_before_vpos_reset_does_not_create_blank_page() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let page_def = a4_page_def();
+    let body_height_hu = page_def
+        .height
+        .saturating_sub(page_def.margin_top)
+        .saturating_sub(page_def.margin_bottom)
+        .saturating_sub(page_def.margin_header)
+        .saturating_sub(page_def.margin_footer) as i32;
+
+    let lead = Paragraph {
+        text: "앞쪽 본문".to_string(),
+        line_segs: vec![LineSeg {
+            vertical_pos: 0,
+            line_height: body_height_hu - 100,
+            text_height: body_height_hu - 100,
+            line_spacing: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let bottom_empty = Paragraph {
+        line_segs: vec![LineSeg {
+            vertical_pos: body_height_hu - 1200,
+            line_height: 1000,
+            text_height: 1000,
+            line_spacing: 400,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let reset_next = Paragraph {
+        text: "다음 쪽 본문".to_string(),
+        line_segs: vec![LineSeg {
+            vertical_pos: 0,
+            line_height: 1000,
+            text_height: 1000,
+            line_spacing: 400,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &[lead, bottom_empty, reset_next],
+        &composed,
+        &styles,
+        &page_def,
+        &ColumnDef::default(),
+        0,
+    );
+
+    assert_eq!(result.pages.len(), 2);
+    assert!(result.hidden_empty_paras.contains(&1));
+    assert!(matches!(
+        result.pages[0].column_contents[0].items.as_slice(),
+        [PageItem::FullParagraph { para_index: 0 }]
+    ));
+    assert!(matches!(
+        result.pages[1].column_contents[0].items.as_slice(),
+        [PageItem::FullParagraph { para_index: 2 }]
+    ));
+}
+
+#[test]
 fn test_empty_paragraphs() {
     let paginator = Paginator::with_default_dpi();
     let styles = ResolvedStyleSet::default();
@@ -1174,4 +1295,128 @@ fn test_table_height_within_body_area() {
             );
         }
     }
+}
+
+/// [#2699] Bottom 캡션 예약이 호스트 문단의 음수 line_spacing 때문에 과소 계산되면
+/// 마지막 표 행 + 캡션이 다음 페이지로 넘어가지 않고 본문 하단을 넘어 그려진다.
+///
+/// 음수 line_spacing 은 고정값 줄간격 TAC 표 마커(Task #9)로 실제 사용되는 값이며
+/// (`engine.rs:977`, `layout.rs:5276`), 캡션 예약 계산은 같은 `line_segs.first()` 를 읽는다.
+/// 클램프가 없으면 `caption_overhead` 가 |ls| 만큼 작아져
+/// `end_row = end_row.saturating_sub(1)` 이 발동하지 않는다.
+#[test]
+fn bottom_caption_reserve_ignores_negative_host_line_spacing_issue2699() {
+    use crate::model::control::Control;
+    use crate::model::shape::{Caption, CaptionDirection};
+    use crate::model::table::{Cell, Table};
+
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+
+    // 본문 영역 ≈ 876.8px (a4_page_def 기준, 96 DPI).
+    // 표 본체 높이는 피트 판단에서 캡션을 제외하므로(engine.rs:1861-1874) 캡션 예약은
+    // 연속(continuation) 페이지에서 판정된다. 따라서 2페이지에 걸치는 표로 구성한다.
+    //
+    // 표: 20행 x 6000HU(=80px) = 1600px → 분할됨
+    //   1페이지: 행 0..10 = 800px (11행이면 880px > 876.8px 이므로 10행)
+    //   2페이지: 남은 행 10..20 = 800px → 행만으로는 들어감 (여유 76.8px)
+    // 캡션: 10275HU(=137px) → 800 + 137 = 937px > 876.8px (60px 초과)
+    //   → 마지막 행(19)을 3페이지로 넘기고 캡션도 함께 이동해야 한다.
+    // 호스트 ls = -9000HU(=-120px): 클램프가 없으면 캡션 예약이 137-120=17px 로 줄어
+    //   800 + 17 = 817px <= 876.8px (60px 여유) 가 되어 행 넘김이 발동하지 않고,
+    //   행 19 + 캡션이 2페이지 본문 하단을 넘어 그려진다.
+    let mut cells = Vec::new();
+    for r in 0..20u16 {
+        for c in 0..2u16 {
+            cells.push(Cell {
+                row: r,
+                col: c,
+                row_span: 1,
+                col_span: 1,
+                height: 6000,
+                width: 5000,
+                ..Default::default()
+            });
+        }
+    }
+
+    let caption_para = Paragraph {
+        line_segs: vec![LineSeg {
+            line_height: 10275,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let mut table_para = Paragraph {
+        // 고정값 줄간격 TAC 표 마커와 동일한 형태의 음수 line_spacing
+        line_segs: vec![LineSeg {
+            line_height: 1000,
+            line_spacing: -9000,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    table_para.controls.push(Control::Table(Box::new(Table {
+        row_count: 20,
+        col_count: 2,
+        cells,
+        caption: Some(Caption {
+            direction: CaptionDirection::Bottom,
+            paragraphs: vec![caption_para],
+            ..Default::default()
+        }),
+        ..Default::default()
+    })));
+
+    let paras = vec![table_para];
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &paras,
+        &composed,
+        &styles,
+        &a4_page_def(),
+        &ColumnDef::default(),
+        0,
+    );
+
+    let mut partials: Vec<(usize, usize)> = Vec::new();
+    for page in &result.pages {
+        for col in &page.column_contents {
+            for item in &col.items {
+                if let PageItem::PartialTable {
+                    start_row, end_row, ..
+                } = item
+                {
+                    partials.push((*start_row, *end_row));
+                }
+            }
+        }
+    }
+
+    assert!(
+        !partials.is_empty(),
+        "표가 분할되어 PartialTable이 존재해야 함, pages={}",
+        result.pages.len()
+    );
+    // 연속 페이지에서 남은 행(10..20)이 모두 들어가더라도 Bottom 캡션 예약분 때문에
+    // 마지막 행은 다음 페이지로 넘어가야 한다. 음수 ls가 예약분을 깎으면 이 분할이 사라진다.
+    assert_eq!(
+        partials.len(),
+        3,
+        "캡션 예약으로 3개 파트(0..10, 10..19, 19..20)여야 함, partials={:?} pages={}",
+        partials,
+        result.pages.len()
+    );
+    assert_eq!(
+        partials[1].1, 19,
+        "연속 페이지 파트는 캡션 예약분 때문에 마지막 행(19)을 넘겨 end_row=19여야 함, partials={:?}",
+        partials
+    );
+    assert_eq!(
+        partials.last().unwrap().1,
+        20,
+        "마지막 파트 end_row은 전체 행 수(20)여야 함, partials={:?}",
+        partials
+    );
 }

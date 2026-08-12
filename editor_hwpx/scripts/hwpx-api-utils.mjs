@@ -593,6 +593,74 @@ function decodeXmlText(value) {
     .replaceAll('&amp;', '&');
 }
 
+function replaceMetadataElement(xml, tagName, value) {
+  const escaped = escapeXmlText(value);
+  const paired = new RegExp(`<opf:${tagName}\\b([^>]*)>[\\s\\S]*?<\\/opf:${tagName}>`, 'g');
+  const pairedMatches = [...xml.matchAll(paired)];
+  assert.ok(pairedMatches.length <= 1, `HWPX package has duplicate metadata element: ${tagName}`);
+  if (pairedMatches.length === 1) {
+    return xml.replace(paired, (_, attributes) => `<opf:${tagName}${attributes}>${escaped}</opf:${tagName}>`);
+  }
+  const selfClosing = new RegExp(`<opf:${tagName}\\b([^>]*)\\/>`, 'g');
+  const selfClosingMatches = [...xml.matchAll(selfClosing)];
+  assert.ok(selfClosingMatches.length <= 1, `HWPX package has duplicate metadata element: ${tagName}`);
+  if (selfClosingMatches.length === 1) {
+    return xml.replace(selfClosing, (_, attributes) => `<opf:${tagName}${attributes}>${escaped}</opf:${tagName}>`);
+  }
+  return xml.replace('</opf:metadata>', `<opf:${tagName}>${escaped}</opf:${tagName}></opf:metadata>`);
+}
+
+function metadataFieldName(attributes) {
+  return String(attributes).match(/\bname\s*=\s*(["'])(.*?)\1/i)?.[2]?.toLowerCase() ?? null;
+}
+
+function replaceMetadataMeta(xml, names, preferredName, value) {
+  const escaped = escapeXmlText(value);
+  const metaTag = /<opf:meta\b([^>]*?)(?:\/>|>([\s\S]*?)<\/opf:meta>)/g;
+  let matched = 0;
+  const next = xml.replace(metaTag, (whole, attributes) => {
+    if (!names.includes(metadataFieldName(attributes))) return whole;
+    matched += 1;
+    return `<opf:meta${attributes}>${escaped}</opf:meta>`;
+  });
+  if (matched > 0) return next;
+  return next.replace(
+    '</opf:metadata>',
+    `<opf:meta name="${preferredName}" content="text">${escaped}</opf:meta></opf:metadata>`,
+  );
+}
+
+function patchHwpxDocumentMetadata(contentHpf, metadata) {
+  const metadataBlocks = [...String(contentHpf).matchAll(/<opf:metadata\b[^>]*>[\s\S]*?<\/opf:metadata>/g)];
+  assert.equal(metadataBlocks.length, 1, 'HWPX package must contain exactly one opf:metadata block');
+  let next = contentHpf;
+  if (metadata.title !== undefined) next = replaceMetadataElement(next, 'title', metadata.title);
+  if (metadata.author !== undefined) next = replaceMetadataMeta(next, ['creator', 'author'], 'creator', metadata.author);
+  if (metadata.subject !== undefined) next = replaceMetadataMeta(next, ['subject'], 'subject', metadata.subject);
+  if (metadata.keywords !== undefined) next = replaceMetadataMeta(next, ['keyword', 'keywords'], 'keyword', metadata.keywords);
+  if (metadata.description !== undefined) next = replaceMetadataMeta(next, ['description'], 'description', metadata.description);
+  return next;
+}
+
+export function readHwpxDocumentMetadata(inputBytes) {
+  assert.ok(isZipPackage(inputBytes), 'HWPX document metadata requires a package source');
+  const contentHpf = readZip(inputBytes).get('Contents/content.hpf')?.toString('utf8');
+  assert.ok(contentHpf, 'HWPX package metadata entry Contents/content.hpf was not found');
+  const metadata = {};
+  const pairedTitle = contentHpf.match(/<opf:title\b[^>]*>([\s\S]*?)<\/opf:title>/)?.[1];
+  const title = pairedTitle ?? (contentHpf.match(/<opf:title\b[^>]*\/>/) ? '' : undefined);
+  if (title !== undefined) metadata.title = decodeXmlText(title);
+  for (const match of contentHpf.matchAll(/<opf:meta\b([^>]*?)(?:\/>|>([\s\S]*?)<\/opf:meta>)/g)) {
+    const name = metadataFieldName(match[1]);
+    const value = decodeXmlText(match[2] ?? '');
+    if (name === 'creator' || name === 'author') metadata.author = value;
+    else if (name === 'subject') metadata.subject = value;
+    else if (name === 'keyword' || name === 'keywords') metadata.keywords = value;
+    else if (name === 'description') metadata.description = value;
+  }
+  return metadata;
+}
+
 function xmlVisibleText(xml) {
   let withoutNestedTables = xml;
   const nestedTables = findAllBlocks(withoutNestedTables, 'tbl');
@@ -2435,10 +2503,19 @@ function restoreCellParagraphTemplate(doc, table, cellIndex, paragraphIndex, tem
       { cellIndex, paragraphIndex, styleId, paraShapeId, charShapeId },
     );
   }
-  parseResult(doc.applyCellStyleIds(
-    table.section, table.para, table.control, cellIndex, paragraphIndex,
-    styleId, paraShapeId, charShapeId,
-  ), 'applyCellStyleIds');
+  // RHWP v0.8.4 retains the public style command but no longer exposes the
+  // private three-ID helper. A named style owns the same paragraph and
+  // character references, so route the compatibility path through the public
+  // API instead of coupling the gateway to an internal WASM method.
+  const applyStyle = typeof doc.applyCellStyleIds === 'function'
+    ? () => doc.applyCellStyleIds(
+      table.section, table.para, table.control, cellIndex, paragraphIndex,
+      styleId, paraShapeId, charShapeId,
+    )
+    : () => doc.applyCellStyle(
+      table.section, table.para, table.control, cellIndex, paragraphIndex, styleId,
+    );
+  parseResult(applyStyle(), 'applyCellStyle');
 }
 
 function setCellTextWithApi(doc, table, cellIndex, text, options = {}) {
@@ -3008,7 +3085,7 @@ export function verifyStructuralTarget(session, target, result = null) {
     return;
   }
   if (target.kind === 'documentMetadata') {
-    const metadata = tryJson(() => session.doc.getDocumentMetadata());
+    const metadata = readHwpxDocumentMetadata(session.inputBytes);
     const expected = result?.native?.metadata;
     const mismatch = !metadata || !expected || Object.entries(expected)
       .some(([key, value]) => metadata[key] !== value);
@@ -3102,6 +3179,19 @@ export class HwpxApiSession {
     this.saveMode = options.saveMode ?? (isZipPackage(this.inputBytes) ? 'preserve-package' : 'hwp-export');
     this.analysisCache = null;
     this.resetPendingPatches();
+  }
+
+  queueDocumentMetadata(metadata) {
+    assert.ok(isZipPackage(this.inputBytes), 'HWPX package metadata requires a package source');
+    const manifestName = 'Contents/content.hpf';
+    const pending = this.packagePatches.find(patch => patch.name === manifestName && !patch.create);
+    const current = pending?.bytes?.toString('utf8')
+      ?? readZip(this.inputBytes).get(manifestName)?.toString('utf8');
+    assert.ok(current, 'HWPX package metadata entry Contents/content.hpf was not found');
+    const bytes = Buffer.from(patchHwpxDocumentMetadata(current, metadata), 'utf8');
+    if (pending) pending.bytes = bytes;
+    else this.packagePatches.push({ name: manifestName, bytes });
+    return { ok: true, changed: Object.keys(metadata).length, metadata };
   }
 
   invalidateAnalysisCache() {
@@ -4002,6 +4092,22 @@ export class HwpxApiSession {
           native: { ok: true, method: 'package-table-delete' },
           expectedTableCount: before.tables.length - 1,
         });
+        continue;
+      }
+      if (isZipPackage(working.inputBytes) && entry?.op === 'setDocumentMetadata') {
+        flushStructural();
+        const structuralOp = {
+          ...sourceOp,
+          opId: commandId(sourceOp, opIndex),
+          op: entry.normalizeAs ?? entry.op,
+        };
+        const result = applyHwpxStructuralCommand(working.doc, structuralOp, {
+          applyPackageMetadata: metadata => working.queueDocumentMetadata(metadata),
+        });
+        const saved = working.save();
+        qualifications.push(qualifyHwpxCandidate(working.inputBytes, saved.bytes));
+        working = new HwpxApiSession(saved.bytes, { saveMode: 'preserve-package' });
+        results.push({ ...result, opId: structuralOp.opId });
         continue;
       }
       const packageStructural = entry

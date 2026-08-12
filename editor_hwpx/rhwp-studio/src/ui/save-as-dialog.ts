@@ -1,26 +1,29 @@
 /**
  * 다른 이름으로 저장 대화상자
  *
- * 새 문서 저장 시 파일 이름을 입력받는다.
+ * 새 문서 저장 시 파일 이름과 선택 암호 설정 요청을 받는다.
  * showSaveAs() 헬퍼로 간단히 사용 가능.
  */
 import { ModalDialog } from './dialog';
+import { fileNameForFormat, type SaveFormat } from '@/command/save-target';
+
+export interface SaveAsDialogResult {
+  fileName: string;
+  configurePassword: boolean;
+}
 
 class SaveAsDialog extends ModalDialog {
   private defaultName: string;
-  private extension: '.hwp' | '.hwpx';
   private input!: HTMLInputElement;
-  private formatSelect: HTMLSelectElement | null = null;
-  private resolve!: (value: string | null) => void;
+  private resolve!: (value: SaveAsDialogResult | null) => void;
 
   constructor(
     defaultName: string,
-    extension: '.hwp' | '.hwpx' = '.hwp',
-    private options: { allowFormatChoice?: boolean } = {},
+    private readonly format: SaveFormat,
+    private readonly allowPassword: boolean,
   ) {
     super('다른 이름으로 저장', 380);
     this.defaultName = defaultName;
-    this.extension = extension;
   }
 
   protected createBody(): HTMLElement {
@@ -46,56 +49,43 @@ class SaveAsDialog extends ModalDialog {
     this.input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        this.onConfirm();
-        this.hide();
+        if (this.onConfirm()) this.hide();
       }
     });
     body.appendChild(this.input);
 
-    if (this.options.allowFormatChoice) {
-      const formatLabel = document.createElement('label');
-      formatLabel.textContent = '파일 형식(T):';
-      formatLabel.style.display = 'block';
-      formatLabel.style.marginTop = '12px';
-      formatLabel.style.marginBottom = '6px';
-      formatLabel.style.fontSize = '13px';
-      body.appendChild(formatLabel);
-
-      this.formatSelect = document.createElement('select');
-      this.formatSelect.style.width = '100%';
-      this.formatSelect.style.boxSizing = 'border-box';
-      this.formatSelect.style.height = '28px';
-      this.formatSelect.style.border = '1px solid #b4b4b4';
-      this.formatSelect.style.fontSize = '13px';
-      this.formatSelect.innerHTML = [
-        '<option value=".hwpx">HWPX 문서 (*.hwpx)</option>',
-        '<option value=".hwp">HWP 문서 (*.hwp)</option>',
-      ].join('');
-      this.formatSelect.value = this.extension;
-      this.formatSelect.addEventListener('change', () => {
-        const nextExtension = this.selectedExtension();
-        this.input.value = /\.(hwp|hwpx)$/i.test(this.input.value)
-          ? this.input.value.replace(/\.(hwp|hwpx)$/i, nextExtension)
-          : this.input.value + nextExtension;
+    if (this.allowPassword) {
+      const passwordButton = document.createElement('button');
+      passwordButton.type = 'button';
+      passwordButton.className = 'dialog-btn';
+      passwordButton.textContent = '암호 설정...';
+      passwordButton.style.marginTop = '12px';
+      passwordButton.addEventListener('click', () => {
+        const value = this.confirmValue();
+        if (value === null) return;
+        this.resolve({ fileName: value, configurePassword: true });
+        this.hide();
       });
-      body.appendChild(this.formatSelect);
+      body.appendChild(passwordButton);
     }
 
     return body;
   }
 
-  private selectedExtension(): '.hwp' | '.hwpx' {
-    return this.formatSelect?.value === '.hwpx' ? '.hwpx' : '.hwp';
+  private confirmValue(): string | null {
+    const name = this.input.value.trim();
+    if (!name) {
+      this.input.focus();
+      return null;
+    }
+    return fileNameForFormat(name, this.format);
   }
 
-  protected onConfirm(): void {
-    const name = this.input.value.trim();
-    if (!name) return;
-    const extension = this.options.allowFormatChoice ? this.selectedExtension() : this.extension;
-    const fileName = /\.(hwp|hwpx)$/i.test(name)
-      ? name.replace(/\.(hwp|hwpx)$/i, extension)
-      : name + extension;
-    this.resolve(fileName);
+  protected onConfirm(): boolean {
+    const fileName = this.confirmValue();
+    if (fileName === null) return false;
+    this.resolve({ fileName, configurePassword: false });
+    return true;
   }
 
   override hide(): void {
@@ -103,10 +93,10 @@ class SaveAsDialog extends ModalDialog {
     super.hide();
   }
 
-  showAsync(): Promise<string | null> {
+  showAsync(): Promise<SaveAsDialogResult | null> {
     return new Promise((resolve) => {
       let resolved = false;
-      this.resolve = (v: string | null) => {
+      this.resolve = (v: SaveAsDialogResult | null) => {
         if (!resolved) {
           resolved = true;
           resolve(v);
@@ -121,11 +111,14 @@ class SaveAsDialog extends ModalDialog {
   }
 }
 
-/** 파일 이름 입력 대화상자를 표시하고 사용자가 입력한 파일 이름을 반환한다. 취소 시 null. */
+/**
+ * 파일 이름 입력 대화상자를 표시한다. HWP/HWPX에서 `allowPassword`를 켜면 사용자가
+ * `암호 설정...`을 선택해 다음 암호 입력 대화상자로 진행할 수 있다.
+ */
 export function showSaveAs(
   defaultName: string,
-  extension: '.hwp' | '.hwpx' = '.hwp',
-  options: { allowFormatChoice?: boolean } = {},
-): Promise<string | null> {
-  return new SaveAsDialog(defaultName, extension, options).showAsync();
+  format: SaveFormat = 'hwp',
+  options: { allowPassword?: boolean } = {},
+): Promise<SaveAsDialogResult | null> {
+  return new SaveAsDialog(defaultName, format, options.allowPassword === true).showAsync();
 }

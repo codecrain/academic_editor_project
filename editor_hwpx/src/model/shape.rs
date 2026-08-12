@@ -59,6 +59,12 @@ pub struct CommonObjAttr {
     ///
     /// HWP5 GenShape CTRL_HEADER attr bit 14 후보로 보존한다.
     pub allow_overlap: bool,
+    /// HWPX `hp:pos@affectLSpacing` (개체가 줄 간격에 영향을 주는지).
+    ///
+    /// [#2784] HWP5 개체 공통 속성 attr bit 2 (스펙 표 70). 한컴 원본 파일에서
+    /// bit 2 ⟺ affectLSpacing="1" 를 1:1 대조 검증했다. 이 필드가 없어
+    /// 그림·도형·표 방출이 "0" 으로 하드코딩되던 유실을 해소한다.
+    pub affect_line_spacing: bool,
     /// HWPX 출처 GenShape를 HWP5로 저장할 때 필요한 storage high bit 후보.
     ///
     /// Table adapter의 `0x08000000` 보강과 다른 `0x04000000` bit 26이다.
@@ -85,8 +91,44 @@ pub struct CommonObjAttr {
     pub height_criterion: SizeCriterion,
     /// 개체 설명문
     pub description: String,
+    /// HWPX `numberingType` (캡션 번호 범주) 보존 (#1379).
+    ///
+    /// HWP5 파서는 설정하지 않는다 (기본 None). HWPX 그리기 개체의
+    /// `numberingType="PICTURE"` 등을 라운드트립 보존하기 위한 필드.
+    pub numbering_type: ObjectNumberingType,
+    /// HWPX `dropcapstyle` (개체를 감싼 단락의 드롭캡 표시 방식) 보존.
+    ///
+    /// 파서가 읽지 않으면 방출측(picture.rs 등)이 항상 `dropcapstyle="None"`으로
+    /// 되돌려, 원본이 `DoubleLine`/`TripleLine`/`Margin` 드롭캡으로 개체를 감싼
+    /// 문단이었더라도 저장 시 드롭캡 스타일이 유실된다.
+    pub drop_cap_style: DropCapStyle,
     /// 파싱된 필드 이후 추가 바이트 (라운드트립 보존용)
     pub raw_extra: Vec<u8>,
+    /// HWPX `lock`(개체 잠금) 속성 보존 (#2840, #2855, #2931).
+    ///
+    /// 파서가 이 속성을 읽지 않아 직렬화 시 항상 `lock="0"`으로 하드코딩되던 문제
+    /// 해소 — 수식·공용 도형·표·차트/OLE 경로에 배선한다.
+    pub locked: bool,
+}
+
+/// HWPX 개체 `numberingType` (캡션 번호 범주)
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum ObjectNumberingType {
+    #[default]
+    None,
+    Picture,
+    Table,
+    Equation,
+}
+
+/// HWPX 개체 `dropcapstyle` (드롭캡 표시 방식). OWPML Core 스키마 `DropCapStyleType`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum DropCapStyle {
+    #[default]
+    None,
+    DoubleLine,
+    TripleLine,
+    Margin,
 }
 
 /// 세로 위치 기준
@@ -193,6 +235,12 @@ pub struct ShapeComponentAttr {
     pub current_width: u32,
     /// 현재 높이
     pub current_height: u32,
+    /// [#2017] HWPX 원본이 `curSz width="0"`을 기록했고 파싱 시 orgSz로 materialize된 경우 true.
+    /// materialize는 렌더/HWP5 저장이 실크기를 필요로 하기 때문에 유지하되, HWPX 재직렬화는
+    /// 이 플래그로 원본 `0` sentinel을 복원해 roundtrip 충실도를 보존한다.
+    pub current_width_was_zero: bool,
+    /// [#2017] HWPX 원본이 `curSz height="0"`을 기록했고 파싱 시 orgSz로 materialize된 경우 true.
+    pub current_height_was_zero: bool,
     /// 뒤집기 속성 원본 값 (bit 0: 수평, bit 1: 수직, 상위 비트 보존)
     pub flip: u32,
     /// 수평 뒤집기
@@ -235,6 +283,8 @@ impl Default for ShapeComponentAttr {
             original_height: 0,
             current_width: 0,
             current_height: 0,
+            current_width_was_zero: false,
+            current_height_was_zero: false,
             flip: 0,
             horz_flip: false,
             vert_flip: false,
@@ -284,6 +334,11 @@ pub struct DrawingObjAttr {
 pub struct TextBox {
     /// LIST_HEADER list_attr (라운드트립 보존용)
     pub list_attr: u32,
+    /// HWPX `textDirection="VERTICALALL"` 구분 보존 (#1379).
+    ///
+    /// `list_attr` bit 0~2 는 VERTICAL/VERTICALALL 을 모두 code 1 로 합치므로
+    /// (renderer 세로쓰기 분기 호환), HWPX 라운드트립용 구분은 본 필드로 보존한다.
+    pub vertical_all: bool,
     /// 세로 정렬 (list_attr bit 5~6: 0=top, 1=center, 2=bottom)
     pub vertical_align: crate::model::table::VerticalAlign,
     /// 왼쪽 여백
@@ -408,6 +463,22 @@ impl ShapeObject {
             ShapeObject::Picture(p) => &p.shape_attr,
             ShapeObject::Chart(c) => &c.drawing.shape_attr,
             ShapeObject::Ole(o) => &o.drawing.shape_attr,
+        }
+    }
+
+    /// 개체 요소 속성 가변 참조 반환
+    pub fn shape_attr_mut(&mut self) -> &mut ShapeComponentAttr {
+        match self {
+            ShapeObject::Line(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Rectangle(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Ellipse(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Arc(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Polygon(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Curve(s) => &mut s.drawing.shape_attr,
+            ShapeObject::Group(g) => &mut g.shape_attr,
+            ShapeObject::Picture(p) => &mut p.shape_attr,
+            ShapeObject::Chart(c) => &mut c.drawing.shape_attr,
+            ShapeObject::Ole(o) => &mut o.drawing.shape_attr,
         }
     }
 
@@ -791,6 +862,16 @@ pub struct OleShape {
     pub raw_tag_data: Vec<u8>,
     /// 캡션
     pub caption: Option<Caption>,
+    /// [#3546] HWPX `<hp:chart chartIDRef="...">` 출신 표식 — chartIDRef 원문.
+    /// HWPX 파서가 차트를 OLE 모델(bin_data_id=60000+N)로 변환할 때 채우며,
+    /// Some 이면 HWPX 저장기가 hp:ole 대신 hp:chart 를 원형 구조로 재방출한다.
+    pub chart_id_ref: Option<String>,
+    /// [#3546] 원본 `<hp:switch>` 의 `<hp:default>` fallback OLE.
+    /// 저장 시 switch/case/default 구조 재방출의 재료 — None 이면 bare
+    /// `<hp:chart>` 로 되쓴다. default 없는 case-only `<hp:switch>` 도
+    /// None 으로 접힌다(둘 다 미관측 변형 — 이 경우 switch 래핑은
+    /// 재방출되지 않는다).
+    pub chart_switch_fallback: Option<Box<OleShape>>,
 }
 
 #[cfg(test)]

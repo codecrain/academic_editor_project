@@ -16,10 +16,9 @@ test('HWPX runtime fonts are vendored and do not use a CDN', async () => {
   }
 });
 
-test('embedded HWPX loads auto-fix validation warnings without blocking on a modal', async () => {
+test('embedded HWPX load requests can suppress dialogs without blocking the host RPC', async () => {
   const source = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(source, /type ValidationLoadMode = 'prompt' \| 'auto-fix' \| 'as-is'/);
-  assert.match(source, /validationMode === 'prompt'[\s\S]*showValidationModalIfNeeded\(report\)[\s\S]*validationMode/);
-  assert.match(source, /loadBytes\(bytes, msg\.fileName \|\| 'document\.hwp', null, performance\.now\(\), 'auto-fix'\)/);
-  assert.match(source, /loadBytes\(bytes, params\.fileName \|\| 'document\.hwp', null, performance\.now\(\), 'auto-fix'\)/);
+  assert.match(source, /async loadFile\(data, fileName, skipUnsavedGuard, suppressDialogs\)/);
+  assert.match(source, /await loadBytes\(data, fileName, null, undefined, \{ suppressDialogs \}\)/);
+  assert.match(source, /options: \{ suppressDialogs\?: boolean \} = \{\}/);
 });

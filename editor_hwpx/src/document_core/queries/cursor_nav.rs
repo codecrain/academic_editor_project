@@ -1,14 +1,130 @@
 //! 커서 이동/줄 정보/경로 탐색/선택 영역 관련 native 메서드
 
 use super::super::helpers::{
-    get_textbox_from_shape, has_table_control, navigable_text_len, utf16_pos_to_char_idx,
-    LineInfoResult,
+    find_logical_control_positions, get_textbox_from_shape, has_table_control,
+    is_treat_as_char_object_control, navigable_text_len, utf16_pos_to_char_idx, LineInfoResult,
 };
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
 use crate::model::control::Control;
 use crate::model::paragraph::Paragraph;
-use crate::renderer::render_tree::PageRenderTree;
+use crate::renderer::render_tree::{PageRenderTree, TextRunNode};
+
+/// 화면에서는 여러 글자로 보이지만 모델에서는 marker 한 글자인 필드 런의 캐럿 경계다.
+///
+/// `compute_char_positions(run.text)`는 raw marker의 가상 글리프 폭을 반환하므로,
+/// field display 런은 레이아웃이 확정한 bbox 끝을 모델 한 글자의 끝으로 쓴다.
+fn cursor_positions_for_render_run(run: &TextRunNode, bbox_width: f64) -> Vec<f64> {
+    let is_expanded_field_marker = run.display_text.is_some()
+        && run.text.chars().count() == 1
+        && matches!(
+            run.text.chars().next(),
+            Some('\u{0015}' | '\u{0016}' | '\u{0017}' | '\u{2007}')
+        );
+    if is_expanded_field_marker {
+        vec![0.0, bbox_width]
+    } else {
+        crate::renderer::layout::compute_char_positions(&run.text, &run.style)
+    }
+}
+
+fn is_caret_logical_inline_control(ctrl: &Control) -> bool {
+    is_treat_as_char_object_control(ctrl)
+        || matches!(ctrl, Control::Footnote(_) | Control::Endnote(_))
+}
+
+fn control_only_caret_utf16_to_char_idx(para: &Paragraph, caret_utf16: u32) -> usize {
+    if caret_utf16 == 0 || !para.char_offsets.is_empty() {
+        return 0;
+    }
+
+    // HWP 원본 위치는 컨트롤 하나를 UTF-16 8 code unit으로 센다.
+    // Studio 커서는 SectionDef/ColumnDef 같은 구조 컨트롤을 건너뛰고,
+    // 본문 흐름을 차지하는 인라인 개체만 한 글자처럼 센다.
+    let raw_control_count = (caret_utf16 / 8) as usize;
+    para.controls
+        .iter()
+        .take(raw_control_count)
+        .filter(|ctrl| is_caret_logical_inline_control(ctrl))
+        .count()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LineCursorHit {
+    pub offset: usize,
+    pub rect: Option<(u32, f64, f64, f64)>,
+}
+
+/// 셀 선택 rect 조회에 사용할 host page 계획.
+///
+/// #2215 Stage 3-A에서는 후보 계약을 production 계산과 분리해 먼저 고정한다.
+/// Stage 3-B에서 `get_selection_rects_native`가 이 계획을 소비한다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SelectionPagePlan {
+    Hinted(Vec<u32>),
+    FullFallback(Vec<u32>),
+}
+
+/// 선택 사각형 조회가 가리키는 셀 컨테이너.
+///
+/// 기존 공개 API는 깊이 1 셀을 평면 좌표로 지정한다. 중첩 표는 같은 평면 좌표를
+/// 공유할 수 있으므로 전체 path를 별도 variant로 보존한다(#4272).
+#[derive(Clone, Copy)]
+enum SelectionCellTarget<'a> {
+    Flat {
+        parent_para_idx: usize,
+        control_idx: usize,
+        cell_idx: usize,
+    },
+    Path {
+        parent_para_idx: usize,
+        path: &'a [(usize, usize, usize)],
+    },
+}
+
+impl SelectionCellTarget<'_> {
+    fn parent_para_idx(self) -> usize {
+        match self {
+            Self::Flat {
+                parent_para_idx, ..
+            }
+            | Self::Path {
+                parent_para_idx, ..
+            } => parent_para_idx,
+        }
+    }
+}
+
+pub(crate) fn plan_selection_pages(
+    host_pages: &[u32],
+    start_page_hint: Option<u32>,
+    end_page_hint: Option<u32>,
+) -> SelectionPagePlan {
+    let Some(start_page) = start_page_hint else {
+        return SelectionPagePlan::FullFallback(host_pages.to_vec());
+    };
+    let Some(end_page) = end_page_hint else {
+        return SelectionPagePlan::FullFallback(host_pages.to_vec());
+    };
+
+    if !host_pages.contains(&start_page) || !host_pages.contains(&end_page) {
+        return SelectionPagePlan::FullFallback(host_pages.to_vec());
+    }
+
+    let range_start = start_page.min(end_page);
+    let range_end = start_page.max(end_page);
+    let candidates = host_pages
+        .iter()
+        .copied()
+        .filter(|page| (range_start..=range_end).contains(page))
+        .collect::<Vec<_>>();
+
+    if candidates.is_empty() {
+        SelectionPagePlan::FullFallback(host_pages.to_vec())
+    } else {
+        SelectionPagePlan::Hinted(candidates)
+    }
+}
 
 impl DocumentCore {
     pub(crate) fn get_line_info_native(
@@ -160,16 +276,30 @@ impl DocumentCore {
     /// 문단의 line_segs에서 각 줄의 시작 char index 배열을 구한다.
     pub(crate) fn build_line_char_starts(para: &crate::model::paragraph::Paragraph) -> Vec<usize> {
         let char_offsets = &para.char_offsets;
-        para.line_segs
+        let mut starts: Vec<usize> = para
+            .line_segs
             .iter()
             .map(|ls| {
                 if ls.text_start == 0 {
                     0
+                } else if char_offsets.is_empty() {
+                    control_only_caret_utf16_to_char_idx(para, ls.text_start)
                 } else {
                     utf16_pos_to_char_idx(char_offsets, ls.text_start)
                 }
             })
-            .collect()
+            .collect();
+
+        if char_offsets.is_empty() && starts.len() > 1 {
+            let char_count = navigable_text_len(para);
+            for i in 1..starts.len() {
+                if starts[i] <= starts[i - 1] && starts[i - 1] < char_count {
+                    starts[i] = starts[i - 1] + 1;
+                }
+            }
+        }
+
+        starts
     }
 
     /// 특정 줄의 문자 범위(charStart, charEnd)를 반환한다.
@@ -221,6 +351,8 @@ impl DocumentCore {
         // UTF-16 → char index 변환
         let char_offset = if caret_utf16 == 0 {
             0
+        } else if para.char_offsets.is_empty() {
+            control_only_caret_utf16_to_char_idx(para, caret_utf16)
         } else {
             utf16_pos_to_char_idx(&para.char_offsets, caret_utf16)
         };
@@ -244,7 +376,6 @@ impl DocumentCore {
         preferred_x: f64,
         cell_ctx: Option<(usize, usize, usize, usize)>,
     ) -> Result<String, HwpError> {
-        use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
         // ═══ PHASE 1: preferredX 결정 ═══
@@ -271,6 +402,7 @@ impl DocumentCore {
         // ═══ PHASE 3: 목표 위치 결정 ═══
         // 결과: (sec, para, char_offset, cell_ctx)
         let new_pos: (usize, usize, usize, Option<(usize, usize, usize, usize)>);
+        let mut rect_override: Option<(u32, f64, f64, f64)> = None;
 
         if target_line >= 0 && (target_line as usize) < line_info.line_count {
             // CASE A: 같은 문단 내 다른 줄
@@ -290,9 +422,15 @@ impl DocumentCore {
                 actual_px
             };
             let target_range = Self::get_line_char_range(current_para, target_line as usize);
-            let new_offset =
-                self.find_char_at_x_on_line(sec, para, cell_ctx, target_range, px_for_target)?;
-            new_pos = (sec, para, new_offset, cell_ctx);
+            let hit = self.find_cursor_hit_at_x_on_line(
+                sec,
+                para,
+                cell_ctx,
+                target_range,
+                px_for_target,
+            )?;
+            rect_override = hit.rect;
+            new_pos = (sec, para, hit.offset, cell_ctx);
         } else if cell_ctx.is_some() {
             // CASE C: 셀 내부 경계
             new_pos = self.handle_cell_boundary(
@@ -309,11 +447,14 @@ impl DocumentCore {
         }
 
         // ═══ PHASE 4: 최종 커서 좌표 계산 + 결과 포맷 ═══
-        let (rect_valid, page_idx, fx, fy, fh) =
+        let (rect_valid, page_idx, fx, fy, fh) = if let Some((p, x, y, h)) = rect_override {
+            (true, p, x, y, h)
+        } else {
             match self.get_cursor_rect_values(new_pos.0, new_pos.1, new_pos.2, new_pos.3) {
                 Ok((p, x, y, h)) => (true, p, x, y, h),
                 Err(_) => (false, 0, 0.0, 0.0, 16.0),
-            };
+            }
+        };
 
         // JSON 직렬화
         let pos_json = if let Some((ppi, ci, cei, cpi)) = new_pos.3 {
@@ -347,6 +488,39 @@ impl DocumentCore {
         Ok(format!(
             "{{{},\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"height\":{:.1},\"preferredX\":{:.1}{}}}",
             pos_json, page_idx, fx, fy, fh, actual_px, rect_valid_str
+        ))
+    }
+
+    pub(crate) fn get_cursor_rect_on_line_native(
+        &self,
+        sec: usize,
+        para: usize,
+        line_index: usize,
+        at_end: bool,
+        cell_ctx: Option<(usize, usize, usize, usize)>,
+    ) -> Result<String, HwpError> {
+        let current_para = self.resolve_paragraph(sec, para, cell_ctx)?;
+        let line_count = Self::build_line_char_starts(current_para).len().max(1);
+        let target_line = line_index.min(line_count - 1);
+        let target_range = Self::get_line_char_range(current_para, target_line);
+        let preferred_x = if at_end { 1.0e12 } else { -1.0e12 };
+        let hit =
+            self.find_cursor_hit_at_x_on_line(sec, para, cell_ctx, target_range, preferred_x)?;
+
+        let (page_idx, x, y, height) = if let Some((p, x, y, h)) = hit.rect {
+            (p, x, y, h)
+        } else {
+            let fallback_offset = if at_end {
+                target_range.1
+            } else {
+                target_range.0
+            };
+            self.get_cursor_rect_values(sec, para, fallback_offset, cell_ctx)?
+        };
+
+        Ok(format!(
+            "{{\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"height\":{:.1}}}",
+            page_idx, x, y, height
         ))
     }
 
@@ -561,9 +735,31 @@ impl DocumentCore {
                         ))
                     })?;
                 }
+                Control::Picture(pic) => {
+                    if cell_idx != 0 {
+                        return Err(HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션의 cell_index는 0이어야 합니다 ({})",
+                            i, cell_idx
+                        )));
+                    }
+                    let caption = pic.caption.as_ref().ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: controls[{}] 그림에 캡션이 없습니다",
+                            i, ctrl_idx
+                        ))
+                    })?;
+                    para = caption.paragraphs.get(cell_para_idx).ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션 paragraph {} 범위 초과 (총 {}개)",
+                            i,
+                            cell_para_idx,
+                            caption.paragraphs.len()
+                        ))
+                    })?;
+                }
                 _ => {
                     return Err(HwpError::RenderError(format!(
-                        "경로[{}]: controls[{}]가 표/글상자가 아닙니다",
+                        "경로[{}]: controls[{}]가 표/글상자/그림 캡션이 아닙니다",
                         i, ctrl_idx
                     )));
                 }
@@ -657,9 +853,31 @@ impl DocumentCore {
                         ))
                     })?
                 }
+                Some(Control::Picture(pic)) => {
+                    if cell_idx != 0 {
+                        return Err(HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션의 cell_index는 0이어야 합니다 ({})",
+                            i, cell_idx
+                        )));
+                    }
+                    let caption = pic.caption.as_ref().ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: controls[{}] 그림에 캡션이 없습니다",
+                            i, ctrl_idx
+                        ))
+                    })?;
+                    caption.paragraphs.get(cell_para_idx).ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션문단 {} 범위 초과 (총 {}개)",
+                            i,
+                            cell_para_idx,
+                            caption.paragraphs.len()
+                        ))
+                    })?
+                }
                 _ => {
                     return Err(HwpError::RenderError(format!(
-                        "경로[{}]: controls[{}]가 표/글상자가 아닙니다",
+                        "경로[{}]: controls[{}]가 표/글상자/그림 캡션이 아닙니다",
                         i, ctrl_idx
                     )))
                 }
@@ -741,9 +959,29 @@ impl DocumentCore {
                         ))
                     })?
                 }
+                Some(Control::Picture(pic)) => {
+                    if cell_idx != 0 {
+                        return Err(HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션의 cell_index는 0이어야 합니다 ({})",
+                            i, cell_idx
+                        )));
+                    }
+                    let caption = pic.caption.as_ref().ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: controls[{}] 그림에 캡션이 없습니다",
+                            i, ctrl_idx
+                        ))
+                    })?;
+                    caption.paragraphs.get(cell_para_idx).ok_or_else(|| {
+                        HwpError::RenderError(format!(
+                            "경로[{}]: 그림 캡션문단 {} 범위 초과",
+                            i, cell_para_idx
+                        ))
+                    })?
+                }
                 _ => {
                     return Err(HwpError::RenderError(format!(
-                        "경로[{}]: controls[{}]가 표/글상자가 아닙니다",
+                        "경로[{}]: controls[{}]가 표/글상자/그림 캡션이 아닙니다",
                         i, ctrl_idx
                     )))
                 }
@@ -766,8 +1004,21 @@ impl DocumentCore {
                     .ok_or_else(|| HwpError::RenderError("글상자가 아닙니다".to_string()))?;
                 Ok(text_box.paragraphs.len())
             }
+            Some(Control::Picture(pic)) => {
+                if last.1 != 0 {
+                    return Err(HwpError::RenderError(format!(
+                        "그림 캡션의 cell_index는 0이어야 합니다 ({})",
+                        last.1
+                    )));
+                }
+                let caption = pic
+                    .caption
+                    .as_ref()
+                    .ok_or_else(|| HwpError::RenderError("그림에 캡션이 없습니다".to_string()))?;
+                Ok(caption.paragraphs.len())
+            }
             _ => Err(HwpError::RenderError(format!(
-                "controls[{}]가 표/글상자가 아닙니다",
+                "controls[{}]가 표/글상자/그림 캡션이 아닙니다",
                 last.0
             ))),
         }
@@ -794,15 +1045,15 @@ impl DocumentCore {
         Ok((page_idx, x, y, height))
     }
 
-    /// 렌더 트리에서 특정 줄(char_range)의 TextRun을 찾아 preferredX에 가장 가까운 문자를 반환한다.
-    pub(crate) fn find_char_at_x_on_line(
+    /// 렌더 트리에서 특정 줄(char_range)의 TextRun/ImageNode를 찾아 preferredX에 가장 가까운 커서 위치를 반환한다.
+    pub(crate) fn find_cursor_hit_at_x_on_line(
         &self,
         sec: usize,
         para: usize,
         cell_ctx: Option<(usize, usize, usize, usize)>,
         char_range: (usize, usize),
         preferred_x: f64,
-    ) -> Result<usize, HwpError> {
+    ) -> Result<LineCursorHit, HwpError> {
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -818,6 +1069,45 @@ impl DocumentCore {
             char_count: usize,
             char_positions: Vec<f64>,
             bbox_x: f64,
+            bbox_y: f64,
+            bbox_h: f64,
+        }
+
+        #[derive(Clone, Copy)]
+        struct PositionCandidate {
+            offset: usize,
+            page_index: u32,
+            x: f64,
+            y: f64,
+            height: f64,
+        }
+
+        fn node_matches_context(
+            node_sec: Option<usize>,
+            node_para: Option<usize>,
+            node_cell_ctx: Option<&crate::renderer::layout::CellContext>,
+            sec: usize,
+            para: usize,
+            cell_ctx: Option<(usize, usize, usize, usize)>,
+        ) -> bool {
+            if let Some((ppi, ci, cei, cpi)) = cell_ctx {
+                node_sec == Some(sec)
+                    && node_cell_ctx.as_ref().map_or(false, |ctx| {
+                        ctx.parent_para_index == ppi
+                            && ctx.path[0].control_index == ci
+                            && ctx.path[0].cell_index == cei
+                            && ctx.path[0].cell_para_index == cpi
+                    })
+            } else {
+                node_sec == Some(sec) && node_para == Some(para) && node_cell_ctx.is_none()
+            }
+        }
+
+        fn inline_image_caret_metrics(y: f64, h: f64) -> (f64, f64) {
+            let fallback_h = 12.0;
+            let baseline = h * 0.85;
+            let ascent = fallback_h * 0.8;
+            (y + (baseline - ascent).max(0.0), fallback_h)
         }
 
         fn collect_matching_runs(
@@ -829,30 +1119,27 @@ impl DocumentCore {
             result: &mut Vec<RunMatch>,
         ) {
             if let RenderNodeType::TextRun(ref tr) = node.node_type {
-                let matches = if let Some((ppi, ci, cei, cpi)) = cell_ctx {
-                    tr.section_index == Some(sec)
-                        && tr.cell_context.as_ref().map_or(false, |ctx| {
-                            ctx.parent_para_index == ppi
-                                && ctx.path[0].control_index == ci
-                                && ctx.path[0].cell_index == cei
-                                && ctx.path[0].cell_para_index == cpi
-                        })
-                } else {
-                    tr.section_index == Some(sec)
-                        && tr.para_index == Some(para)
-                        && tr.cell_context.is_none()
-                };
+                let matches = node_matches_context(
+                    tr.section_index,
+                    tr.para_index,
+                    tr.cell_context.as_ref(),
+                    sec,
+                    para,
+                    cell_ctx,
+                );
                 // 번호/글머리표 TextRun (char_start: None)은 건너뛴다
                 if let (true, Some(cs)) = (matches, tr.char_start) {
                     let cc = tr.text.chars().count();
                     // 이 run이 목표 줄의 char_range에 겹치는지 확인
                     if cs < char_range.1 && cs + cc > char_range.0 {
-                        let positions = compute_char_positions(&tr.text, &tr.style);
+                        let positions = cursor_positions_for_render_run(tr, node.bbox.width);
                         result.push(RunMatch {
                             char_start: cs,
                             char_count: cc,
                             char_positions: positions,
                             bbox_x: node.bbox.x,
+                            bbox_y: node.bbox.y,
+                            bbox_h: node.bbox.height,
                         });
                     }
                 }
@@ -862,18 +1149,108 @@ impl DocumentCore {
             }
         }
 
+        fn collect_image_candidates(
+            node: &RenderNode,
+            sec: usize,
+            para: usize,
+            cell_ctx: Option<(usize, usize, usize, usize)>,
+            char_range: (usize, usize),
+            control_positions: &[usize],
+            caret_inline_controls: &[bool],
+            page_index: u32,
+            result: &mut Vec<PositionCandidate>,
+        ) {
+            if let RenderNodeType::Image(ref img) = node.node_type {
+                let matches = node_matches_context(
+                    img.section_index,
+                    img.para_index,
+                    img.cell_context.as_ref(),
+                    sec,
+                    para,
+                    cell_ctx,
+                );
+                if matches {
+                    if let Some(ci) = img.control_index {
+                        if caret_inline_controls.get(ci).copied() != Some(true) {
+                            return;
+                        }
+                        if let Some(pos) = control_positions.get(ci).copied() {
+                            if pos >= char_range.0 && pos <= char_range.1 {
+                                let (caret_y, caret_h) =
+                                    inline_image_caret_metrics(node.bbox.y, node.bbox.height);
+                                result.push(PositionCandidate {
+                                    offset: pos,
+                                    page_index,
+                                    x: node.bbox.x,
+                                    y: caret_y,
+                                    height: caret_h,
+                                });
+                            }
+                            let after = pos + 1;
+                            if after >= char_range.0 && after <= char_range.1 {
+                                let (caret_y, caret_h) =
+                                    inline_image_caret_metrics(node.bbox.y, node.bbox.height);
+                                result.push(PositionCandidate {
+                                    offset: after,
+                                    page_index,
+                                    x: node.bbox.x + node.bbox.width,
+                                    y: caret_y,
+                                    height: caret_h,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            for child in &node.children {
+                collect_image_candidates(
+                    child,
+                    sec,
+                    para,
+                    cell_ctx,
+                    char_range,
+                    control_positions,
+                    caret_inline_controls,
+                    page_index,
+                    result,
+                );
+            }
+        }
+
+        let (control_positions, caret_inline_controls) = self
+            .resolve_paragraph(sec, para, cell_ctx)
+            .map(|para| {
+                (
+                    find_logical_control_positions(para),
+                    para.controls
+                        .iter()
+                        .map(is_treat_as_char_object_control)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .unwrap_or_default();
+
         // 페이지 순회하며 매칭 run 수집
         for &page_num in &pages {
             let tree = self.build_page_tree(page_num)?;
             let mut runs = Vec::new();
             collect_matching_runs(&tree.root, sec, para, cell_ctx, char_range, &mut runs);
+            let mut candidates = Vec::new();
+            collect_image_candidates(
+                &tree.root,
+                sec,
+                para,
+                cell_ctx,
+                char_range,
+                &control_positions,
+                &caret_inline_controls,
+                page_num,
+                &mut candidates,
+            );
 
             if !runs.is_empty() {
                 // preferredX에 가장 가까운 문자 찾기
                 runs.sort_by_key(|a| a.char_start);
-                let mut best_offset = char_range.0;
-                let mut best_dist = f64::MAX;
-
                 for run in &runs {
                     for i in 0..=run.char_count {
                         let global_offset = run.char_start + i;
@@ -889,19 +1266,53 @@ impl DocumentCore {
                             } else {
                                 0.0
                             };
-                        let dist = (x - preferred_x).abs();
-                        if dist < best_dist {
-                            best_dist = dist;
-                            best_offset = global_offset;
-                        }
+                        candidates.push(PositionCandidate {
+                            offset: global_offset,
+                            page_index: page_num,
+                            x,
+                            y: run.bbox_y,
+                            height: run.bbox_h,
+                        });
                     }
                 }
-                return Ok(best_offset);
+            }
+
+            if !candidates.is_empty() {
+                let mut best = candidates[0];
+                let mut best_dist = (best.x - preferred_x).abs();
+                for candidate in &candidates[1..] {
+                    let dist = (candidate.x - preferred_x).abs();
+                    if dist < best_dist {
+                        best = *candidate;
+                        best_dist = dist;
+                    }
+                }
+                return Ok(LineCursorHit {
+                    offset: best.offset,
+                    rect: Some((best.page_index, best.x, best.y, best.height)),
+                });
             }
         }
 
         // 렌더 트리에서 못 찾은 경우 → 줄 시작으로 폴백
-        Ok(char_range.0)
+        Ok(LineCursorHit {
+            offset: char_range.0,
+            rect: None,
+        })
+    }
+
+    /// 렌더 트리에서 특정 줄(char_range)의 TextRun/ImageNode를 찾아 preferredX에 가장 가까운 문자 offset을 반환한다.
+    pub(crate) fn find_char_at_x_on_line(
+        &self,
+        sec: usize,
+        para: usize,
+        cell_ctx: Option<(usize, usize, usize, usize)>,
+        char_range: (usize, usize),
+        preferred_x: f64,
+    ) -> Result<usize, HwpError> {
+        Ok(self
+            .find_cursor_hit_at_x_on_line(sec, para, cell_ctx, char_range, preferred_x)?
+            .offset)
     }
 
     /// 본문 문단/구역 경계를 넘어 이동한다.
@@ -1240,19 +1651,7 @@ impl DocumentCore {
             // 문서 끝 — 표 마지막 위치 유지
             Ok((sec, 0, 0, None))
         } else {
-            if ppi > 0 {
-                return self.enter_paragraph(sec, ppi - 1, delta, preferred_x);
-            }
-            // 구역 시작
-            if sec > 0 {
-                let prev_sec = sec - 1;
-                let prev_count = self.document.sections[prev_sec].paragraphs.len();
-                if prev_count > 0 {
-                    return self.enter_paragraph(prev_sec, prev_count - 1, delta, preferred_x);
-                }
-            }
-            // 문서 시작 — 이동 안 함
-            Ok((sec, 0, 0, None))
+            Ok((sec, ppi, 0, None))
         }
     }
 
@@ -1365,6 +1764,64 @@ impl DocumentCore {
         end_para_idx: usize,
         end_char_offset: usize,
         cell_ctx: Option<(usize, usize, usize)>,
+        page_hints: Option<(u32, u32)>,
+    ) -> Result<String, HwpError> {
+        self.get_selection_rects_for_target_native(
+            section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_para_idx,
+            end_char_offset,
+            cell_ctx.map(
+                |(parent_para_idx, control_idx, cell_idx)| SelectionCellTarget::Flat {
+                    parent_para_idx,
+                    control_idx,
+                    cell_idx,
+                },
+            ),
+            page_hints,
+        )
+    }
+
+    /// 전체 cellPath를 사용하는 중첩 셀 선택 사각형 조회(#4272).
+    pub(crate) fn get_selection_rects_in_cell_by_path_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+        page_hints: Option<(u32, u32)>,
+    ) -> Result<String, HwpError> {
+        let path = Self::parse_cell_path(path_json)?;
+        if path.is_empty() {
+            return Err(HwpError::RenderError("경로가 비어있습니다".to_string()));
+        }
+        self.get_selection_rects_for_target_native(
+            section_idx,
+            start_para_idx,
+            start_char_offset,
+            end_para_idx,
+            end_char_offset,
+            Some(SelectionCellTarget::Path {
+                parent_para_idx,
+                path: &path,
+            }),
+            page_hints,
+        )
+    }
+
+    fn get_selection_rects_for_target_native(
+        &self,
+        section_idx: usize,
+        start_para_idx: usize,
+        start_char_offset: usize,
+        end_para_idx: usize,
+        end_char_offset: usize,
+        cell_target: Option<SelectionCellTarget<'_>>,
+        page_hints: Option<(u32, u32)>,
     ) -> Result<String, HwpError> {
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
@@ -1414,19 +1871,54 @@ impl DocumentCore {
             node: &RenderNode,
             sec: usize,
             para: usize,
+            render_para: Option<&Paragraph>,
             offset: usize,
             page: u32,
             bias: CursorBias,
         ) -> Option<CursorHit> {
+            let control_positions = render_para
+                .map(find_logical_control_positions)
+                .unwrap_or_default();
+
             fn visit(
                 node: &RenderNode,
                 sec: usize,
                 para: usize,
+                control_positions: &[usize],
                 offset: usize,
                 page: u32,
                 bias: CursorBias,
                 best: &mut Option<(u8, CursorHit)>,
             ) {
+                if let RenderNodeType::Equation(ref eq) = node.node_type {
+                    if eq.section_index == Some(sec)
+                        && eq.para_index == Some(para)
+                        && eq.cell_index.is_none()
+                    {
+                        if let Some(ci) = eq.control_index {
+                            if let Some(pos) = control_positions.get(ci).copied() {
+                                if offset == pos || offset == pos + 1 {
+                                    let x = if offset == pos {
+                                        node.bbox.x
+                                    } else {
+                                        node.bbox.x + node.bbox.width
+                                    };
+                                    update_best_cursor(
+                                        best,
+                                        0,
+                                        CursorHit {
+                                            page,
+                                            x,
+                                            y: node.bbox.y,
+                                            h: node.bbox.height.max(10.0),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let RenderNodeType::TextRun(ref tr) = node.node_type {
                     if tr.section_index == Some(sec)
                         && tr.para_index == Some(para)
@@ -1435,7 +1927,7 @@ impl DocumentCore {
                         let cs = tr.char_start.unwrap_or(0);
                         let cc = tr.text.chars().count();
                         if offset >= cs && offset <= cs + cc {
-                            let pos = compute_char_positions(&tr.text, &tr.style);
+                            let pos = cursor_positions_for_render_run(tr, node.bbox.width);
                             let lo = offset - cs;
                             let xr = if lo < pos.len() {
                                 pos[lo]
@@ -1458,20 +1950,36 @@ impl DocumentCore {
                     }
                 }
                 for child in &node.children {
-                    visit(child, sec, para, offset, page, bias, best);
+                    visit(
+                        child,
+                        sec,
+                        para,
+                        control_positions,
+                        offset,
+                        page,
+                        bias,
+                        best,
+                    );
                 }
             }
 
             let mut best = None;
-            visit(node, sec, para, offset, page, bias, &mut best);
+            visit(
+                node,
+                sec,
+                para,
+                &control_positions,
+                offset,
+                page,
+                bias,
+                &mut best,
+            );
             best.map(|(_, hit)| hit)
         }
 
         fn find_cell_cursor(
             node: &RenderNode,
-            ppi: usize,
-            ci: usize,
-            cei: usize,
+            target: SelectionCellTarget<'_>,
             cpi: usize,
             offset: usize,
             page: u32,
@@ -1479,9 +1987,7 @@ impl DocumentCore {
         ) -> Option<CursorHit> {
             fn visit(
                 node: &RenderNode,
-                ppi: usize,
-                ci: usize,
-                cei: usize,
+                target: SelectionCellTarget<'_>,
                 cpi: usize,
                 offset: usize,
                 page: u32,
@@ -1489,19 +1995,24 @@ impl DocumentCore {
                 best: &mut Option<(u8, CursorHit)>,
             ) {
                 if let RenderNodeType::TextRun(ref tr) = node.node_type {
-                    let matches_cell = tr.cell_context.as_ref().map_or(false, |ctx| {
-                        ctx.path.first().map_or(false, |entry| {
-                            ctx.parent_para_index == ppi
-                                && entry.control_index == ci
-                                && entry.cell_index == cei
-                                && entry.cell_para_index == cpi
-                        })
+                    let matches_cell = tr.cell_context.as_ref().is_some_and(|ctx| match target {
+                        SelectionCellTarget::Flat {
+                            parent_para_idx,
+                            control_idx,
+                            cell_idx,
+                        } => {
+                            flat_cell_ctx_matches(ctx, parent_para_idx, control_idx, cell_idx, cpi)
+                        }
+                        SelectionCellTarget::Path {
+                            parent_para_idx,
+                            path,
+                        } => path_cell_ctx_matches(ctx, parent_para_idx, path, cpi),
                     });
                     if matches_cell {
                         let cs = tr.char_start.unwrap_or(0);
                         let cc = tr.text.chars().count();
                         if offset >= cs && offset <= cs + cc {
-                            let pos = compute_char_positions(&tr.text, &tr.style);
+                            let pos = cursor_positions_for_render_run(tr, node.bbox.width);
                             let lo = offset - cs;
                             let xr = if lo < pos.len() {
                                 pos[lo]
@@ -1524,12 +2035,12 @@ impl DocumentCore {
                     }
                 }
                 for child in &node.children {
-                    visit(child, ppi, ci, cei, cpi, offset, page, bias, best);
+                    visit(child, target, cpi, offset, page, bias, best);
                 }
             }
 
             let mut best = None;
-            visit(node, ppi, ci, cei, cpi, offset, page, bias, &mut best);
+            visit(node, target, cpi, offset, page, bias, &mut best);
             best.map(|(_, hit)| hit)
         }
 
@@ -1568,61 +2079,75 @@ impl DocumentCore {
             visit(node, sec, para, line_idx, page)
         }
 
-        // ── 페이지별 렌더 트리 캐시 (최대 2페이지) ──
+        // ── 후보 페이지별 렌더 트리 캐시 ──
         let mut tree_cache: Vec<(u32, crate::renderer::render_tree::PageRenderTree)> = Vec::new();
 
         // 선택 범위에 관련된 페이지 번호 수집 (중복 제거)
-        let lookup_para = if let Some((ppi, _, _)) = cell_ctx {
-            ppi
-        } else {
-            start_para_idx
-        };
-        let page_nums = self.find_pages_for_paragraph(section_idx, lookup_para)?;
+        let lookup_para = cell_target
+            .map(SelectionCellTarget::parent_para_idx)
+            .unwrap_or(start_para_idx);
+        let full_page_nums = self.find_pages_for_paragraph(section_idx, lookup_para)?;
         // 끝 문단이 다른 페이지에 있을 수 있으므로 추가
-        if cell_ctx.is_none() && end_para_idx != start_para_idx {
+        if cell_target.is_none() && end_para_idx != start_para_idx {
             if let Ok(end_pages) = self.find_pages_for_paragraph(section_idx, end_para_idx) {
                 for &p in &end_pages {
-                    if !page_nums.contains(&p) {
+                    if !full_page_nums.contains(&p) {
                         // page_nums에 없는 페이지만 추가 (tree_cache에서 처리)
                         let _ = p; // 아래에서 on-demand로 빌드
                     }
                 }
             }
         }
+
+        let page_plan = if cell_target.is_some() {
+            plan_selection_pages(
+                &full_page_nums,
+                page_hints.map(|hints| hints.0),
+                page_hints.map(|hints| hints.1),
+            )
+        } else {
+            SelectionPagePlan::FullFallback(full_page_nums)
+        };
+        let (page_nums, used_hints) = match page_plan {
+            SelectionPagePlan::Hinted(pages) => (pages, true),
+            SelectionPagePlan::FullFallback(pages) => (pages, false),
+        };
+
         // 주요 페이지 트리 미리 빌드
         for &pn in &page_nums {
-            tree_cache.push((pn, self.build_page_tree(pn)?));
+            let tree = if used_hints {
+                self.build_page_tree_cached(pn)?
+            } else {
+                // positional/missing/invalid hint는 기존 함수 로컬 수명을 유지한다.
+                // 115쪽 fallback을 shared cache에 영구 보관해 메모리 체류를 늘리지 않는다.
+                self.build_page_tree(pn)?
+            };
+            tree_cache.push((pn, tree));
         }
 
-        // 캐시에서 트리 참조를 가져오거나, 없으면 빌드 후 추가
-        macro_rules! get_tree {
-            ($page:expr) => {{
-                let pg = $page;
-                if !tree_cache.iter().any(|(p, _)| *p == pg) {
-                    tree_cache.push((pg, self.build_page_tree(pg)?));
-                }
-                &tree_cache.iter().find(|(p, _)| *p == pg).unwrap().1
-            }};
-        }
-
-        // 페이지에서 커서 위치 찾기 (캐시된 트리 사용)
-        macro_rules! find_cursor {
-            ($para_idx:expr, $offset:expr, $bias:expr) => {{
-                let mut result: Option<CursorHit> = None;
-                for (pn, tree) in tree_cache.iter() {
-                    let hit = if let Some((ppi, ci, cei)) = cell_ctx {
-                        find_cell_cursor(&tree.root, ppi, ci, cei, $para_idx, $offset, *pn, $bias)
-                    } else {
-                        find_body_cursor(&tree.root, section_idx, $para_idx, $offset, *pn, $bias)
-                    };
-                    if hit.is_some() {
-                        result = hit;
-                        break;
-                    }
-                }
-                result
-            }};
-        }
+        // 한 line segment의 양 cursor는 반드시 같은 page tree에서 찾는다. split paragraph의
+        // 경계 offset은 이전 page의 trailing과 다음 page의 leading 양쪽에 존재할 수 있으므로,
+        // 두 cursor를 독립적으로 첫-hit 탐색하면 서로 다른 page 좌표가 한 rect에 섞인다.
+        let find_cursor_in_tree = |tree: &crate::renderer::render_tree::PageRenderTree,
+                                   page: u32,
+                                   para_idx: usize,
+                                   offset: usize,
+                                   bias: CursorBias|
+         -> Option<CursorHit> {
+            if let Some(target) = cell_target {
+                find_cell_cursor(&tree.root, target, para_idx, offset, page, bias)
+            } else {
+                find_body_cursor(
+                    &tree.root,
+                    section_idx,
+                    para_idx,
+                    self.get_render_paragraph_ref(section_idx, para_idx).ok(),
+                    offset,
+                    page,
+                    bias,
+                )
+            }
+        };
 
         // ── 단 영역 조회 헬퍼 ──
         let find_column_area = |page: u32, rx: f64| -> (f64, f64) {
@@ -1647,18 +2172,43 @@ impl DocumentCore {
 
         // ── 메인 루프 ──
         let mut rects: Vec<String> = Vec::new();
+        let mut expected_segments = 0usize;
+        let mut rendered_segments = 0usize;
+        let mut last_segment_page: Option<u32> = None;
 
         for para_idx in start_para_idx..=end_para_idx {
-            let para = if let Some((ppi, ci, cei)) = cell_ctx {
-                self.get_cell_paragraph_ref(section_idx, ppi, ci, cei, para_idx)
+            let para = match cell_target {
+                Some(SelectionCellTarget::Flat {
+                    parent_para_idx,
+                    control_idx,
+                    cell_idx,
+                }) => self
+                    .get_cell_paragraph_ref(
+                        section_idx,
+                        parent_para_idx,
+                        control_idx,
+                        cell_idx,
+                        para_idx,
+                    )
                     .ok_or_else(|| {
                         HwpError::RenderError(format!(
                             "셀 문단 참조 실패: sec={} ppi={} ci={} cei={} cpi={}",
-                            section_idx, ppi, ci, cei, para_idx
+                            section_idx, parent_para_idx, control_idx, cell_idx, para_idx
                         ))
-                    })?
-            } else {
-                self.get_render_paragraph_ref(section_idx, para_idx)?
+                    })?,
+                Some(SelectionCellTarget::Path {
+                    parent_para_idx,
+                    path,
+                }) => {
+                    // path의 마지막 cellParaIndex만 현재 선택 문단 축으로 바꾼다.
+                    // 문단당 한 번만 할당하며 RenderNode 순회 안에서는 원본 slice를 비교한다.
+                    let mut para_path = path.to_vec();
+                    if let Some(last) = para_path.last_mut() {
+                        last.2 = para_idx;
+                    }
+                    self.resolve_paragraph_by_path(section_idx, parent_para_idx, &para_path)?
+                }
+                None => self.get_render_paragraph_ref(section_idx, para_idx)?,
             };
 
             let char_count = navigable_text_len(para);
@@ -1679,11 +2229,16 @@ impl DocumentCore {
             }
 
             // 본문 문단이 다른 페이지에 있을 수 있으므로 트리 캐시에 추가
-            if cell_ctx.is_none() {
+            if cell_target.is_none() {
                 if let Ok(pp) = self.find_pages_for_paragraph(section_idx, para_idx) {
                     for &pn in &pp {
                         if !tree_cache.iter().any(|(p, _)| *p == pn) {
-                            tree_cache.push((pn, self.build_page_tree(pn)?));
+                            let tree = if used_hints {
+                                self.build_page_tree_cached(pn)?
+                            } else {
+                                self.build_page_tree(pn)?
+                            };
+                            tree_cache.push((pn, tree));
                         }
                     }
                 }
@@ -1696,65 +2251,82 @@ impl DocumentCore {
                 if range_start >= range_end {
                     continue;
                 }
+                expected_segments += 1;
 
-                let left_hit = find_cursor!(para_idx, range_start, CursorBias::Leading);
-                // range_end가 줄바꿈 등 비렌더링 문자 위치이면 한 칸 앞으로 재시도
-                let right_hit = find_cursor!(para_idx, range_end, CursorBias::Trailing)
-                    .or_else(|| {
-                        if range_end > range_start {
-                            find_cursor!(para_idx, range_end - 1, CursorBias::Trailing)
-                        } else {
-                            None
-                        }
-                    })
-                    .or_else(|| {
-                        if cell_ctx.is_none() {
-                            tree_cache.iter().find_map(|(pn, tree)| {
-                                find_body_line_end_cursor(
-                                    &tree.root,
-                                    section_idx,
-                                    para_idx,
-                                    line_idx,
-                                    *pn,
-                                )
+                let cursor_pair = tree_cache.iter().find_map(|(pn, tree)| {
+                    if last_segment_page.is_some_and(|last| *pn < last) {
+                        return None;
+                    }
+                    let left_hit =
+                        find_cursor_in_tree(tree, *pn, para_idx, range_start, CursorBias::Leading);
+                    // range_end가 줄바꿈 등 비렌더링 문자 위치이면 같은 page tree에서 한 칸
+                    // 앞으로 재시도한다. body line-end fallback도 같은 page로 제한한다.
+                    let right_hit =
+                        find_cursor_in_tree(tree, *pn, para_idx, range_end, CursorBias::Trailing)
+                            .or_else(|| {
+                                if range_end > range_start {
+                                    find_cursor_in_tree(
+                                        tree,
+                                        *pn,
+                                        para_idx,
+                                        range_end - 1,
+                                        CursorBias::Trailing,
+                                    )
+                                } else {
+                                    None
+                                }
                             })
-                        } else {
-                            None
-                        }
-                    });
+                            .or_else(|| {
+                                if cell_target.is_none() {
+                                    find_body_line_end_cursor(
+                                        &tree.root,
+                                        section_idx,
+                                        para_idx,
+                                        line_idx,
+                                        *pn,
+                                    )
+                                } else {
+                                    None
+                                }
+                            });
+                    left_hit.zip(right_hit)
+                });
 
-                if let (Some(lh), Some(rh)) = (left_hit, right_hit) {
+                if let Some((lh, rh)) = cursor_pair {
+                    debug_assert_eq!(lh.page, rh.page);
+                    last_segment_page = Some(lh.page);
                     let partial_start = range_start > line_char_start;
 
-                    let selection_continues = cell_ctx.is_none()
+                    let selection_continues = cell_target.is_none()
                         && ((range_end < sel_end) ||
                         (para_idx < end_para_idx && range_end == sel_end) ||
                         // 같은 문단 내 강제 줄바꿈: 줄 끝까지 선택되고 다음 줄 시작이 sel_end이면 확장
                         (range_end == sel_end && range_end >= line_char_end && line_idx + 1 < line_count));
 
-                    let (area_left, area_right) = if cell_ctx.is_none() {
+                    let (area_left, area_right) = if cell_target.is_none() {
                         find_column_area(rh.page, rh.x)
                     } else {
                         (0.0, 0.0)
                     };
 
                     // y/h는 항상 left_hit 기준 (right_hit가 다음 줄에 있을 수 있음)
-                    let (page_idx, rect_x, rect_y, rect_h) = if !partial_start && cell_ctx.is_none()
-                    {
-                        (lh.page, area_left, lh.y, lh.h)
-                    } else {
-                        (lh.page, lh.x, lh.y, lh.h)
-                    };
+                    let (page_idx, rect_x, rect_y, rect_h) =
+                        if !partial_start && cell_target.is_none() {
+                            (lh.page, area_left, lh.y, lh.h)
+                        } else {
+                            (lh.page, lh.x, lh.y, lh.h)
+                        };
 
                     let width = if selection_continues {
                         (area_right - rect_x).max(0.0)
-                    } else if !partial_start && cell_ctx.is_none() {
+                    } else if !partial_start && cell_target.is_none() {
                         (rh.x - rect_x).max(0.0)
                     } else {
                         (rh.x - lh.x).abs()
                     };
 
                     if width > 0.01 {
+                        rendered_segments += 1;
                         rects.push(format!(
                             "{{\"pageIndex\":{},\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}}",
                             page_idx, rect_x, rect_y, width, rect_h
@@ -1764,6 +2336,200 @@ impl DocumentCore {
             }
         }
 
+        // page hint는 성능 힌트다. 후보 범위에서 필요한 segment를 모두 해소하지 못하면
+        // 부분 rect를 반환하지 않고 기존 전체 host-page 탐색으로 정확성을 복구한다.
+        if used_hints && rendered_segments != expected_segments {
+            return self.get_selection_rects_for_target_native(
+                section_idx,
+                start_para_idx,
+                start_char_offset,
+                end_para_idx,
+                end_char_offset,
+                cell_target,
+                None,
+            );
+        }
+
         Ok(format!("[{}]", rects.join(",")))
+    }
+}
+
+/// [#2651] `get_selection_rects_native` 의 셀 매칭 술어. `cell_ctx` 는 평면
+/// 3-튜플(parent_para_idx, control_idx, cell_idx)이라 애초에 중첩 셀을 정확히
+/// 지정할 수 없다 — `path.len() == 1` 가드 없이 `path[0]` 만 비교하면, 중첩
+/// 표 내부(depth>=2) run 이 그 중첩 표를 품은 바깥 셀과 동일한 `path[0]` 을
+/// 가져 잘못 매칭된다(같은 클래스의 이미 고친 `cursor_rect.rs` 버그와 동형).
+fn flat_cell_ctx_matches(
+    ctx: &crate::renderer::layout::CellContext,
+    ppi: usize,
+    ci: usize,
+    cei: usize,
+    cpi: usize,
+) -> bool {
+    ctx.path.len() == 1
+        && ctx.path.first().is_some_and(|entry| {
+            ctx.parent_para_index == ppi
+                && entry.control_index == ci
+                && entry.cell_index == cei
+                && entry.cell_para_index == cpi
+        })
+}
+
+/// 전체 중첩 경로가 같은 셀 컨테이너의 현재 문단을 가리키는지 확인한다.
+///
+/// `path`의 마지막 `cellParaIndex`는 선택 시작점 값일 수 있으므로 현재 조회 중인
+/// `cpi`로 대체해 비교한다. 중간 엔트리의 문단 인덱스는 다음 표로 내려가는 경로의
+/// 일부이므로 반드시 그대로 일치해야 한다.
+fn path_cell_ctx_matches(
+    ctx: &crate::renderer::layout::CellContext,
+    parent_para_idx: usize,
+    path: &[(usize, usize, usize)],
+    cpi: usize,
+) -> bool {
+    ctx.parent_para_index == parent_para_idx
+        && ctx.path.len() == path.len()
+        && ctx
+            .path
+            .iter()
+            .zip(path.iter())
+            .enumerate()
+            .all(|(index, (actual, expected))| {
+                actual.control_index == expected.0
+                    && actual.cell_index == expected.1
+                    && actual.cell_para_index
+                        == if index + 1 == path.len() {
+                            cpi
+                        } else {
+                            expected.2
+                        }
+            })
+}
+
+#[cfg(test)]
+mod flat_cell_ctx_matches_tests {
+    use super::{flat_cell_ctx_matches, path_cell_ctx_matches};
+    use crate::renderer::layout::{CellContext, CellPathEntry};
+
+    fn entry(control_index: usize, cell_index: usize, cell_para_index: usize) -> CellPathEntry {
+        CellPathEntry {
+            control_index,
+            cell_index,
+            cell_para_index,
+            text_direction: 0,
+        }
+    }
+
+    #[test]
+    fn matches_direct_single_level_cell() {
+        let ctx = CellContext {
+            parent_para_index: 0,
+            path: vec![entry(1, 2, 3)],
+        };
+        assert!(flat_cell_ctx_matches(&ctx, 0, 1, 2, 3));
+    }
+
+    #[test]
+    fn rejects_nested_cell_sharing_the_same_outer_path_entry() {
+        // 중첩 표 내부 run: path = [바깥 셀(1,2,3), 안쪽 셀(0,0,0)].
+        // path[0] 은 바깥 셀 질의(0,1,2,3)와 정확히 같지만, 이 run 은 실제로
+        // 안쪽 셀에 속하므로 매칭돼선 안 된다 — 종전엔 path.len() 가드가
+        // 없어 여기서 잘못 true 를 반환했다(#2651).
+        let ctx = CellContext {
+            parent_para_index: 0,
+            path: vec![entry(1, 2, 3), entry(0, 0, 0)],
+        };
+        assert!(!flat_cell_ctx_matches(&ctx, 0, 1, 2, 3));
+    }
+
+    #[test]
+    fn rejects_mismatched_outer_indices() {
+        let ctx = CellContext {
+            parent_para_index: 0,
+            path: vec![entry(1, 2, 3)],
+        };
+        assert!(!flat_cell_ctx_matches(&ctx, 0, 9, 9, 9));
+    }
+
+    #[test]
+    fn path_matcher_uses_the_full_nested_container_path() {
+        let ctx = CellContext {
+            parent_para_index: 7,
+            path: vec![entry(1, 0, 0), entry(2, 0, 12), entry(0, 50, 3)],
+        };
+        let query = vec![(1, 0, 0), (2, 0, 12), (0, 50, 0)];
+
+        assert!(path_cell_ctx_matches(&ctx, 7, &query, 3));
+        assert!(!path_cell_ctx_matches(&ctx, 7, &query, 2));
+    }
+
+    #[test]
+    fn path_matcher_rejects_a_different_nested_cell_or_intermediate_paragraph() {
+        let ctx = CellContext {
+            parent_para_index: 7,
+            path: vec![entry(1, 0, 0), entry(2, 0, 12), entry(0, 50, 0)],
+        };
+
+        assert!(!path_cell_ctx_matches(
+            &ctx,
+            7,
+            &[(1, 0, 0), (2, 0, 12), (0, 49, 0)],
+            0,
+        ));
+        assert!(!path_cell_ctx_matches(
+            &ctx,
+            7,
+            &[(1, 0, 0), (2, 0, 11), (0, 50, 0)],
+            0,
+        ));
+    }
+}
+
+#[cfg(test)]
+mod issue_2215_selection_page_plan_tests {
+    use super::{plan_selection_pages, SelectionPagePlan};
+
+    fn host_pages() -> Vec<u32> {
+        (0..115).collect()
+    }
+
+    #[test]
+    fn same_page_hint_limits_the_plan_to_one_page() {
+        assert_eq!(
+            plan_selection_pages(&host_pages(), Some(54), Some(54)),
+            SelectionPagePlan::Hinted(vec![54])
+        );
+    }
+
+    #[test]
+    fn cross_page_hints_keep_only_the_inclusive_host_range() {
+        assert_eq!(
+            plan_selection_pages(&host_pages(), Some(54), Some(55)),
+            SelectionPagePlan::Hinted(vec![54, 55])
+        );
+        assert_eq!(
+            plan_selection_pages(&host_pages(), Some(55), Some(54)),
+            SelectionPagePlan::Hinted(vec![54, 55])
+        );
+    }
+
+    #[test]
+    fn missing_or_invalid_hints_preserve_the_full_fallback() {
+        let pages = host_pages();
+        for plan in [
+            plan_selection_pages(&pages, None, None),
+            plan_selection_pages(&pages, Some(54), None),
+            plan_selection_pages(&pages, None, Some(54)),
+            plan_selection_pages(&pages, Some(54), Some(999)),
+        ] {
+            assert_eq!(plan, SelectionPagePlan::FullFallback(pages.clone()));
+        }
+    }
+
+    #[test]
+    fn sparse_host_pages_do_not_invent_pages_inside_the_hint_range() {
+        assert_eq!(
+            plan_selection_pages(&[2, 4, 9, 10], Some(4), Some(10)),
+            SelectionPagePlan::Hinted(vec![4, 9, 10])
+        );
     }
 }

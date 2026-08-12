@@ -2,20 +2,94 @@ import type { CommandDef, CommandServices } from '../types';
 import { PageSetupDialog } from '@/ui/page-setup-dialog';
 import { AboutDialog } from '@/ui/about-dialog';
 import { showSaveAs } from '@/ui/save-as-dialog';
+import { showHwpSavePasswordDialog } from '@/ui/hwp-password-dialog';
 import { showUnsavedChangesDialog } from '@/ui/unsaved-changes-dialog';
+import { showHmlSaveFormatDialog } from '@/ui/hml-save-format-dialog';
 import {
-  HWP_AND_HWPX_SAVE_PICKER_TYPES,
-  HWP_SAVE_PICKER_TYPES,
-  HWPX_SAVE_PICKER_TYPES,
-  pickSaveFileHandle,
-  pickOpenFileHandle,
+  fileNameForFormat,
+  markConvertedHmlSaveHandle,
+  requiresSaveFormatChoice,
+  resolveSaveTarget,
+  type SaveFormat,
+} from '@/command/save-target';
+import { SAVE_FORMAT_DETAILS } from '@/command/save-format';
+import {
+  exportDocumentWithReportForFormat,
+  exportPasswordProtectedDocumentWithReportForFormat,
+  type SaveExportArtifact,
+} from '@/command/save-document-format';
+import {
+  buildContentLossNotice,
+  persistDownloadWithContentLoss,
+  persistWithContentLoss,
+  type ContentLossReport,
+} from '@/core/export-content-loss';
+import {
+  readHmlSaveContext,
+  resolveHmlSaveCapability,
+} from '@/core/hml-save-capability';
+import {
+  appendPrintStyle,
+  appendSvgPage,
+  createPrintPage,
+  pdfPrintTitle,
+  printProgressText,
+  printReadyText,
+  type PrintIntent,
+  type PrintPage,
+} from '@/command/print-pages';
+import {
+  createPrintPreviewSurface,
+  createPrintSurface,
+  PrintPreviewBlockedError,
+  waitForPrintSurfaceReady,
+  type PrintPreviewSurface,
+  type PrintSurface,
+} from '@/command/print-surface';
+import {
   readFileFromHandle,
   saveDocumentToFileSystem,
-  writeBlobToHandle,
   type FileSystemFileHandleLike,
+  type SaveDocumentResult,
   type FileSystemWindowLike,
 } from '@/command/file-system-access';
-import { assertHwpxSaveIntegrity } from '@/core/hwpx-save-integrity';
+import { openDocumentViaPicker } from '../file-open-picker';
+import { PdfPrintDialog } from '@/ui/pdf-print-dialog';
+import { userSettings } from '@/core/user-settings';
+import { showToast } from '@/ui/toast';
+import { clearRecentDocs, listRecentDocs, removeRecentDoc } from '@/recent/recent-store';
+import { openRecentEntry } from '@/recent/recent-open';
+
+/**
+ * 파일 열기 대화상자(File System Access picker, 미지원 시 숨김 input 폴백)를 열어
+ * 문서를 로드한다. `file:open` 커맨드와 "최근 문서" 메타-only 항목 재열기가 공유한다.
+ */
+async function openFileViaPicker(services: CommandServices): Promise<void> {
+  await openDocumentViaPicker({
+    canReplace: () => confirmSaveBeforeReplacingDocument(services),
+    windowLike: window as FileSystemWindowLike,
+    findFileInput: () => document.getElementById('file-input') as HTMLInputElement | null,
+    emitOpenDocument: (payload) => services.eventBus.emit('open-document-bytes', payload),
+    warn: (message, error) => console.warn(message, error),
+    alert: (message) => alert(message),
+  });
+}
+
+/** 최근 문서 핸들의 읽기 권한을 확인/요청한다. 최종 'granted' 여부 반환. */
+async function ensureReadPermission(handle: FileSystemFileHandleLike): Promise<boolean> {
+  try {
+    if (typeof handle.queryPermission === 'function') {
+      if ((await handle.queryPermission({ mode: 'read' })) === 'granted') return true;
+    }
+    if (typeof handle.requestPermission === 'function') {
+      return (await handle.requestPermission({ mode: 'read' })) === 'granted';
+    }
+    // 권한 API 미지원 브라우저 → getFile() 시도로 위임(여기선 통과).
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** [Task #833] 사용자 명시 cancel 에러 검출.
  * - AbortError: showSaveFilePicker / showOpenFilePicker 다이얼로그 취소
@@ -28,152 +102,297 @@ function isUserCancelError(e: unknown): boolean {
       && (e.name === 'AbortError' || e.name === 'NotAllowedError');
 }
 
-type SaveFormat = 'hwp' | 'hwpx';
+function saveBaseNameFor(fileName: string, format: SaveFormat): string {
+  return fileNameForFormat(fileName, format).replace(/\.(hwp|hwpx|hml)$/i, '');
+}
 
-interface ExportedDocument {
-  bytes: Uint8Array;
+function flushDeferredPaginationBeforeExplicitOutput(
+  services: CommandServices,
+  reason: string,
+): void {
+  const inputHandler = services.getInputHandler();
+  if (!inputHandler) return;
+  inputHandler.flushDeferredPaginationIfNeeded(reason);
+  if (inputHandler.hasDeferredPaginationPending()) {
+    throw new Error(`출력 전 페이지네이션을 완료하지 못했습니다 (${reason})`);
+  }
+}
+
+async function chooseSaveAsFormat(services: CommandServices): Promise<SaveFormat | null> {
+  const sourceFormat = services.wasm.getSourceFormat();
+  if (sourceFormat !== 'hml') return sourceFormat === 'hwpx' ? 'hwpx' : 'hwp';
+  const context = getHmlSaveContext(services);
+  return showHmlSaveFormatDialog(
+    context.metadata,
+    context.exporterAvailable,
+  );
+}
+
+interface SavePayload {
   blob: Blob;
-  extension: '.hwp' | '.hwpx';
-  pickerTypes: { description: string; accept: Record<string, string[]> }[];
-  reflowedParagraphs: number;
+  contentLoss: ContentLossReport | null;
 }
 
-function saveFormatForSource(sourceFormat: string): SaveFormat {
-  return sourceFormat === 'hwpx' ? 'hwpx' : 'hwp';
-}
-
-function saveFormatForFileName(fileName: string, fallback: SaveFormat): SaveFormat {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.hwpx')) return 'hwpx';
-  if (lower.endsWith('.hwp')) return 'hwp';
-  return fallback;
-}
-
-function defaultSaveFormat(sourceFormat: string, fileName: string): SaveFormat {
-  return saveFormatForFileName(fileName, saveFormatForSource(sourceFormat));
-}
-
-function extensionForFormat(format: SaveFormat): '.hwp' | '.hwpx' {
-  return format === 'hwpx' ? '.hwpx' : '.hwp';
-}
-
-function saveFileName(fileName: string, format: SaveFormat): string {
-  const extension = extensionForFormat(format);
-  const trimmed = fileName.trim() || `document${extension}`;
-  if (/\.(hwp|hwpx)$/i.test(trimmed)) {
-    return trimmed.replace(/\.(hwp|hwpx)$/i, extension);
-  }
-  return `${trimmed}${extension}`;
-}
-
-function saveBaseName(fileName: string, format: SaveFormat): string {
-  return saveFileName(fileName, format).replace(/\.(hwp|hwpx)$/i, '');
-}
-
-function saveCurrentHandle(
+function createSavePayload(
+  services: CommandServices,
   format: SaveFormat,
-  handle: FileSystemFileHandleLike | null,
-): FileSystemFileHandleLike | null {
-  if (!handle) return null;
-  return handle.name.toLowerCase().endsWith(extensionForFormat(format)) ? handle : null;
-}
-
-function exportDocumentForSave(services: CommandServices, format: SaveFormat): ExportedDocument {
-  if (format === 'hwpx') {
-    const warnings = services.wasm.getValidationWarnings();
-    const reflowedParagraphs = warnings.count > 0 ? services.wasm.reflowLinesegs() : 0;
-    if (reflowedParagraphs > 0) {
-      services.eventBus.emit('document-changed', 'hwpx-save-reflow');
-    }
-    const bytes = services.wasm.exportHwpx();
-    return {
-      bytes,
-      blob: new Blob([bytes as unknown as BlobPart], { type: 'application/hwp+zip' }),
-      extension: '.hwpx',
-      pickerTypes: HWPX_SAVE_PICKER_TYPES,
-      reflowedParagraphs,
-    };
-  }
-
-  const bytes = services.wasm.exportHwp();
+  password?: string,
+): SavePayload {
+  const artifact: SaveExportArtifact = password === undefined
+    ? exportDocumentWithReportForFormat(services.wasm, format)
+    : exportPasswordProtectedDocumentWithReportForFormat(
+      services.wasm,
+      requirePasswordSaveFormat(format),
+      password,
+    );
   return {
-    bytes,
-    blob: new Blob([bytes as unknown as BlobPart], { type: 'application/x-hwp' }),
-    extension: '.hwp',
-    pickerTypes: HWP_SAVE_PICKER_TYPES,
-    reflowedParagraphs: 0,
+    blob: new Blob([artifact.bytes as unknown as BlobPart], {
+      type: SAVE_FORMAT_DETAILS[format].mimeType,
+    }),
+    contentLoss: artifact.contentLoss,
   };
 }
 
-async function assertSafeHwpxExport(
-  services: CommandServices,
-  sourceFormat: string,
-  format: SaveFormat,
-  bytes: Uint8Array,
-): Promise<void> {
-  if (sourceFormat !== 'hwpx' || format !== 'hwpx') return;
-  await assertHwpxSaveIntegrity(services.wasm.sourceBytes, bytes);
+function showExportContentLoss(report: ContentLossReport): void {
+  const message = buildContentLossNotice(report);
+  if (!message) return;
+  showToast({ message, durationMs: 0, confirmLabel: '확인' });
 }
 
-export type SaveCurrentDocumentResult = 'saved' | 'cancelled' | 'failed';
+function requirePasswordSaveFormat(format: SaveFormat): Exclude<SaveFormat, 'hml'> {
+  if (format === 'hml') {
+    throw new Error('암호 설정 저장은 HWP 또는 HWPX 형식에서만 지원합니다.');
+  }
+  return format;
+}
 
-export async function saveCurrentDocument(services: CommandServices): Promise<SaveCurrentDocumentResult> {
+function isHmlSaveEnabled(services: CommandServices): boolean {
+  const context = getHmlSaveContext(services);
+  return resolveHmlSaveCapability(
+    context.metadata,
+    context.exporterAvailable,
+  ).hmlEnabled;
+}
+
+function getHmlSaveContext(services: CommandServices) {
+  return readHmlSaveContext(
+    () => services.wasm.getHmlOpenMetadata(),
+    () => services.wasm.hasHmlExportCapability(),
+  );
+}
+
+async function tryFileSystemSave(
+  services: CommandServices,
+  format: SaveFormat,
+  blob: Blob,
+  suggestedName: string,
+  forceSaveAs: boolean,
+  currentHandle: FileSystemFileHandleLike | null,
+): Promise<SaveDocumentResult | 'cancelled'> {
+  try {
+    return await saveDocumentToFileSystem({
+      blob,
+      suggestedName,
+      currentHandle,
+      windowLike: window as FileSystemWindowLike,
+      forceSaveAs,
+      saveFormat: format,
+    });
+  } catch (error) {
+    if (isUserCancelError(error)) return 'cancelled';
+    console.warn('[file:save] File System Access API 실패, 폴백:', error);
+    return { method: 'fallback', handle: null, fileName: suggestedName };
+  }
+}
+
+function completeHandleSave(
+  services: CommandServices,
+  sourceFormat: string,
+  result: SaveDocumentResult,
+  reason: 'save' | 'save-as',
+  passwordProtected = false,
+): void {
+  if (sourceFormat === 'hml') markConvertedHmlSaveHandle(result.handle);
+  services.wasm.currentFileHandle = result.handle;
+  services.wasm.fileName = result.fileName;
+  services.wasm.requiresPasswordForSave = passwordProtected;
+  services.documentState.markClean(reason);
+}
+
+function downloadBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  try {
+    anchor.click();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
+
+async function promptFallbackName(
+  suggestedName: string,
+  format: SaveFormat,
+): Promise<string | null> {
+  const result = await showSaveAs(saveBaseNameFor(suggestedName, format), format, {
+    allowPassword: false,
+  });
+  return result?.fileName ?? null;
+}
+
+interface SaveAsOptions {
+  fileName: string;
+  password: string | null;
+}
+
+async function promptSaveAsOptions(
+  services: CommandServices,
+  format: SaveFormat,
+): Promise<SaveAsOptions | null> {
+  const selection = await showSaveAs(
+    saveBaseNameFor(services.wasm.fileName, format),
+    format,
+    { allowPassword: format !== 'hml' },
+  );
+  if (selection === null) return null;
+  if (!selection.configurePassword) {
+    return { fileName: selection.fileName, password: null };
+  }
+
+  const password = await showHwpSavePasswordDialog(selection.fileName);
+  if (password === null) return null;
+  return { fileName: selection.fileName, password };
+}
+
+async function saveAsFormat(services: CommandServices, format: SaveFormat): Promise<void> {
+  let password: string | null = null;
   try {
     const sourceFormat = services.wasm.getSourceFormat();
-    const format = defaultSaveFormat(sourceFormat, services.wasm.fileName);
-    const saveName = saveFileName(services.wasm.fileName, format);
-    const exported = exportDocumentForSave(services, format);
-    await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
-    console.log(
-      `[file:save] source=${sourceFormat}, format=${format}, ` +
-      `reflowed=${exported.reflowedParagraphs}, ${exported.bytes.length} bytes`,
+    const options = await promptSaveAsOptions(services, format);
+    if (options === null) return;
+    password = options.password;
+
+    flushDeferredPaginationBeforeExplicitOutput(services, 'save-as');
+    const saveName = options.fileName;
+    const payload = createSavePayload(services, format, password ?? undefined);
+    const originalHandle = sourceFormat === 'hml' ? services.wasm.currentFileHandle : null;
+    const result = await persistWithContentLoss(
+      payload.contentLoss,
+      () => tryFileSystemSave(
+        services,
+        format,
+        payload.blob,
+        saveName,
+        true,
+        originalHandle,
+      ),
+      (saveResult) => saveResult !== 'cancelled' && saveResult.method !== 'fallback',
+      showExportContentLoss,
     );
-
-    try {
-      const saveResult = await saveDocumentToFileSystem({
-        blob: exported.blob,
-        suggestedName: saveName,
-        currentHandle: saveCurrentHandle(format, services.wasm.currentFileHandle),
-        windowLike: window as FileSystemWindowLike,
-        saveTypes: exported.pickerTypes,
-      });
-
-      if (saveResult.method !== 'fallback') {
-        services.wasm.currentFileHandle = saveResult.handle;
-        services.wasm.fileName = saveFileName(saveResult.fileName, format);
-        services.documentState.markClean('save');
-        console.log(`[file:save] ${services.wasm.fileName} (${(exported.bytes.length / 1024).toFixed(1)}KB)`);
-        return 'saved';
-      }
-    } catch (e) {
-      if (isUserCancelError(e)) return 'cancelled';
-      console.warn('[file:save] File System Access API failed, falling back:', e);
+    if (result === 'cancelled') return;
+    if (result.method !== 'fallback') {
+      completeHandleSave(services, sourceFormat, result, 'save-as', password !== null);
+      return;
     }
-
-    let downloadName = saveName;
-    if (services.wasm.isNewDocument) {
-      const result = await showSaveAs(saveBaseName(saveName, format), exported.extension);
-      if (!result) return 'cancelled';
-      downloadName = saveFileName(result, format);
-      services.wasm.fileName = downloadName;
-    }
-
-    const url = URL.createObjectURL(exported.blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = downloadName;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-    services.documentState.markClean('save');
-    console.log(`[file:save] ${downloadName} (${(exported.bytes.length / 1024).toFixed(1)}KB)`);
-    return 'saved';
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error('[file:save] save failed:', msg);
-    alert(`File save failed:\n${msg}`);
-    return 'failed';
+    const downloadName = await promptFallbackName(saveName, format);
+    if (!downloadName) return;
+    services.wasm.fileName = downloadName;
+    services.wasm.requiresPasswordForSave = password !== null;
+    persistDownloadWithContentLoss(
+      payload.contentLoss,
+      () => downloadBlob(payload.blob, downloadName),
+      showExportContentLoss,
+    );
+    services.documentState.markClean('save-as');
+  } catch (error) {
+    reportSaveError('file:save-as', error);
+  } finally {
+    password = '';
   }
+}
+
+function reportSaveError(scope: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[${scope}] 저장 실패:`, message);
+  alert(`파일 저장에 실패했습니다:\n${message}`);
+}
+
+export type SaveCurrentDocumentResult = 'saved' | 'cancelled' | 'failed' | 'unsupported';
+
+export async function saveCurrentDocument(services: CommandServices): Promise<SaveCurrentDocumentResult> {
+  let password: string | null = null;
+  try {
+    flushDeferredPaginationBeforeExplicitOutput(services, 'save');
+    const sourceFormat = services.wasm.getSourceFormat();
+    let target = resolveSaveTarget(
+      sourceFormat,
+      services.wasm.fileName,
+      services.wasm.currentFileHandle,
+    );
+    const hmlEnabled = target.format !== 'hml' || isHmlSaveEnabled(services);
+    if (requiresSaveFormatChoice(target, hmlEnabled)) {
+      const format = await chooseSaveAsFormat(services);
+      if (format === null) return 'cancelled';
+      target = {
+        ...target,
+        format,
+        forceSaveAs: target.forceSaveAs || format !== target.format,
+        suggestedName: fileNameForFormat(services.wasm.fileName, format),
+      };
+    }
+    if (services.wasm.requiresPasswordForSave) {
+      const passwordFormat = requirePasswordSaveFormat(target.format);
+      password = await showHwpSavePasswordDialog(fileNameForFormat(services.wasm.fileName, passwordFormat));
+      if (password === null) return 'cancelled';
+    }
+    const payload = createSavePayload(services, target.format, password ?? undefined);
+    const result = await persistWithContentLoss(
+      payload.contentLoss,
+      () => tryFileSystemSave(
+        services,
+        target.format,
+        payload.blob,
+        target.suggestedName,
+        target.forceSaveAs,
+        services.wasm.currentFileHandle,
+      ),
+      (saveResult) => saveResult !== 'cancelled' && saveResult.method !== 'fallback',
+      showExportContentLoss,
+    );
+    if (result === 'cancelled') return 'cancelled';
+    if (result.method !== 'fallback') {
+      completeHandleSave(services, sourceFormat, result, 'save', password !== null);
+      return 'saved';
+    }
+    const downloadName = await fallbackNameForCurrentSave(services, target);
+    if (!downloadName) return 'cancelled';
+    persistDownloadWithContentLoss(
+      payload.contentLoss,
+      () => downloadBlob(payload.blob, downloadName),
+      showExportContentLoss,
+    );
+    services.wasm.requiresPasswordForSave = password !== null;
+    services.documentState.markClean('save');
+    return 'saved';
+  } catch (error) {
+    reportSaveError('file:save', error);
+    return 'failed';
+  } finally {
+    password = '';
+  }
+}
+
+async function fallbackNameForCurrentSave(
+  services: CommandServices,
+  target: ReturnType<typeof resolveSaveTarget>,
+): Promise<string | null> {
+  if (!services.wasm.isNewDocument && !target.forceSaveAs) return target.suggestedName;
+  const downloadName = await promptFallbackName(target.suggestedName, target.format);
+  if (!downloadName) return null;
+  services.wasm.fileName = downloadName;
+  if (target.forceSaveAs) services.wasm.currentFileHandle = null;
+  return downloadName;
 }
 
 export async function confirmSaveBeforeReplacingDocument(
@@ -184,7 +403,7 @@ export async function confirmSaveBeforeReplacingDocument(
 
   const choice = await showUnsavedChangesDialog({
     fileName: services.wasm.fileName,
-    canSave: true,
+    canSave: true, // HWPX 직접 저장 활성화로 모든 출처 저장 가능
   });
 
   if (choice === 'cancel') return false;
@@ -194,88 +413,248 @@ export async function confirmSaveBeforeReplacingDocument(
   return result === 'saved';
 }
 
-function appendPrintStyle(doc: Document, widthMm: number, heightMm: number): void {
-  const style = doc.createElement('style');
-  style.textContent = `
-@page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
-* { margin: 0; padding: 0; }
-body { background: #fff; }
-.page { page-break-after: always; width: ${widthMm}mm; height: ${heightMm}mm; overflow: hidden; }
-.page:last-child { page-break-after: auto; }
-.page svg { width: 100%; height: 100%; }
-@media screen {
-  body { background: #e5e7eb; display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; }
-  .page { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
-  .print-bar { position: fixed; top: 0; left: 0; right: 0; background: #1e293b; color: #fff; padding: 8px 16px; display: flex; align-items: center; gap: 12px; font: 14px sans-serif; z-index: 100; }
-  .print-bar button { padding: 6px 16px; background: #2563eb; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-  .print-bar button:hover { background: #1d4ed8; }
-  body { padding-top: 56px; }
-}
-@media print { .print-bar { display: none; } }
-`;
-  doc.head.appendChild(style);
-}
-
-function createPrintButton(doc: Document, id: string, label: string, background?: string): HTMLButtonElement {
-  const button = doc.createElement('button');
-  button.id = id;
-  button.type = 'button';
-  button.textContent = label;
-  if (background) button.style.background = background;
-  return button;
-}
-
-function appendSvgPage(doc: Document, container: HTMLElement, svg: string): void {
-  const page = doc.createElement('div');
-  page.className = 'page';
-
-  const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml');
-  const parseError = parsed.querySelector('parsererror');
-  if (parseError) {
-    throw new Error(`인쇄용 SVG 파싱 실패: ${parseError.textContent || 'parsererror'}`);
-  }
-
-  page.appendChild(doc.importNode(parsed.documentElement, true));
-  container.appendChild(page);
-}
-
 function setupPrintDocument(
-  printWin: Window,
+  doc: Document,
   fileName: string,
-  pageCount: number,
-  widthMm: number,
-  heightMm: number,
-  svgPages: string[],
+  printPages: PrintPage[],
+  previewWindow: Window | null = null,
 ): void {
-  const doc = printWin.document;
   doc.documentElement.lang = 'ko';
-  doc.title = `${fileName} — 인쇄`;
 
   doc.head.replaceChildren();
   const meta = doc.createElement('meta');
   meta.setAttribute('charset', 'UTF-8');
-  doc.head.appendChild(meta);
-  appendPrintStyle(doc, widthMm, heightMm);
+  const viewport = doc.createElement('meta');
+  viewport.name = 'viewport';
+  viewport.content = 'width=device-width, initial-scale=1.0';
+  doc.head.append(meta, viewport);
+  doc.title = previewWindow
+    ? `${fileName} — 인쇄 미리보기`
+    : pdfPrintTitle(fileName);
+  appendPrintStyle(doc, printPages);
 
-  const printBar = doc.createElement('div');
-  printBar.className = 'print-bar';
-  const printButton = createPrintButton(doc, 'print-btn', '인쇄');
-  const closeButton = createPrintButton(doc, 'close-btn', '닫기', '#475569');
-  const title = doc.createElement('span');
-  title.textContent = `${fileName} — ${pageCount}페이지`;
-  printBar.append(printButton, closeButton, title);
-
-  doc.body.replaceChildren(printBar);
-  for (const svg of svgPages) {
-    appendSvgPage(doc, doc.body, svg);
+  doc.body.replaceChildren();
+  doc.body.className = previewWindow ? 'rhwp-print-preview' : '';
+  if (previewWindow) {
+    appendPrintPreviewBar(doc, previewWindow, fileName, printPages.length);
   }
+  for (const printPage of printPages) {
+    appendSvgPage(doc, doc.body, printPage);
+  }
+}
 
-  printButton.addEventListener('click', () => {
-    printWin.print();
+function appendPrintPreviewBar(
+  doc: Document,
+  printWindow: Window,
+  fileName: string,
+  pageCount: number,
+): void {
+  const bar = doc.createElement('div');
+  bar.className = 'print-preview-bar';
+  bar.setAttribute('role', 'toolbar');
+  bar.setAttribute('aria-label', '인쇄 미리보기 도구');
+
+  const printButton = doc.createElement('button');
+  printButton.id = 'print-btn';
+  printButton.type = 'button';
+  printButton.className = 'print-preview-primary';
+  printButton.textContent = '인쇄';
+  printButton.addEventListener('click', () => printWindow.print());
+
+  const closeButton = doc.createElement('button');
+  closeButton.id = 'close-btn';
+  closeButton.type = 'button';
+  closeButton.textContent = '닫기';
+  closeButton.addEventListener('click', () => printWindow.close());
+
+  const title = doc.createElement('span');
+  title.className = 'print-preview-title';
+  title.textContent = `${fileName} — ${pageCount}쪽`;
+
+  bar.append(printButton, closeButton, title);
+  doc.body.appendChild(bar);
+}
+
+function waitForHostAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
   });
-  closeButton.addEventListener('click', () => {
-    printWin.close();
-  });
+}
+
+async function waitForHostPaint(): Promise<void> {
+  await waitForHostAnimationFrame();
+  await waitForHostAnimationFrame();
+}
+
+function setPrintPreviewLoading(
+  surface: PrintPreviewSurface,
+  message: string,
+): void {
+  const loadingMessage = surface.document.getElementById('print-loading-message');
+  if (loadingMessage) loadingMessage.textContent = message;
+}
+
+async function preparePrintPages(
+  services: CommandServices,
+  intent: PrintIntent,
+  onProgress: (currentPage: number, pageCount: number) => void,
+): Promise<PrintPage[]> {
+  const wasm = services.wasm;
+  const pageCount = wasm.pageCount;
+  const printPages: PrintPage[] = [];
+  for (let i = 0; i < pageCount; i++) {
+    onProgress(i + 1, pageCount);
+    const svg = wasm.renderPageSvgWithProfile(i, 'print');
+    const pageInfo = wasm.getPageInfo(i);
+    printPages.push(createPrintPage(svg, pageInfo, i));
+    if (i % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  return printPages;
+}
+
+let printJobActive = false;
+
+function beginPrintJob(): boolean {
+  if (printJobActive) {
+    showToast({ message: '인쇄 문서를 준비하고 있습니다.', durationMs: 2500 });
+    return false;
+  }
+  printJobActive = true;
+  return true;
+}
+
+async function runPdfPrint(services: CommandServices): Promise<void> {
+  if (!beginPrintJob()) return;
+
+  const wasm = services.wasm;
+  const statusEl = document.getElementById('sb-message');
+  const originalStatus = statusEl?.textContent || '';
+  let dialog: PdfPrintDialog | null = null;
+  let surface: PrintSurface | null = null;
+  let restoreStatus = true;
+  let dialogVisible = false;
+  let originalDocumentTitle: string | null = null;
+
+  try {
+    flushDeferredPaginationBeforeExplicitOutput(services, 'print-pdf');
+    const pageCount = wasm.pageCount;
+    if (pageCount === 0) return;
+
+    const showGuidance = userSettings.getShowPdfPrintGuidance();
+    dialog = new PdfPrintDialog(pageCount, showGuidance);
+    dialogVisible = true;
+    const decision = await dialog.showAsync();
+    if (!decision.confirmed) return;
+    if (decision.hideFutureGuidance) {
+      try {
+        userSettings.setShowPdfPrintGuidance(false);
+      } catch (error) {
+        console.warn('[file:print-to-pdf] 안내 표시 설정을 저장하지 못했습니다:', error);
+      }
+    }
+
+    const initialProgress = printProgressText('pdf', 0, pageCount);
+    if (statusEl) statusEl.textContent = initialProgress;
+    dialog.updateProgress(0);
+    await waitForHostPaint();
+
+    surface = await createPrintSurface();
+    const printPages = await preparePrintPages(services, 'pdf', (current, total) => {
+      if (statusEl) statusEl.textContent = printProgressText('pdf', current, total);
+      dialog?.updateProgress(current);
+    });
+
+    setupPrintDocument(surface.document, wasm.fileName, printPages);
+    await waitForPrintSurfaceReady(surface);
+    if (statusEl) statusEl.textContent = printReadyText('pdf');
+
+    dialog.closeBeforePrint();
+    dialogVisible = false;
+    await waitForHostPaint();
+
+    console.info(
+      `[file:print-to-pdf] 브라우저 인쇄 호출 `
+      + `(surface=iframe, pages=${pageCount}, profile=print)`,
+    );
+    // Chromium/Edge는 iframe을 인쇄해도 최상위 문서 제목을 PDF 기본 파일명으로
+    // 사용한다. native print()가 열린 동안에만 원본 파일의 basename을 노출한다.
+    originalDocumentTitle = document.title;
+    document.title = pdfPrintTitle(wasm.fileName);
+    surface.window.print();
+  } catch (err) {
+    restoreStatus = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[file:print-to-pdf]', msg);
+    if (statusEl) statusEl.textContent = `PDF 준비 실패: ${msg}`;
+    if (dialogVisible && dialog) {
+      dialog.showError(msg);
+    } else {
+      showToast({ message: `PDF 준비에 실패했습니다: ${msg}`, durationMs: 5000 });
+    }
+  } finally {
+    if (originalDocumentTitle !== null) {
+      document.title = originalDocumentTitle;
+    }
+    surface?.dispose();
+    printJobActive = false;
+    if (restoreStatus && statusEl) statusEl.textContent = originalStatus;
+  }
+}
+
+async function runPrintPreview(services: CommandServices): Promise<void> {
+  if (!beginPrintJob()) return;
+
+  const wasm = services.wasm;
+  const statusEl = document.getElementById('sb-message');
+  const originalStatus = statusEl?.textContent || '';
+  let surface: PrintPreviewSurface | null = null;
+  let keepPreviewOpen = false;
+  let restoreStatus = true;
+
+  try {
+    flushDeferredPaginationBeforeExplicitOutput(services, 'print');
+    const pageCount = wasm.pageCount;
+    if (pageCount === 0) return;
+
+    // popup 허용을 위해 사용자 클릭에서 첫 await 전에 창을 연다.
+    const surfacePromise = createPrintPreviewSurface();
+    const initialProgress = printProgressText('print', 0, pageCount);
+    if (statusEl) statusEl.textContent = initialProgress;
+
+    surface = await surfacePromise;
+    if (!surface) return;
+    setPrintPreviewLoading(surface, initialProgress);
+
+    const printPages = await preparePrintPages(services, 'print', (current, total) => {
+      const progressText = printProgressText('print', current, total);
+      if (statusEl) statusEl.textContent = progressText;
+      if (surface) setPrintPreviewLoading(surface, progressText);
+    });
+
+    setupPrintDocument(surface.document, wasm.fileName, printPages, surface.window);
+    await waitForPrintSurfaceReady(surface);
+    if (statusEl) statusEl.textContent = printReadyText('print');
+    keepPreviewOpen = true;
+
+    console.info(
+      `[file:print] 인쇄 미리보기 준비 완료 `
+      + `(surface=window, pages=${pageCount}, profile=print)`,
+    );
+  } catch (err) {
+    restoreStatus = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[file:print]', msg);
+    if (statusEl) statusEl.textContent = `인쇄 미리보기 실패: ${msg}`;
+    if (err instanceof PrintPreviewBlockedError) {
+      alert('인쇄 미리보기 팝업이 차단되었습니다. 팝업 허용 후 다시 시도해주세요.');
+    } else {
+      showToast({ message: `인쇄 미리보기에 실패했습니다: ${msg}`, durationMs: 5000 });
+    }
+  } finally {
+    if (!keepPreviewOpen) surface?.close();
+    printJobActive = false;
+    if (restoreStatus && statusEl) statusEl.textContent = originalStatus;
+  }
 }
 
 export const fileCommands: CommandDef[] = [
@@ -292,33 +671,44 @@ export const fileCommands: CommandDef[] = [
   {
     id: 'file:open',
     label: '열기',
-    async execute(services) {
-      try {
-        const canReplace = await confirmSaveBeforeReplacingDocument(services);
-        if (!canReplace) return;
-
-        const handle = await pickOpenFileHandle(window as FileSystemWindowLike);
-        if (!handle) {
-          const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
-          if (fileInput) {
-            fileInput.dataset.skipUnsavedGuard = 'true';
-            fileInput.click();
-          }
-          return;
-        }
-
-        const { bytes, name } = await readFileFromHandle(handle);
-        services.eventBus.emit('open-document-bytes', {
-          bytes,
-          fileName: name,
-          fileHandle: handle,
-          skipUnsavedGuard: true,
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error('[file:open] 열기 실패:', msg);
-        alert(`파일 열기에 실패했습니다:\n${msg}`);
+    execute: openFileViaPicker,
+  },
+  {
+    // 최근 문서 재열기 — 저장된 핸들 권한 재확인 후 라이브 파일 로드. params.id로 레코드 지정.
+    // #2285 범위: 바이트 스냅샷 폴백 없음. 권한 거부는 항목 유지(다음에 다시 시도 가능),
+    // 파일 이동/삭제(getFile 실패)는 항목 제거 + 안내. 결과 규칙은
+    // recent-open.ts(openRecentEntry) — 테스트 가능한 순수 로직으로 분리.
+    id: 'file:open-recent',
+    label: '최근 문서 열기',
+    async execute(services, params) {
+      const id = typeof params?.id === 'string' ? params.id : undefined;
+      if (!id) return;
+      const recents = await listRecentDocs();
+      const entry = recents.find((r) => r.id === id);
+      if (!entry) {
+        showToast({ message: '최근 문서 정보를 찾을 수 없습니다.', durationMs: 2500 });
+        return;
       }
+
+      await openRecentEntry(entry, {
+        ensurePermission: ensureReadPermission,
+        readFile: readFileFromHandle,
+        remove: removeRecentDoc,
+        toast: (message, durationMs) => showToast({ message, durationMs }),
+        emitOpen: (payload) => services.eventBus.emit('open-document-bytes', payload),
+        // 메타-only 항목: 핸들이 없어 자동 재열기 불가 → 열기 대화상자를 다시 연다.
+        requestReopen: () => { void openFileViaPicker(services); },
+      });
+    },
+  },
+  {
+    // 최근 문서 목록 전체 삭제.
+    id: 'file:clear-recent',
+    label: '최근 문서 목록 지우기',
+    async execute() {
+      if (!confirm('최근 문서 목록을 모두 지우시겠습니까?')) return;
+      await clearRecentDocs();
+      showToast({ message: '최근 문서 목록을 지웠습니다.', durationMs: 2200 });
     },
   },
   {
@@ -333,71 +723,32 @@ export const fileCommands: CommandDef[] = [
   },
   {
     // [Task #833] 다른 이름으로 저장 — currentFileHandle 무시 + 항상 picker.
+    // 출처 포맷 유지(HWPX→HWPX, HWP→HWP).
     id: 'file:save-as',
     label: '다른 이름으로 저장',
     shortcutLabel: 'Ctrl+Shift+S',
     canExecute: (ctx) => ctx.hasDocument,
     async execute(services) {
-      try {
-        const sourceFormat = services.wasm.getSourceFormat();
-        const defaultFormat = defaultSaveFormat(sourceFormat, services.wasm.fileName);
-        const saveName = saveFileName(services.wasm.fileName, defaultFormat);
-        const windowLike = window as FileSystemWindowLike;
-
-        try {
-          if (windowLike.showSaveFilePicker) {
-            const handle = await pickSaveFileHandle(windowLike, saveName, HWP_AND_HWPX_SAVE_PICKER_TYPES);
-            if (!handle) return;
-
-            const format = saveFormatForFileName(handle.name, defaultFormat);
-            const exported = exportDocumentForSave(services, format);
-            await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
-            await writeBlobToHandle(handle, exported.blob);
-            services.wasm.currentFileHandle = handle;
-            services.wasm.fileName = saveFileName(handle.name, format);
-            services.documentState.markClean('save-as');
-            console.log(
-              `[file:save-as] source=${sourceFormat}, format=${format}, ` +
-              `reflowed=${exported.reflowedParagraphs}, ` +
-              `${services.wasm.fileName} (${(exported.bytes.length / 1024).toFixed(1)}KB)`,
-            );
-            return;
-          }
-        } catch (e) {
-          if (isUserCancelError(e)) return;
-          console.warn('[file:save-as] File System Access API 실패, 폴백:', e);
-        }
-
-        // 폴백: 파일명 입력 → blob download
-        const baseName = saveBaseName(saveName, defaultFormat);
-        const result = await showSaveAs(baseName, extensionForFormat(defaultFormat), {
-          allowFormatChoice: true,
-        });
-        if (!result) return;
-        const format = saveFormatForFileName(result, defaultFormat);
-        const exported = exportDocumentForSave(services, format);
-        await assertSafeHwpxExport(services, sourceFormat, format, exported.bytes);
-        const downloadName = saveFileName(result, format);
-        services.wasm.fileName = downloadName;
-
-        const url = URL.createObjectURL(exported.blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = downloadName;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-        services.documentState.markClean('save-as');
-        console.log(
-          `[file:save-as] source=${sourceFormat}, format=${format}, ` +
-          `reflowed=${exported.reflowedParagraphs}, ` +
-          `${downloadName} (${(exported.bytes.length / 1024).toFixed(1)}KB)`,
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error('[file:save-as] 저장 실패:', msg);
-        alert(`파일 저장에 실패했습니다:\n${msg}`);
-      }
+      const format = await chooseSaveAsFormat(services);
+      if (format !== null) await saveAsFormat(services, format);
+    },
+  },
+  {
+    // [#1613] HWP 형식으로 저장 — 출처 무관 HWP 출력.
+    id: 'file:save-as-hwp',
+    label: 'HWP 형식으로 저장',
+    canExecute: (ctx) => ctx.hasDocument,
+    async execute(services) {
+      await saveAsFormat(services, 'hwp');
+    },
+  },
+  {
+    // [#1613] HWPX 형식으로 저장 — 출처 무관 HWPX 출력.
+    id: 'file:save-as-hwpx',
+    label: 'HWPX 형식으로 저장',
+    canExecute: (ctx) => ctx.hasDocument,
+    async execute(services) {
+      await saveAsFormat(services, 'hwpx');
     },
   },
   {
@@ -407,8 +758,16 @@ export const fileCommands: CommandDef[] = [
     shortcutLabel: 'F7',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
-      const dialog = new PageSetupDialog(services.wasm, services.eventBus, 0);
+      const dialog = new PageSetupDialog(services.wasm, services.eventBus, 0, services);
       dialog.show();
+    },
+  },
+  {
+    id: 'file:print-to-pdf',
+    label: 'PDF로 저장…',
+    canExecute: (ctx) => ctx.hasDocument,
+    async execute(services) {
+      await runPdfPrint(services);
     },
   },
   {
@@ -418,45 +777,7 @@ export const fileCommands: CommandDef[] = [
     shortcutLabel: 'Ctrl+P',
     canExecute: (ctx) => ctx.hasDocument,
     async execute(services) {
-      const wasm = services.wasm;
-      const pageCount = wasm.pageCount;
-      if (pageCount === 0) return;
-
-      // 진행률 표시
-      const statusEl = document.getElementById('sb-message');
-      const origStatus = statusEl?.textContent || '';
-
-      try {
-        // SVG 페이지 생성
-        const svgPages: string[] = [];
-        for (let i = 0; i < pageCount; i++) {
-          if (statusEl) statusEl.textContent = `인쇄 준비 중... (${i + 1}/${pageCount})`;
-          const svg = wasm.renderPageSvg(i);
-          svgPages.push(svg);
-          // UI 갱신을 위한 양보
-          if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
-        }
-
-        // 첫 페이지 정보로 용지 크기 결정
-        const pageInfo = wasm.getPageInfo(0);
-        const widthMm = Math.round(pageInfo.width * 25.4 / 96);
-        const heightMm = Math.round(pageInfo.height * 25.4 / 96);
-
-        // 인쇄 전용 창 생성
-        const printWin = window.open('', '_blank');
-        if (!printWin) {
-          alert('팝업이 차단되었습니다. 팝업 허용 후 다시 시도해주세요.');
-          return;
-        }
-
-        setupPrintDocument(printWin, wasm.fileName, pageCount, widthMm, heightMm, svgPages);
-
-        if (statusEl) statusEl.textContent = origStatus;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error('[file:print]', msg);
-        if (statusEl) statusEl.textContent = `인쇄 실패: ${msg}`;
-      }
+      await runPrintPreview(services);
     },
   },
   {

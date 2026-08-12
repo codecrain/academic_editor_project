@@ -3,6 +3,9 @@
 //! font-metric-gen 도구로 TTF 파일에서 추출.
 //! 수동 편집 금지.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 #[derive(Debug)]
 pub struct HangulMetric {
     pub cho_groups: u8,
@@ -81,9 +84,14 @@ pub struct MetricMatch {
 /// 실무 허용. 정식 DB 엔트리 추가는 별도 이슈.
 fn resolve_metric_alias(name: &str) -> &str {
     match name {
-        "함초롬돋움" | "한컴돋움" => "HCR Dotum",
+        "함초롬돋움" => "HCR Dotum",
+        // [#2279] 한컴돋움/한컴바탕의 실체는 Haansoft Dotum/Batang
+        // (HDOTUM.TTF/HBATANG.TTF name table). HCR(함초롬) 계열과 메트릭이
+        // 다르므로 ('*' 0.583 vs 0.498em, 한글 음절 1.0 vs 0.97em) 별도 연결.
+        "한컴돋움" => "Haansoft Dotum",
         "돋움" => "Dotum",
-        "함초롬바탕" | "한컴바탕" => "HCR Batang",
+        "함초롬바탕" => "HCR Batang",
+        "한컴바탕" => "Haansoft Batang",
         "바탕" => "Batang", // 윈도우 TTF 바탕
         "맑은 고딕" => "Malgun Gothic",
         "나눔고딕" => "NanumGothic",
@@ -110,6 +118,13 @@ fn resolve_metric_alias(name: &str) -> &str {
         "HY신명조" => "HYSinMyeongJo-Medium",
         "HY그래픽" => "HYGraphic-Medium",
         "HY궁서" => "HYGungSo-Bold",
+        // [#2430] 한양·휴먼 계열 — 한글 실측상 HY 와 ASCII 폭이 다른 별개 페이스.
+        "한양신명조" => "HanyangSinMyeongJo",
+        "한양중고딕" => "HanyangJungGothic",
+        "한양견명조" => "HanyangKyunMyeongJo",
+        "한양견고딕" => "HanyangKyunGothic",
+        "휴먼명조" => "HumanMyeongJo",
+        "신명조" => "HanyangSinMyeongJo",
         // HY 계열 추가 — 한국어 사용명 → DB 단축명 (Task #885)
         // 한컴 폰트 미설치 환경에서 한국어 face 이름으로 들어온 경우 폴백 메트릭 매칭.
         "HY수평선B" => "HYsupB",
@@ -143,7 +158,79 @@ fn resolve_metric_alias(name: &str) -> &str {
     }
 }
 
+/// (bold, italic) → 색인 슬롯 번호. 조합이 4개뿐이라 이름당 배열로 선계산한다.
+fn metric_slot_index(bold: bool, italic: bool) -> usize {
+    ((bold as usize) << 1) | (italic as usize)
+}
+
+/// 이름별 선계산 색인 — 슬롯 값은 (metric, bold_fallback).
+///
+/// [#4149] 글자 측정마다 find_metric 이 호출되어 600 엔트리 선형 스캔
+/// (문자열 비교 × 최대 3단 폴백)이 캐럿 rect 질의 지연의 주요 원인이었다.
+/// 이름이 테이블에 있으면 3단(이름만 매칭)이 항상 성공하므로 슬롯에 Option 이
+/// 필요 없고, 조회 실패 = 이름 부재 = 기존 None 과 동일하다.
+///
+/// 키를 (name, bold, italic) 튜플 대신 이름 단독으로 두는 이유: 튜플 키는
+/// &'static str 수명 때문에 임의 사용자 폰트명(&str)으로 borrow 조회가 불가능하다.
+static METRIC_INDEX: OnceLock<HashMap<&'static str, [(&'static FontMetric, bool); 4]>> =
+    OnceLock::new();
+
+fn metric_index() -> &'static HashMap<&'static str, [(&'static FontMetric, bool); 4]> {
+    METRIC_INDEX.get_or_init(|| {
+        // 선형 스캔의 "테이블 첫 매칭 우선" 계약 재현: 테이블 순서대로 순회하며
+        // (name, bold, italic) 조합별 첫 엔트리와 이름 첫 등장 엔트리만 기록한다.
+        struct FirstSeen {
+            exact: [Option<&'static FontMetric>; 4],
+            first: &'static FontMetric,
+        }
+        let mut seen: HashMap<&'static str, FirstSeen> = HashMap::new();
+        for m in FONT_METRICS.iter() {
+            let entry = seen.entry(m.name).or_insert(FirstSeen {
+                exact: [None; 4],
+                first: m,
+            });
+            let idx = metric_slot_index(m.bold, m.italic);
+            if entry.exact[idx].is_none() {
+                entry.exact[idx] = Some(m);
+            }
+        }
+        // 슬롯 선주입 순서 = legacy 폴백 사다리와 동일:
+        // 1단 정확 매칭 → 2단 bold 매칭(italic 무시) → 3단 이름만 첫 엔트리.
+        seen.into_iter()
+            .map(|(name, fs)| {
+                let mut slots = [(fs.first, false); 4];
+                for bold in [false, true] {
+                    for italic in [false, true] {
+                        slots[metric_slot_index(bold, italic)] =
+                            if let Some(m) = fs.exact[metric_slot_index(bold, italic)] {
+                                (m, false)
+                            } else if let Some(m) = fs.exact[metric_slot_index(bold, false)] {
+                                (m, false)
+                            } else {
+                                // bold 요청이었으면 Faux Bold 보정 표시 (legacy 3단과 동일)
+                                (fs.first, bold)
+                            };
+                    }
+                }
+                (name, slots)
+            })
+            .collect()
+    })
+}
+
 pub fn find_metric(name: &str, bold: bool, italic: bool) -> Option<MetricMatch> {
+    let name = resolve_metric_alias(name);
+    let slots = metric_index().get(name)?;
+    let (metric, bold_fallback) = slots[metric_slot_index(bold, italic)];
+    Some(MetricMatch {
+        metric,
+        bold_fallback,
+    })
+}
+
+/// 기존 선형 스캔 구현 — 색인 등가성 검증 전용으로 보존 (수정 금지).
+#[cfg(test)]
+fn legacy_find_metric(name: &str, bold: bool, italic: bool) -> Option<MetricMatch> {
     let name = resolve_metric_alias(name);
     // 정확한 매칭 (name + bold + italic)
     if let Some(m) = FONT_METRICS
@@ -1526,12 +1613,15 @@ static FONT_11_HANGUL: HangulMetric = HangulMetric {
     widths: &FONT_11_HANGUL_WIDTHS,
 };
 
+// Regenerated with `font-metric-gen` from
+// ttfs/opensource/NotoSansKR-Regular.ttf
+// (SHA-256 6e06a7fe5d696ca719894a23f36bb2b1be8c816a5937cd4ad0f23ca67780dd74).
 static FONT_12_LATIN_0: [u16; 95] = [
-    220, 275, 374, 521, 521, 880, 621, 231, 299, 299, 427, 521, 231, 324, 231, 396, 521, 521, 521,
-    521, 521, 521, 521, 521, 521, 521, 231, 231, 521, 521, 521, 435, 885, 574, 632, 619, 661, 562,
-    518, 661, 698, 257, 503, 607, 508, 770, 696, 714, 598, 714, 589, 569, 573, 694, 532, 842, 519,
-    482, 592, 299, 396, 299, 521, 550, 586, 536, 593, 492, 595, 527, 279, 530, 575, 245, 245, 499,
-    254, 889, 580, 586, 595, 595, 339, 441, 334, 577, 466, 742, 434, 468, 438, 299, 243, 299, 521,
+    224, 323, 474, 555, 555, 921, 680, 278, 338, 338, 467, 555, 278, 347, 278, 392, 555, 555, 555,
+    555, 555, 555, 555, 555, 555, 555, 278, 278, 555, 555, 555, 474, 946, 608, 657, 638, 688, 589,
+    552, 689, 728, 293, 535, 646, 543, 812, 723, 742, 633, 742, 635, 596, 599, 721, 575, 878, 573,
+    531, 603, 338, 392, 338, 555, 559, 606, 563, 618, 510, 620, 554, 325, 564, 607, 275, 275, 552,
+    284, 926, 610, 606, 620, 620, 388, 468, 377, 607, 521, 802, 498, 521, 475, 338, 270, 338, 555,
 ];
 static FONT_12_LATIN_1: [u16; 96] = [
     220, 275, 521, 521, 521, 521, 243, 1000, 586, 815, 368, 429, 521, 324, 433, 586, 336, 1000,
@@ -41060,7 +41150,237 @@ static FONT_594_HANGUL: HangulMetric = HangulMetric {
     widths: &FONT_594_HANGUL_WIDTHS,
 };
 
-pub static FONT_METRICS: [FontMetric; 595] = [
+pub // [#2430] 한양신명조 실측 ASCII (한글 COM 무신축 래더 2026-07-20, 93/95 실측·2 보간 med=0.942).
+// 한글은 한양신명조 를 HYSinMyeongJo-Medium 와 다른 실폭으로 렌더한다 — LATIN_0 만 교체, 이외 범위·한글 메트릭은 HYSinMyeongJo-Medium 공유.
+static HANYANGSINMYEONGJO_LATIN_0: [u16; 95] = [518,333,401,465,614,939,833,241,404,386,535,579,237,588,246,404,509,509,509,509,509,509,509,509,509,509,281,298,746,588,754,526,939,816,719,711,763,693,667,763,798,342,465,807,658,983,798,763,640,772,719,667,790,790,798,1061,772,790,614,368,404,360,439,509,395,518,570,500,553,491,360,605,570,281,325,570,281,877,579,526,544,561,412,500,360,579,596,860,605,588,483,430,290,430,509];
+static HANYANGSINMYEONGJO_LATIN_RANGES: [LatinRange; 7] = [
+    LatinRange {
+        start: 0x0020,
+        end: 0x007E,
+        widths: &HANYANGSINMYEONGJO_LATIN_0,
+    },
+    LatinRange {
+        start: 0x00A0,
+        end: 0x00FF,
+        widths: &FONT_276_LATIN_1,
+    },
+    LatinRange {
+        start: 0x2000,
+        end: 0x206F,
+        widths: &FONT_276_LATIN_2,
+    },
+    LatinRange {
+        start: 0x2200,
+        end: 0x22FF,
+        widths: &FONT_276_LATIN_3,
+    },
+    LatinRange {
+        start: 0x3000,
+        end: 0x303F,
+        widths: &FONT_276_LATIN_4,
+    },
+    LatinRange {
+        start: 0x3130,
+        end: 0x318F,
+        widths: &FONT_276_LATIN_5,
+    },
+    LatinRange {
+        start: 0xFF00,
+        end: 0xFF5E,
+        widths: &FONT_276_LATIN_6,
+    },
+];
+
+// [#2430] 한양중고딕 실측 ASCII (한글 COM 무신축 래더 2026-07-20, 93/95 실측·2 보간 med=0.871).
+// 한글은 한양중고딕 를 HYGothic-Medium 와 다른 실폭으로 렌더한다 — LATIN_0 만 교체, 이외 범위·한글 메트릭은 HYGothic-Medium 공유.
+static HANYANGJUNGGOTHIC_LATIN_0: [u16; 95] = [
+    518, 254, 371, 544, 544, 886, 658, 223, 298, 290, 377, 526, 254, 526, 254, 272, 509, 509, 509,
+    509, 509, 509, 509, 509, 509, 509, 254, 254, 596, 535, 596, 535, 1026, 649, 640, 719, 711, 667,
+    605, 772, 702, 254, 483, 649, 553, 825, 711, 763, 649, 772, 711, 649, 596, 702, 649, 921, 632,
+    632, 596, 263, 290, 263, 456, 509, 263, 544, 535, 491, 544, 544, 263, 544, 544, 202, 202, 483,
+    202, 825, 544, 553, 544, 544, 316, 491, 263, 544, 491, 711, 483, 474, 500, 316, 246, 316, 509,
+];
+static HANYANGJUNGGOTHIC_LATIN_RANGES: [LatinRange; 7] = [
+    LatinRange {
+        start: 0x0020,
+        end: 0x007E,
+        widths: &HANYANGJUNGGOTHIC_LATIN_0,
+    },
+    LatinRange {
+        start: 0x00A0,
+        end: 0x00FF,
+        widths: &FONT_267_LATIN_1,
+    },
+    LatinRange {
+        start: 0x2000,
+        end: 0x206F,
+        widths: &FONT_267_LATIN_2,
+    },
+    LatinRange {
+        start: 0x2200,
+        end: 0x22FF,
+        widths: &FONT_267_LATIN_3,
+    },
+    LatinRange {
+        start: 0x3000,
+        end: 0x303F,
+        widths: &FONT_267_LATIN_4,
+    },
+    LatinRange {
+        start: 0x3130,
+        end: 0x318F,
+        widths: &FONT_267_LATIN_5,
+    },
+    LatinRange {
+        start: 0xFF00,
+        end: 0xFF5E,
+        widths: &FONT_267_LATIN_6,
+    },
+];
+
+// [#2430] 한양견명조 실측 ASCII (한글 COM 무신축 래더 2026-07-20, 93/95 실측·2 보간 med=0.911).
+// 한글은 한양견명조 를 HYMyeongJo-Extra 와 다른 실폭으로 렌더한다 — LATIN_0 만 교체, 이외 범위·한글 메트릭은 HYMyeongJo-Extra 공유.
+static HANYANGKYUNMYEONGJO_LATIN_0: [u16; 95] = [
+    509, 412, 544, 474, 649, 974, 860, 388, 412, 395, 544, 649, 290, 658, 325, 430, 579, 579, 579,
+    579, 579, 579, 579, 579, 579, 579, 342, 351, 754, 658, 754, 579, 956, 833, 825, 772, 816, 737,
+    719, 833, 851, 386, 526, 877, 711, 1009, 833, 816, 693, 833, 763, 702, 842, 833, 825, 1097,
+    816, 816, 667, 404, 430, 395, 430, 509, 395, 561, 605, 535, 596, 535, 447, 640, 614, 316, 333,
+    614, 316, 912, 632, 570, 596, 596, 456, 535, 395, 614, 640, 886, 649, 623, 526, 465, 316, 465,
+    509,
+];
+static HANYANGKYUNMYEONGJO_LATIN_RANGES: [LatinRange; 7] = [
+    LatinRange {
+        start: 0x0020,
+        end: 0x007E,
+        widths: &HANYANGKYUNMYEONGJO_LATIN_0,
+    },
+    LatinRange {
+        start: 0x00A0,
+        end: 0x00FF,
+        widths: &FONT_271_LATIN_1,
+    },
+    LatinRange {
+        start: 0x2000,
+        end: 0x206F,
+        widths: &FONT_271_LATIN_2,
+    },
+    LatinRange {
+        start: 0x2200,
+        end: 0x22FF,
+        widths: &FONT_271_LATIN_3,
+    },
+    LatinRange {
+        start: 0x3000,
+        end: 0x303F,
+        widths: &FONT_271_LATIN_4,
+    },
+    LatinRange {
+        start: 0x3130,
+        end: 0x318F,
+        widths: &FONT_271_LATIN_5,
+    },
+    LatinRange {
+        start: 0xFF00,
+        end: 0xFF5E,
+        widths: &FONT_271_LATIN_6,
+    },
+];
+
+// [#2430] 한양견고딕 실측 ASCII (한글 COM 무신축 래더 2026-07-20, 93/95 실측·2 보간 med=0.905).
+// 한글은 한양견고딕 를 HYGothic-Extra 와 다른 실폭으로 렌더한다 — LATIN_0 만 교체, 이외 범위·한글 메트릭은 HYGothic-Extra 공유.
+static HANYANGKYUNGOTHIC_LATIN_0: [u16; 95] = [
+    509, 342, 540, 596, 570, 930, 728, 308, 377, 386, 430, 535, 333, 526, 333, 351, 579, 579, 579,
+    579, 579, 579, 579, 579, 579, 579, 333, 333, 737, 535, 719, 623, 1026, 737, 737, 737, 737, 684,
+    623, 798, 737, 281, 570, 737, 623, 851, 737, 798, 684, 790, 737, 684, 623, 737, 684, 965, 684,
+    684, 623, 342, 351, 342, 439, 509, 272, 570, 623, 570, 623, 570, 342, 623, 623, 281, 281, 570,
+    281, 912, 623, 623, 623, 623, 395, 570, 342, 623, 570, 798, 570, 570, 509, 412, 307, 412, 509,
+];
+static HANYANGKYUNGOTHIC_LATIN_RANGES: [LatinRange; 7] = [
+    LatinRange {
+        start: 0x0020,
+        end: 0x007E,
+        widths: &HANYANGKYUNGOTHIC_LATIN_0,
+    },
+    LatinRange {
+        start: 0x00A0,
+        end: 0x00FF,
+        widths: &FONT_266_LATIN_1,
+    },
+    LatinRange {
+        start: 0x2000,
+        end: 0x206F,
+        widths: &FONT_266_LATIN_2,
+    },
+    LatinRange {
+        start: 0x2200,
+        end: 0x22FF,
+        widths: &FONT_266_LATIN_3,
+    },
+    LatinRange {
+        start: 0x3000,
+        end: 0x303F,
+        widths: &FONT_266_LATIN_4,
+    },
+    LatinRange {
+        start: 0x3130,
+        end: 0x318F,
+        widths: &FONT_266_LATIN_5,
+    },
+    LatinRange {
+        start: 0xFF00,
+        end: 0xFF5E,
+        widths: &FONT_266_LATIN_6,
+    },
+];
+
+// [#2430] 휴먼명조 실측 ASCII (한글 COM 무신축 래더 2026-07-20, 93/95 실측·2 보간 med=0.854).
+// 한글은 휴먼명조 를 HYSinMyeongJo-Medium 와 다른 실폭으로 렌더한다 — LATIN_0 만 교체, 이외 범위·한글 메트릭은 HYSinMyeongJo-Medium 공유.
+static HUMANMYEONGJO_LATIN_0: [u16; 95] = [
+    518, 211, 364, 675, 518, 772, 790, 219, 316, 316, 509, 509, 272, 509, 272, 316, 509, 509, 509,
+    509, 509, 509, 509, 509, 509, 509, 272, 272, 509, 509, 509, 439, 798, 675, 614, 658, 693, 640,
+    596, 719, 693, 263, 404, 658, 588, 798, 711, 728, 588, 702, 667, 509, 640, 693, 675, 956, 728,
+    684, 614, 325, 316, 325, 368, 509, 333, 518, 553, 500, 518, 535, 404, 526, 570, 254, 272, 535,
+    254, 816, 561, 526, 553, 553, 412, 421, 351, 553, 553, 737, 500, 526, 465, 298, 211, 298, 509,
+];
+static HUMANMYEONGJO_LATIN_RANGES: [LatinRange; 7] = [
+    LatinRange {
+        start: 0x0020,
+        end: 0x007E,
+        widths: &HUMANMYEONGJO_LATIN_0,
+    },
+    LatinRange {
+        start: 0x00A0,
+        end: 0x00FF,
+        widths: &FONT_276_LATIN_1,
+    },
+    LatinRange {
+        start: 0x2000,
+        end: 0x206F,
+        widths: &FONT_276_LATIN_2,
+    },
+    LatinRange {
+        start: 0x2200,
+        end: 0x22FF,
+        widths: &FONT_276_LATIN_3,
+    },
+    LatinRange {
+        start: 0x3000,
+        end: 0x303F,
+        widths: &FONT_276_LATIN_4,
+    },
+    LatinRange {
+        start: 0x3130,
+        end: 0x318F,
+        widths: &FONT_276_LATIN_5,
+    },
+    LatinRange {
+        start: 0xFF00,
+        end: 0xFF5E,
+        widths: &FONT_276_LATIN_6,
+    },
+];
+
+static FONT_METRICS: [FontMetric; 600] = [
     FontMetric {
         name: "HCR Batang",
         bold: false,
@@ -45822,11 +46142,84 @@ pub static FONT_METRICS: [FontMetric; 595] = [
         latin_ranges: &FONT_594_LATIN_RANGES,
         hangul: Some(&FONT_594_HANGUL),
     },
+    FontMetric {
+        name: "HanyangSinMyeongJo",
+        bold: false,
+        italic: false,
+        em_size: 1024,
+        latin_ranges: &HANYANGSINMYEONGJO_LATIN_RANGES,
+        hangul: Some(&FONT_276_HANGUL),
+    },
+    FontMetric {
+        name: "HanyangJungGothic",
+        bold: false,
+        italic: false,
+        em_size: 1024,
+        latin_ranges: &HANYANGJUNGGOTHIC_LATIN_RANGES,
+        hangul: Some(&FONT_267_HANGUL),
+    },
+    FontMetric {
+        name: "HanyangKyunMyeongJo",
+        bold: false,
+        italic: false,
+        em_size: 1024,
+        latin_ranges: &HANYANGKYUNMYEONGJO_LATIN_RANGES,
+        hangul: Some(&FONT_271_HANGUL),
+    },
+    FontMetric {
+        name: "HanyangKyunGothic",
+        bold: false,
+        italic: false,
+        em_size: 1024,
+        latin_ranges: &HANYANGKYUNGOTHIC_LATIN_RANGES,
+        hangul: Some(&FONT_266_HANGUL),
+    },
+    FontMetric {
+        name: "HumanMyeongJo",
+        bold: false,
+        italic: false,
+        em_size: 1024,
+        latin_ranges: &HUMANMYEONGJO_LATIN_RANGES,
+        hangul: Some(&FONT_276_HANGUL),
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
+
+    const NOTO_SANS_KR_REGULAR: &[u8] =
+        include_bytes!("../../ttfs/opensource/NotoSansKR-Regular.ttf");
+
+    #[test]
+    fn issue_4442_noto_sans_kr_ascii_advances_match_tracked_font() {
+        let digest = Sha256::digest(NOTO_SANS_KR_REGULAR);
+        assert_eq!(
+            &digest[..],
+            &[
+                0x6e, 0x06, 0xa7, 0xfe, 0x5d, 0x69, 0x6c, 0xa7, 0x19, 0x89, 0x4a, 0x23, 0xf3, 0x6b,
+                0xb2, 0xb1, 0xbe, 0x8c, 0x81, 0x6a, 0x59, 0x37, 0xcd, 0x4a, 0xd0, 0xf2, 0x3c, 0xa6,
+                0x77, 0x80, 0xdd, 0x74,
+            ]
+        );
+
+        let face = ttf_parser::Face::parse(NOTO_SANS_KR_REGULAR, 0)
+            .expect("tracked bundled font must parse");
+        let metric = find_metric("Noto Sans KR", false, false).expect("shared regular metric");
+        assert_eq!(metric.metric.em_size, face.units_per_em());
+        for ch in ' '..='~' {
+            let glyph = face.glyph_index(ch).expect("printable ASCII glyph");
+            let advance = face
+                .glyph_hor_advance(glyph)
+                .expect("printable ASCII horizontal advance");
+            assert_eq!(
+                metric.metric.get_width(ch),
+                Some(advance),
+                "shared advance for {ch:?}"
+            );
+        }
+    }
 
     #[test]
     fn hy_gothic_medium_maps_correctly() {
@@ -45947,5 +46340,125 @@ mod tests {
         let m = find_metric("함초롬바탕", false, false);
         assert!(m.is_some(), "함초롬바탕 기존 매핑 회귀");
         assert_eq!(m.unwrap().metric.name, "HCR Batang");
+    }
+
+    #[test]
+    fn index_matches_legacy_linear_scan_exhaustively() {
+        // [#4149] O(1) 색인 도입 계약: legacy 선형 스캔(3단 폴백 사다리)과
+        // 결과가 100% 동일해야 한다. FONT_METRICS 전체 name + 알려진 alias
+        // 전체 + 테이블에 없는 임의 이름 × (bold, italic) 4조합 전수 비교.
+        let mut names: Vec<&str> = FONT_METRICS.iter().map(|m| m.name).collect();
+        // resolve_metric_alias 좌변 전체 (별칭 추가 시 여기도 갱신).
+        names.extend([
+            "함초롬돋움",
+            "한컴돋움",
+            "돋움",
+            "함초롬바탕",
+            "한컴바탕",
+            "바탕",
+            "맑은 고딕",
+            "나눔고딕",
+            "나눔명조",
+            "바탕체",
+            "굴림",
+            "궁서",
+            "굴림체",
+            "돋움체",
+            "궁서체",
+            "D2Coding",
+            "D2 Coding",
+            "고운바탕",
+            "Gowun Batang",
+            "고운돋움",
+            "Gowun Dodum",
+            "Pretendard",
+            "프리텐다드",
+            "HY중고딕",
+            "HY견고딕",
+            "HY헤드라인M",
+            "HY견명조",
+            "HY신명조",
+            "HY그래픽",
+            "HY궁서",
+            "한양신명조",
+            "한양중고딕",
+            "한양견명조",
+            "한양견고딕",
+            "휴먼명조",
+            "신명조",
+            "HY수평선B",
+            "HY수평선M",
+            "HY울릉도B",
+            "HY울릉도M",
+            "HY태백B",
+            "HY동녘B",
+            "HY동녘M",
+            "HY각헤드라인M",
+            "본한글",
+            "본한글vf",
+            "본한글 Medium",
+            "본한글M",
+            "본고딕",
+            "본고딕vf",
+            "Source Han Sans",
+            "Source Han Sans K",
+            "Source Han Sans KR",
+            "SourceHanSans",
+            "SourceHanSansKR",
+            "SourceHanSansK",
+            "Noto Sans CJK KR",
+            "본명조",
+            "본명조vf",
+            "본명조M",
+            "Source Han Serif",
+            "Source Han Serif K",
+            "Source Han Serif KR",
+            "SourceHanSerif",
+            "SourceHanSerifKR",
+            "SourceHanSerifK",
+            "Noto Serif CJK KR",
+        ]);
+        // 테이블에 없는 임의 사용자 폰트명 — 기존과 동일하게 None 이어야 한다.
+        names.extend([
+            "NoSuchFont-Regular",
+            "가상의사용자폰트",
+            "Comic Sans MS",
+            "",
+        ]);
+
+        for name in names {
+            for bold in [false, true] {
+                for italic in [false, true] {
+                    let new = find_metric(name, bold, italic);
+                    let old = legacy_find_metric(name, bold, italic);
+                    match (new, old) {
+                        (None, None) => {}
+                        (Some(n), Some(o)) => {
+                            assert!(
+                                std::ptr::eq(n.metric, o.metric),
+                                "metric 불일치: {name:?} bold={bold} italic={italic} \
+                                 (new={}/b{}/i{}, old={}/b{}/i{})",
+                                n.metric.name,
+                                n.metric.bold,
+                                n.metric.italic,
+                                o.metric.name,
+                                o.metric.bold,
+                                o.metric.italic,
+                            );
+                            assert_eq!(
+                                n.bold_fallback, o.bold_fallback,
+                                "bold_fallback 불일치: {name:?} bold={bold} italic={italic}"
+                            );
+                        }
+                        (n, o) => panic!(
+                            "Some/None 불일치: {name:?} bold={bold} italic={italic} \
+                             new={} old={}",
+                            n.is_some(),
+                            o.is_some()
+                        ),
+                    }
+                }
+            }
+        }
     }
 }

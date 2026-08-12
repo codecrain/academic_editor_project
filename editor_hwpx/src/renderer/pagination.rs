@@ -12,10 +12,39 @@ use super::height_measurer::{HeightMeasurer, MeasuredSection};
 use super::page_layout::PageLayoutInfo;
 use super::style_resolver::ResolvedStyleSet;
 use crate::model::control::Control;
+use crate::model::footnote::{Footnote, FootnoteShape};
 use crate::model::header_footer::HeaderFooterApply;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{ColumnBreakType, Paragraph};
 use crate::model::shape::CaptionDirection;
+
+pub fn estimate_footnote_note_height(footnote: &Footnote, dpi: f64) -> f64 {
+    let mut height = 0.0;
+    for para in &footnote.paragraphs {
+        if para.line_segs.is_empty() {
+            height += super::hwpunit_to_px(400, dpi);
+        } else {
+            for seg in &para.line_segs {
+                height += super::hwpunit_to_px(seg.line_height, dpi);
+            }
+        }
+    }
+    if height <= 0.0 {
+        super::hwpunit_to_px(400, dpi)
+    } else {
+        height
+    }
+}
+
+pub fn footnote_separator_overhead_px(shape: &FootnoteShape, dpi: f64) -> f64 {
+    super::hwpunit_to_px(shape.separator_above_margin_hu() as i32, dpi)
+        + super::layout::border_width_to_px(shape.separator_line_width).max(0.5)
+        + super::hwpunit_to_px(shape.separator_below_margin_hu() as i32, dpi)
+}
+
+pub fn footnote_between_notes_margin_px(shape: &FootnoteShape, dpi: f64) -> f64 {
+    super::hwpunit_to_px(shape.between_notes_margin_hu() as i32, dpi)
+}
 
 /// 미주 참조
 #[derive(Debug, Clone)]
@@ -28,6 +57,30 @@ pub struct EndnoteRef {
     pub para_index: usize,
     /// 문단 내 컨트롤 인덱스
     pub control_index: usize,
+}
+
+/// [미주 배치 — END_OF_DOCUMENT] 문서 끝으로 미룬, 앞선 구역의 미주 하나.
+/// Hancom 의 `EndnoteEndOfDocument` 배치를 정합: 참조 표시(위첨자 번호)는 원래
+/// 구역 본문 흐름에 남고, 본문(body)만 마지막 구역 끝(=문서 끝)에서 렌더된다.
+/// `reff` 는 원래 참조 위치(문서 순서·번호 보존), `endnote` 는 문서 끝에서 렌더할
+/// 미주 본문(앞선 구역 paragraphs 에서 복제).
+#[derive(Debug, Clone)]
+pub struct DeferredEndnote {
+    pub reff: EndnoteRef,
+    pub endnote: crate::model::footnote::Endnote,
+}
+
+/// 이 구역의 미주를 어떻게 배치할지 (Hancom: EndnoteEndOfSection vs EndnoteEndOfDocument).
+pub enum EndnoteDeferral<'a> {
+    /// 기본: 이 구역 미주를 구역 끝에 렌더 (END_OF_SECTION, 그리고 단일 구역
+    /// END_OF_DOCUMENT — 구역 끝 ≡ 문서 끝이라 결과 동일).
+    None,
+    /// END_OF_DOCUMENT, 마지막이 아닌 구역: 본문 렌더를 억제(참조 표시는 인라인
+    /// 유지)하고 미주 본문은 문서 끝으로 미룬다.
+    Suppress,
+    /// END_OF_DOCUMENT, 마지막 구역: 앞선 구역들의 미주 본문(문서 순서)에 이어
+    /// 이 구역 미주를 모두 문서 끝에 렌더한다.
+    RenderAll(&'a [DeferredEndnote]),
 }
 
 /// 렌더용으로 가상 삽입된 미주 문단의 원본 위치.
@@ -52,6 +105,12 @@ pub struct PaginationResult {
     pub wrap_around_paras: Vec<WrapAroundPara>,
     /// 빈 줄 감추기로 높이 0 처리된 문단 인덱스 집합
     pub hidden_empty_paras: std::collections::HashSet<usize>,
+    /// [Task #1755] 지연 이월 표의 host 텍스트 줄이 typeset 에서 이월 전 쪽에
+    /// PartialParagraph 로 pre-emit 된 문단 집합 — layout 의 마지막 fragment 뒤
+    /// host 렌더(`render_deferred_rowbreak_host_text_after`) 이중 렌더 억제용.
+    pub pre_emitted_host_paras: std::collections::HashSet<usize>,
+    /// [#2015] pre-emit 한 host 텍스트 높이(px). layout 이 vert_offset 이중계상을 보정할 때 사용.
+    pub pre_emitted_host_heights: std::collections::HashMap<usize, f64>,
     /// 섹션별 미주 목록 (문서 끝 또는 섹션 끝에 렌더)
     pub endnotes: Vec<EndnoteRef>,
     /// [Task #836] 미주 paragraphs (endnote_para_base + idx 로 lookup)
@@ -61,6 +120,10 @@ pub struct PaginationResult {
     /// [Task #1246] 현재 섹션 미주의 between-notes 마진(HU, 0=미적용). HeightCursor 가 미주 사이
     /// min-gap 보정에 사용.
     pub endnote_between_notes_hu: i32,
+    /// 현재 섹션 미주의 정규화된 "구분선 위" 마진(HU).
+    pub endnote_separator_above_hu: i32,
+    /// 현재 섹션 미주의 정규화된 "구분선 아래" 마진(HU).
+    pub endnote_separator_below_hu: i32,
 }
 
 /// 한 페이지에 배치될 콘텐츠
@@ -101,15 +164,184 @@ pub struct MasterPageRef {
     pub master_page_index: usize,
 }
 
+/// 표 셀 안에 중첩된 머리말/꼬리말 컨트롤로 내려가는 경로 한 단계.
+///
+/// 최상위 문단 → 표 → 셀 → 셀 문단 순으로 내려간다. 여러 단계가 쌓이면
+/// 표 안의 표처럼 다중 중첩도 표현할 수 있다.
+#[derive(Debug, Clone)]
+pub struct HeaderFooterTableStep {
+    /// 바깥 controls 리스트에서 Table 컨트롤의 인덱스
+    pub table_control_index: usize,
+    /// 표 셀 인덱스
+    pub cell_index: usize,
+    /// 셀 내부 문단 인덱스
+    pub cell_para_index: usize,
+}
+
 /// 머리말/꼬리말 참조
 #[derive(Debug, Clone)]
 pub struct HeaderFooterRef {
-    /// Header/Footer 컨트롤이 있는 문단 인덱스
+    /// Header/Footer 컨트롤이 있는 (최상위) 문단 인덱스
     pub para_index: usize,
-    /// 해당 문단 내 컨트롤 인덱스
+    /// Header/Footer 컨트롤이 위치한 (가장 안쪽) controls 리스트 내 인덱스
     pub control_index: usize,
     /// Header/Footer 컨트롤이 속한 구역 인덱스 (구역 간 상속 시 원본 구역 추적용)
     pub source_section_index: usize,
+    /// 표 셀 안에 중첩된 경우의 경로. 비어 있으면 최상위 문단 직속 컨트롤.
+    ///
+    /// HWP 시험지(예: 수능 수학 선택과목 소책자)는 4쪽짜리 소책자의 4쪽 머리말을
+    /// 제목표(1x1 표) 셀 안에 정의하기도 한다. 이 경로가 없으면 그 머리말이
+    /// 수집되지 않아 4쪽 쪽번호가 2쪽 머리말로 대체돼 잘못 표시된다.
+    pub table_path: Vec<HeaderFooterTableStep>,
+}
+
+/// 표 셀 안에 중첩된 Header/Footer 컨트롤을 재귀적으로 수집한다.
+///
+/// `base_path` 는 바깥 문단에서 `table` 까지 내려온 경로(마지막 단계의 셀/문단은
+/// 이 함수 안에서 채운다). 수집된 항목은 최상위 문단 인덱스 `pi` 를 그대로 써서
+/// 페이지 매핑 정합성을 유지한다(PageHide 수집과 동일 규약).
+pub(crate) fn collect_nested_header_footer_controls(
+    table: &crate::model::table::Table,
+    pi: usize,
+    section_index: usize,
+    table_control_index: usize,
+    base_path: &[HeaderFooterTableStep],
+    hf_entries: &mut Vec<(usize, HeaderFooterRef, bool, HeaderFooterApply)>,
+) {
+    for (cell_idx, cell) in table.cells.iter().enumerate() {
+        for (cpi, cp) in cell.paragraphs.iter().enumerate() {
+            let mut path = base_path.to_vec();
+            path.push(HeaderFooterTableStep {
+                table_control_index,
+                cell_index: cell_idx,
+                cell_para_index: cpi,
+            });
+            for (cci, ctrl) in cp.controls.iter().enumerate() {
+                match ctrl {
+                    Control::Header(h) => {
+                        hf_entries.push((
+                            pi,
+                            HeaderFooterRef {
+                                para_index: pi,
+                                control_index: cci,
+                                source_section_index: section_index,
+                                table_path: path.clone(),
+                            },
+                            true,
+                            h.apply_to,
+                        ));
+                    }
+                    Control::Footer(f) => {
+                        hf_entries.push((
+                            pi,
+                            HeaderFooterRef {
+                                para_index: pi,
+                                control_index: cci,
+                                source_section_index: section_index,
+                                table_path: path.clone(),
+                            },
+                            false,
+                            f.apply_to,
+                        ));
+                    }
+                    Control::Table(inner) => {
+                        collect_nested_header_footer_controls(
+                            inner,
+                            pi,
+                            section_index,
+                            cci,
+                            &path,
+                            hf_entries,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// `HeaderFooterRef` 가 가리키는 Header/Footer 컨트롤을 원본 문단 슬라이스에서 해석한다.
+/// `table_path` 를 따라 표 셀 안까지 내려간다.
+pub(crate) fn resolve_header_footer_control<'a>(
+    paragraphs: &'a [Paragraph],
+    hf_ref: &HeaderFooterRef,
+) -> Option<&'a Control> {
+    let mut para = paragraphs.get(hf_ref.para_index)?;
+    for step in &hf_ref.table_path {
+        let Control::Table(table) = para.controls.get(step.table_control_index)? else {
+            return None;
+        };
+        para = table
+            .cells
+            .get(step.cell_index)?
+            .paragraphs
+            .get(step.cell_para_index)?;
+    }
+    para.controls.get(hf_ref.control_index)
+}
+
+/// 쪽별 활성 머리말/꼬리말 선택기.
+///
+/// 등장한 컨트롤을 **종류별 칸에 나눠** 누적하고, 쓸 때 쪽 홀짝에 맞춰 고른다. 홀수/짝수
+/// 전용이 양 쪽보다 **더 구체적**이므로 우선한다 — 문서 안에서 어느 컨트롤이 먼저
+/// 등장했는지와 무관해야 한다.
+///
+/// 한 변수에 덮어쓰며 누적하면 "마지막에 일치한 것" 이 이기고, 그러면 양 쪽 머리말을
+/// 나중에 추가했다는 이유만으로 홀수 전용 머리말이 홀수 쪽에서 사라진다 (Task #3234).
+#[derive(Debug, Default, Clone)]
+pub struct ActiveHeaderFooter {
+    header_both: Option<HeaderFooterRef>,
+    header_even: Option<HeaderFooterRef>,
+    header_odd: Option<HeaderFooterRef>,
+    footer_both: Option<HeaderFooterRef>,
+    footer_even: Option<HeaderFooterRef>,
+    footer_odd: Option<HeaderFooterRef>,
+}
+
+impl ActiveHeaderFooter {
+    /// `page_last_para` 까지 등장한 컨트롤을 누적한다.
+    ///
+    /// 누적은 쪽을 넘어가며 유지된다 — 머리말은 정의된 문단이 나온 쪽부터 이후 쪽에도
+    /// 계속 적용되기 때문이다.
+    pub fn accumulate(
+        &mut self,
+        entries: &[(usize, HeaderFooterRef, bool, HeaderFooterApply)],
+        page_last_para: usize,
+    ) {
+        for (para_idx, hf_ref, is_header, apply_to) in entries {
+            if *para_idx > page_last_para {
+                continue;
+            }
+            let slot = match (is_header, apply_to) {
+                (true, HeaderFooterApply::Both) => &mut self.header_both,
+                (true, HeaderFooterApply::Even) => &mut self.header_even,
+                (true, HeaderFooterApply::Odd) => &mut self.header_odd,
+                (false, HeaderFooterApply::Both) => &mut self.footer_both,
+                (false, HeaderFooterApply::Even) => &mut self.footer_even,
+                (false, HeaderFooterApply::Odd) => &mut self.footer_odd,
+            };
+            *slot = Some(hf_ref.clone());
+        }
+    }
+
+    /// 쪽 번호에 대한 활성 (머리말, 꼬리말).
+    pub fn active(&self, page_number: u32) -> (Option<HeaderFooterRef>, Option<HeaderFooterRef>) {
+        let is_odd = page_number % 2 == 1;
+        let pick = |odd: &Option<HeaderFooterRef>,
+                    even: &Option<HeaderFooterRef>,
+                    both: &Option<HeaderFooterRef>| {
+            if is_odd {
+                odd.clone().or_else(|| both.clone())
+            } else {
+                even.clone().or_else(|| both.clone())
+            }
+        };
+        (
+            pick(&self.header_odd, &self.header_even, &self.header_both),
+            pick(&self.footer_odd, &self.footer_even, &self.footer_both),
+        )
+    }
 }
 
 /// 각주 출처 (본문 문단 또는 표 셀 내)
@@ -137,6 +369,18 @@ pub enum FootnoteSource {
     },
 }
 
+/// 한 각주를 물리 페이지 경계에서 나눈 line fragment.
+///
+/// `start_line..end_line`은 각주 안의 문단을 순서대로 compose한 뒤의 평탄 line index다.
+/// `end_line`은 exclusive다. 첫 fragment만 separator와 번호를 그린다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FootnoteFragment {
+    pub start_line: usize,
+    pub end_line: usize,
+    pub draw_separator: bool,
+    pub draw_number: bool,
+}
+
 /// 페이지에 배치되는 각주 참조
 #[derive(Debug, Clone)]
 pub struct FootnoteRef {
@@ -144,6 +388,8 @@ pub struct FootnoteRef {
     pub number: u16,
     /// 출처
     pub source: FootnoteSource,
+    /// `None`이면 각주 전체를 그린다.
+    pub fragment: Option<FootnoteFragment>,
 }
 
 /// 한 단(Column)에 배치될 콘텐츠
@@ -189,6 +435,10 @@ pub struct WrapAroundPara {
     pub table_para_index: usize,
     /// 텍스트가 있는 문단인지 (false면 빈 리턴)
     pub has_text: bool,
+    /// 표 옆 띠에서 렌더할 첫 줄(포함).
+    pub start_line: usize,
+    /// 표 옆 띠에서 렌더할 끝 줄(제외). `usize::MAX`는 전체 줄을 뜻한다.
+    pub end_line: usize,
 }
 
 /// [Task #604 R3] anchor 그림/표 ↔ wrap text 문단 매칭 메타데이터.
@@ -256,6 +506,22 @@ pub enum PageItem {
         /// (`advance_row_block_cut`). false 이면 단일 행 `row_span==1` col 인덱스
         /// (`advance_row_cut`, 기존). page-larger 셀 내부 분할에서만 true.
         is_block_split: bool,
+        /// [Issue #4326] `start_row`/`end_row`/`start_cut`/`end_cut`이 가리키는 좌표계.
+        /// true면 투명 1×1 래퍼를 벗긴 중첩 표(측정기·`row_geometry_table`이 실제로 쓰는
+        /// 표) 기준이고, false면 이 항목이 참조하는 바깥 `para_index`/`control_index`
+        /// 표 자신의 행 도메인 기준이다. 렌더러가 값(`end_row <= table.row_count`)으로
+        /// 되추론하던 것을 페이지네이션 결정 시점에 데이터로 고정한다.
+        row_cursor_is_nested: bool,
+        /// RowBreak 표에서 이전 rowspan이 닿는 마지막 행을 현재 조각의 남은
+        /// 물리 높이에 맞춰 배치해야 할 때의 마지막 행 높이 상한(px).
+        ///
+        /// 내용은 이미 이 조각에 모두 소비됐지만 선언 행 높이만 남은 공간보다
+        /// 큰 경우에만 사용한다. 다음 조각은 끝행의 full cut으로 재진입해 남은
+        /// 빈 밴드만 소비하므로, 이 값은 cursor/cut 계약과 짝을 이룬다.
+        end_row_height_override: Option<f64>,
+        /// 직전 조각에서 내용이 모두 소비된 시작 행의 남은 빈 물리 밴드 높이(px).
+        /// `start_cut`은 해당 셀 내용을 숨기고 이 값은 테두리/셀 기하만 보존한다.
+        start_row_height_override: Option<f64>,
     },
     /// 그리기 개체
     Shape {
@@ -265,8 +531,8 @@ pub enum PageItem {
     },
     /// 미주 영역 시작 구분선
     EndnoteSeparator {
-        /// 구분선 길이 (HWP 단위)
-        separator_length: i16,
+        /// 구분선 길이 (HWP 단위). 한컴 전폭 sentinel(14692344)이 i16을 넘으므로 i32.
+        separator_length: i32,
         /// 구분선 위 여백 (HWP 단위)
         margin_above: i16,
         /// 구분선 아래 여백 (HWP 단위)
@@ -387,6 +653,9 @@ impl PageItem {
                 start_cut,
                 end_cut,
                 is_block_split,
+                row_cursor_is_nested,
+                end_row_height_override,
+                start_row_height_override,
             } => PageItem::PartialTable {
                 para_index: adjust(*para_index),
                 control_index: *control_index,
@@ -396,6 +665,9 @@ impl PageItem {
                 start_cut: start_cut.clone(),
                 end_cut: end_cut.clone(),
                 is_block_split: *is_block_split,
+                row_cursor_is_nested: *row_cursor_is_nested,
+                end_row_height_override: *end_row_height_override,
+                start_row_height_override: *start_row_height_override,
             },
             PageItem::Shape {
                 para_index,
@@ -550,6 +822,8 @@ impl PaginationResult {
                                 table_para_index: (w.table_para_index as i64 + offset as i64).max(0)
                                     as usize,
                                 has_text: w.has_text,
+                                start_line: w.start_line,
+                                end_line: w.end_line,
                             })
                             .collect(),
                         used_height: cc.used_height,
@@ -617,6 +891,7 @@ impl PaginationResult {
                         FootnoteRef {
                             number: f.number,
                             source,
+                            fragment: f.fragment,
                         }
                     })
                     .collect(),
@@ -639,6 +914,8 @@ impl PaginationResult {
                     para_index: shifted_pi,
                     table_para_index: shifted_tpi,
                     has_text: w.has_text,
+                    start_line: w.start_line,
+                    end_line: w.end_line,
                 });
             }
         }
@@ -663,6 +940,8 @@ pub struct PaginationOpts {
     /// 페이지 절반 이상 + 현재 paragraph 의 first_line vpos 가 페이지 1/4 이내)
     /// 시 강제 page break — 한컴 변환 시 인코딩한 page break 시그널 인식.
     pub is_hwp3_variant: bool,
+    /// 현재 구역의 각주 모양. 각주 예약 영역을 렌더 영역과 같은 metric으로 계산한다.
+    pub footnote_shape: Option<FootnoteShape>,
 }
 
 /// 페이지 분할 엔진

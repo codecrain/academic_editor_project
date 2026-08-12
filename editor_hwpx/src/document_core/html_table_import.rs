@@ -122,15 +122,19 @@ impl DocumentCore {
                             _ => 0u8,           // 미지정 → Center (HWP 기본)
                         };
 
-                    // 셀 내용 HTML 추출
+                    // 셀 내용 HTML 추출 — 셀 안에 같은 태그 이름의 중첩 표(예:
+                    // 우리 clipboard export 가 내보내는 중첩 <table>도 셀에
+                    // <td>를 쓴다)가 있으면 얕은 find 는 안쪽 셀의 닫는 태그에서
+                    // 먼저 멈춰 바깥 셀 내용을 잘라먹는다(#4413 왕복 검증 중
+                    // 발견). <tr> 경계 탐색에 이미 쓰는 깊이 추적 헬퍼를 그대로
+                    // 재사용해 같은 태그 이름의 중첩을 건너뛴다.
                     let content_start = cell_abs + gt + 1;
                     let close_tag = format!("</{}>", tag_name);
-                    let content_end =
-                        if let Some(close) = tr_inner_lower[content_start..].find(&close_tag) {
-                            content_start + close
-                        } else {
-                            tr_inner.len()
-                        };
+                    let cell_close = find_closing_tag(tr_inner, cell_abs, tag_name);
+                    let content_end = cell_close
+                        .saturating_sub(close_tag.len())
+                        .max(content_start)
+                        .min(tr_inner.len());
                     let content_html = tr_inner[content_start..content_end].to_string();
 
                     row_cells.push(ParsedCell {
@@ -148,7 +152,9 @@ impl DocumentCore {
                         vertical_align,
                     });
 
-                    td_pos = content_end + close_tag.len();
+                    td_pos = content_end
+                        .saturating_add(close_tag.len())
+                        .min(tr_inner_lower.len());
                 } else {
                     break;
                 }
@@ -609,6 +615,10 @@ impl DocumentCore {
             raw_table_record_attr: tbl_rec_attr,
             raw_table_record_extra: vec![0u8; 2], // 표준 추가 2바이트
             dirty: true,
+            local_resize_rows: Vec::new(),
+            local_resize_cols: Vec::new(),
+            local_resize_cell_widths: Vec::new(),
+            local_resize_cell_heights: Vec::new(),
         };
         table.rebuild_grid();
 
@@ -699,7 +709,8 @@ impl DocumentCore {
         background_color: Option<u32>,
     ) -> u16 {
         use crate::model::style::{
-            BorderFill, BorderLine, BorderLineType, DiagonalLine, Fill, FillType, SolidFill,
+            BorderFill, BorderLine, BorderLineType, CenterLine, DiagonalLine, Fill, FillType,
+            SolidFill,
         };
 
         let mut borders = [BorderLine::default(); 4];
@@ -749,7 +760,9 @@ impl DocumentCore {
             attr: 0,
             borders,
             diagonal: DiagonalLine::default(),
+            center_line: CenterLine::None,
             fill,
+            three_d: false,
         };
 
         // 기존 BorderFill에서 동일한 항목 검색
@@ -770,47 +783,123 @@ impl DocumentCore {
     /// 프론트엔드 글자 테두리/배경 대화상자에서 호출된다.
     pub(crate) fn create_border_fill_from_json(&mut self, json: &str) -> u16 {
         use crate::model::style::{
-            BorderFill, BorderLine, DiagonalLine, Fill, FillType, SolidFill,
+            BorderFill, BorderLine, CenterLine, DiagonalLine, Fill, FillType, SolidFill,
         };
+
+        fn json_diag_bits(json: &str, key: &str) -> Option<u16> {
+            json_i32(json, key)
+                .map(|v| (v as u16) & 0x07)
+                .or_else(|| json_bool(json, key).map(|v| if v { 0b010 } else { 0 }))
+        }
+
+        fn json_center_line(json: &str) -> Option<CenterLine> {
+            json_str(json, "centerLine").map(|value| {
+                let normalized = value.trim().to_ascii_uppercase();
+                match normalized.as_str() {
+                    "VERTICAL" | "HORIZONTAL_BAR" => CenterLine::Vertical,
+                    "HORIZONTAL" | "VERTICAL_BAR" => CenterLine::Horizontal,
+                    "CROSS" => CenterLine::Cross,
+                    _ => CenterLine::None,
+                }
+            })
+        }
+
+        let mut bf = json_u32(json, "borderFillId")
+            .and_then(|id| {
+                if id == 0 {
+                    None
+                } else {
+                    self.document
+                        .doc_info
+                        .border_fills
+                        .get((id - 1) as usize)
+                        .cloned()
+                }
+            })
+            .unwrap_or(BorderFill {
+                raw_data: None,
+                attr: 0,
+                borders: [BorderLine::default(); 4],
+                diagonal: DiagonalLine::default(),
+                center_line: CenterLine::None,
+                fill: Fill::default(),
+                three_d: false,
+            });
+        bf.raw_data = None;
 
         // 4방향 테두리 파싱
         let dir_keys = ["borderLeft", "borderRight", "borderTop", "borderBottom"];
-        let mut borders = [BorderLine::default(); 4];
         for (i, key) in dir_keys.iter().enumerate() {
             if let Some(obj_str) = json_object(json, key) {
                 let type_val = json_i32(&obj_str, "type").unwrap_or(0);
-                borders[i].line_type = u8_to_border_line_type(type_val as u8);
-                borders[i].width = json_i32(&obj_str, "width").unwrap_or(0) as u8;
-                borders[i].color = json_color(&obj_str, "color").unwrap_or(0);
+                bf.borders[i].line_type = u8_to_border_line_type(type_val as u8);
+                bf.borders[i].width = json_i32(&obj_str, "width").unwrap_or(0) as u8;
+                bf.borders[i].color = json_color(&obj_str, "color").unwrap_or(0);
             }
         }
 
         // 채우기 파싱
-        let fill_type_str = json_str(json, "fillType").unwrap_or_default();
-        let fill = if fill_type_str == "solid" {
-            let bg = json_color(json, "fillColor").unwrap_or(0xFFFFFF);
-            let pat_c = json_color(json, "patternColor").unwrap_or(0);
-            let pat_t = json_i32(json, "patternType").unwrap_or(0);
-            Fill {
-                fill_type: FillType::Solid,
-                solid: Some(SolidFill {
-                    background_color: bg,
-                    pattern_color: pat_c,
-                    pattern_type: pat_t,
-                }),
-                ..Default::default()
-            }
-        } else {
-            Fill::default()
-        };
+        if let Some(fill_type_str) = json_str(json, "fillType") {
+            bf.fill = if fill_type_str == "solid" {
+                let bg = json_color(json, "fillColor").unwrap_or(0xFFFFFF);
+                let pat_c = json_color(json, "patternColor").unwrap_or(0);
+                let pat_t = json_i32(json, "patternType").unwrap_or(0);
+                Fill {
+                    fill_type: FillType::Solid,
+                    solid: Some(SolidFill {
+                        background_color: bg,
+                        pattern_color: pat_c,
+                        pattern_type: pat_t,
+                    }),
+                    ..Default::default()
+                }
+            } else {
+                Fill::default()
+            };
+        }
 
-        let bf = BorderFill {
-            raw_data: None,
-            attr: 0,
-            borders,
-            diagonal: DiagonalLine::default(),
-            fill,
-        };
+        let has_diagonal_json = json.contains("\"diagonalLine\"")
+            || json.contains("\"diagonalSlash\"")
+            || json.contains("\"diagonalBackSlash\"")
+            || json.contains("\"diagonalWidth\"")
+            || json.contains("\"diagonalColor\"")
+            || json.contains("\"centerLine\"");
+        if has_diagonal_json {
+            let slash_bits_json = json_diag_bits(json, "diagonalSlash");
+            let backslash_bits_json = json_diag_bits(json, "diagonalBackSlash");
+            let center_line_json = json_center_line(json);
+            let mut slash_bits = slash_bits_json.unwrap_or(((bf.attr >> 2) & 0x07) as u16);
+            let mut backslash_bits = backslash_bits_json.unwrap_or(((bf.attr >> 5) & 0x07) as u16);
+            let explicit_diagonal_bits = slash_bits_json.is_some() || backslash_bits_json.is_some();
+            if let Some(center_line) = center_line_json {
+                bf.center_line = center_line;
+            }
+            bf.diagonal.diagonal_type =
+                json_i32(json, "diagonalLine").unwrap_or(bf.diagonal.diagonal_type as i32) as u8;
+            bf.diagonal.width =
+                json_i32(json, "diagonalWidth").unwrap_or(bf.diagonal.width as i32) as u8;
+            bf.diagonal.color = json_color(json, "diagonalColor").unwrap_or(bf.diagonal.color);
+
+            if bf.center_line != CenterLine::None
+                && (center_line_json.is_some() || !explicit_diagonal_bits)
+            {
+                slash_bits = 0;
+                backslash_bits = 0;
+            } else if slash_bits != 0 || backslash_bits != 0 {
+                bf.center_line = CenterLine::None;
+            }
+
+            bf.attr &= !((0x07 << 2)
+                | (0x07 << 5)
+                | (0x03 << 8)
+                | (1 << 10)
+                | (1 << 11)
+                | (1 << 12)
+                | (1 << 13));
+            bf.attr |= (slash_bits & 0x07) << 2;
+            bf.attr |= (backslash_bits & 0x07) << 5;
+            bf.attr |= bf.center_line.hwp_attr_bits();
+        }
 
         // 기존 BorderFill에서 동일한 항목 검색
         for (i, existing) in self.document.doc_info.border_fills.iter().enumerate() {
@@ -852,7 +941,8 @@ impl DocumentCore {
             // 외부 URL 이미지는 처리하지 않음 — 텍스트로 대체
             let mut para = Paragraph::default();
             para.text = "[이미지]".to_string();
-            para.char_count = para.text.encode_utf16().count() as u32;
+            // [#3494] char_count 는 문단 종결자를 포함한다 (model/paragraph.rs:1042).
+            para.char_count = para.text.encode_utf16().count() as u32 + 1;
             para.char_offsets = para
                 .text
                 .chars()
@@ -885,18 +975,21 @@ impl DocumentCore {
             return;
         }
 
-        // BinData로 등록
+        // BinData로 등록 — bin_data_id(위치)와 storage id 분리 채번
+        // (insert_picture_native 와 동일 규칙, 기존 storage id 충돌 방지)
         let new_bin_id = (self.document.bin_data_content.len() + 1) as u16;
+        let storage_id = self.document.next_bin_data_storage_id();
+        let extension = detect_clipboard_image_mime(&decoded)
+            .split('/')
+            .nth(1)
+            .unwrap_or("png")
+            .to_string();
         self.document
             .bin_data_content
             .push(crate::model::bin_data::BinDataContent {
-                id: new_bin_id,
-                data: decoded.clone(),
-                extension: detect_clipboard_image_mime(&decoded)
-                    .split('/')
-                    .nth(1)
-                    .unwrap_or("png")
-                    .to_string(),
+                id: storage_id,
+                data: crate::model::bin_data::BinDataBytes::from_shared(decoded),
+                extension,
             });
 
         // width/height 추출
@@ -910,7 +1003,8 @@ impl DocumentCore {
         // Picture Control 생성 (placeholder로 텍스트 표현)
         let mut para = Paragraph::default();
         para.text = "[이미지]".to_string();
-        para.char_count = para.text.encode_utf16().count() as u32;
+        // [#3494] char_count 는 문단 종결자를 포함한다 (model/paragraph.rs:1042).
+        para.char_count = para.text.encode_utf16().count() as u32 + 1;
         para.char_offsets = para
             .text
             .chars()
@@ -931,5 +1025,79 @@ impl DocumentCore {
         para.controls.push(Control::Picture(Box::new(pic)));
 
         paragraphs.push(para);
+    }
+}
+
+/// #4413: clipboard export가 셀 안 중첩 표를 `<table>`로 내보내도, import 쪽이 셀
+/// 내용(`<td>...</td>`) 경계를 얕은(비-깊이추적) `find`로 잘라내면 안쪽 표에서
+/// 잘못 멈춰 왕복이 깨진다. `<tr>` 경계 탐색에 이미 쓰는 `find_closing_tag` 깊이
+/// 추적을 셀 경계에도 재사용해 중첩 `<td>`를 올바르게 건너뛰는지 검증한다.
+#[cfg(test)]
+mod nested_table_cell_boundary_tests {
+    use crate::document_core::DocumentCore;
+    use crate::model::control::Control;
+    use crate::model::paragraph::Paragraph;
+
+    /// red→green: 바깥 셀 안에 중첩 `<table>`이 있는 HTML을 파싱하면, 바깥 셀은
+    /// "OUTER" 텍스트 문단과 중첩 `Control::Table`(안쪽 셀 텍스트 "INNER") 문단을
+    /// 모두 포함해야 한다. 수정 전에는 셀 내용 추출이 안쪽 `</td>`에서 먼저 멈춰
+    /// 바깥 셀 내용이 잘리고(중첩 표가 통째로 사라지거나 파싱이 깨졌다).
+    #[test]
+    fn nested_table_in_cell_round_trips_through_import() {
+        let mut core = DocumentCore::new_empty();
+        core.document
+            .doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape::default());
+        core.document
+            .doc_info
+            .para_shapes
+            .push(crate::model::style::ParaShape::default());
+        core.document
+            .doc_info
+            .border_fills
+            .push(crate::model::style::BorderFill::default());
+
+        let html =
+            r#"<table><tr><td>OUTER<table><tr><td>INNER</td></tr></table></td></tr></table>"#;
+        let mut paragraphs: Vec<Paragraph> = Vec::new();
+        core.parse_table_html(&mut paragraphs, html);
+
+        assert_eq!(paragraphs.len(), 1, "표 문단 1개가 나와야 함");
+        let outer_table = match &paragraphs[0].controls.first() {
+            Some(Control::Table(t)) => t.as_ref(),
+            other => panic!("Table 컨트롤이어야 함, 실제: {other:?}"),
+        };
+        assert_eq!(outer_table.cells.len(), 1, "바깥 표는 셀 1개");
+
+        let outer_cell_paragraphs = &outer_table.cells[0].paragraphs;
+        let has_outer_text = outer_cell_paragraphs
+            .iter()
+            .any(|p| p.text.contains("OUTER"));
+        assert!(
+            has_outer_text,
+            "바깥 셀 텍스트 'OUTER'가 살아있어야 함. 실제 문단들: {outer_cell_paragraphs:?}"
+        );
+
+        let inner_table = outer_cell_paragraphs.iter().find_map(|p| {
+            p.controls.iter().find_map(|c| match c {
+                Control::Table(t) => Some(t.as_ref()),
+                _ => None,
+            })
+        });
+        let inner_table = inner_table.unwrap_or_else(|| {
+            panic!(
+                "바깥 셀 문단 중 하나에 중첩 Control::Table이 있어야 함. 실제 문단들: {outer_cell_paragraphs:?}"
+            )
+        });
+        assert_eq!(inner_table.cells.len(), 1, "안쪽 표는 셀 1개");
+        assert!(
+            inner_table.cells[0]
+                .paragraphs
+                .iter()
+                .any(|p| p.text.contains("INNER")),
+            "안쪽 셀 텍스트 'INNER'가 살아있어야 함. 실제: {:?}",
+            inner_table.cells[0].paragraphs
+        );
     }
 }

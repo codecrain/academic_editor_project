@@ -1,6 +1,31 @@
 import type { EventBus } from '@/core/event-bus';
 import type { CommandRegistry } from './registry';
-import type { CommandServices } from './types';
+import type { CommandServices, EditorContext } from './types';
+
+const FORM_MODE_BLOCKED_IDS = new Set([
+  'edit:cut',
+  'edit:paste',
+  'edit:delete',
+  'field:edit',
+  'field:remove',
+  // [#2361 리뷰] 편집 용지의 파일 메뉴/F7 변형. page:setup 은 'page:' prefix 로 차단되는데
+  // 이 변형만 열려 있었다 — 양식 모드에선 snapshot 이 드롭되므로(입력-핸들러 게이트) 다이얼로그가
+  // 열리면 확인이 무언 폐기된다. 두 진입점을 동일하게 차단해 정합.
+  'file:page-setup',
+]);
+
+const FORM_MODE_BLOCKED_PREFIXES = [
+  'format:',
+  'insert:',
+  'table:',
+  'page:',
+];
+
+function isBlockedInFormMode(commandId: string, ctx: EditorContext): boolean {
+  if (!ctx.isFormMode) return false;
+  if (FORM_MODE_BLOCKED_IDS.has(commandId)) return true;
+  return FORM_MODE_BLOCKED_PREFIXES.some(prefix => commandId.startsWith(prefix));
+}
 
 /** 통합 커맨드 디스패처: 메뉴/툴바/키보드 모든 입력의 단일 실행 경로 */
 export class CommandDispatcher {
@@ -22,6 +47,9 @@ export class CommandDispatcher {
     }
 
     const ctx = this.services.getContext();
+    if (isBlockedInFormMode(commandId, ctx)) {
+      return false;
+    }
     if (def.canExecute && !def.canExecute(ctx)) {
       // canExecute 실패 — 비활성 상태
       return false;
@@ -45,7 +73,9 @@ export class CommandDispatcher {
   isEnabled(commandId: string): boolean {
     const def = this.registry.get(commandId);
     if (!def) return false;
+    const ctx = this.services.getContext();
+    if (isBlockedInFormMode(commandId, ctx)) return false;
     if (!def.canExecute) return true;
-    return def.canExecute(this.services.getContext());
+    return def.canExecute(ctx);
   }
 }

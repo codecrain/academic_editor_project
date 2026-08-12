@@ -1,8 +1,9 @@
 use super::*;
 use crate::model::document::{Document, Section};
 use crate::model::paragraph::{LineSeg, Paragraph};
-use crate::paint::LAYER_TREE_SCHEMA;
+use crate::paint::{RenderProfile, LAYER_TREE_SCHEMA};
 use crate::parser::control::parse_common_obj_attr;
+use serde_json::Value;
 
 #[test]
 fn test_create_empty_document() {
@@ -10,65 +11,1502 @@ fn test_create_empty_document() {
     assert_eq!(doc.page_count(), 1);
 }
 
+/// [#1386] createEmpty는 구역 1개 + 빈 문단 1개를 포함해 생성 직후
+/// 편집/조회/내보내기가 가능해야 한다 (구역 0개 → 모든 API 실패 회귀 방지).
 #[test]
-fn document_metadata_roundtrips_through_exported_hwpx() {
+fn test_create_empty_document_is_editable() {
     let mut doc = HwpDocument::create_empty();
-    doc.create_blank_document_native().unwrap();
-    let result = doc
-        .set_document_metadata_native(
-            r#"{
-                "title":"2026년 안전 & 운영계획",
-                "subject":"공공기관 <확정본>",
-                "author":"데이터혁신처",
-                "keywords":"안전, 예산",
-                "description":"감사 대응용"
-            }"#,
-        )
-        .unwrap();
-    assert!(result.contains(r#""changed":5"#));
+    assert_eq!(doc.get_section_count(), 1, "기본 구역 1개");
 
-    let bytes = doc.export_hwpx_with_metadata_native().unwrap();
-    let reloaded = HwpDocument::from_bytes(&bytes).unwrap();
-    let metadata = reloaded.get_document_metadata_native();
-    assert!(metadata.contains(r#""title":"2026년 안전 & 운영계획""#));
-    assert!(metadata.contains(r#""subject":"공공기관 <확정본>""#));
-    assert!(metadata.contains(r#""author":"데이터혁신처""#));
-    assert!(metadata.contains(r#""keywords":"안전, 예산""#));
-    assert!(metadata.contains(r#""description":"감사 대응용""#));
-}
+    // 편집: 구역 0 / 문단 0에 텍스트 삽입이 성공해야 한다
+    doc.insert_text_native(0, 0, 0, "새 문서 첫 문단")
+        .expect("createEmpty 문서에 insertText가 동작해야 한다 (#1386)");
 
-#[test]
-fn paragraph_shape_parser_preserves_named_style_border_spacing() {
-    let mods = crate::document_core::helpers::parse_para_shape_mods(
-        r#"{"alignment":"center","borderSpacing":[10,20,30,40]}"#,
+    // 조회: 삽입한 텍스트가 읽혀야 한다
+    let text = doc
+        .get_text_range_native(0, 0, 0, 8)
+        .expect("getTextRange가 동작해야 한다");
+    assert!(
+        text.contains("새 문서"),
+        "삽입 텍스트가 조회되어야 한다: {text}"
     );
-    assert_eq!(mods.border_spacing, Some([10, 20, 30, 40]));
+
+    // 내보내기: HWP/HWPX 직렬화가 모두 성공해야 한다
+    let hwp = doc
+        .export_hwp_with_adapter()
+        .expect("createEmpty 문서 exportHwp");
+    assert!(!hwp.is_empty());
+    let hwpx = doc
+        .export_hwpx_native()
+        .expect("createEmpty 문서 exportHwpx");
+    assert!(!hwpx.is_empty());
+
+    // 재파싱: 내보낸 HWP가 다시 열리고 텍스트가 보존되어야 한다
+    let reparsed =
+        crate::document_core::DocumentCore::from_bytes(&hwp).expect("exportHwp 결과 재파싱");
+    assert!(
+        reparsed.document().sections[0]
+            .paragraphs
+            .iter()
+            .any(|p| p.text.contains("새 문서")),
+        "재파싱 문서에 삽입 텍스트가 보존되어야 한다"
+    );
+}
+
+fn issue_1481_json_usize(json: &str, key: &str) -> usize {
+    let parsed: Value = serde_json::from_str(json).expect("JSON 파싱");
+    parsed[key].as_u64().expect("usize 값") as usize
+}
+
+fn issue_1481_table<'a>(doc: &'a HwpDocument, para_idx: usize) -> &'a crate::model::table::Table {
+    use crate::model::control::Control;
+
+    doc.document.sections[0].paragraphs[para_idx]
+        .controls
+        .iter()
+        .find_map(|control| match control {
+            Control::Table(table) => Some(table.as_ref()),
+            _ => None,
+        })
+        .expect("표 컨트롤")
+}
+
+fn issue_1481_first_page_render_tree(
+    doc: &HwpDocument,
+) -> crate::renderer::render_tree::PageRenderTree {
+    let dpi = 96.0;
+    let styles = crate::renderer::style_resolver::resolve_styles(&doc.document.doc_info, dpi);
+    let engine = crate::renderer::layout::LayoutEngine::new(dpi);
+    let section = &doc.document.sections[0];
+    let composed: Vec<_> = section
+        .paragraphs
+        .iter()
+        .map(crate::renderer::composer::compose_paragraph)
+        .collect();
+    let sec_mt = doc
+        .measured_tables
+        .first()
+        .map(|tables| tables.as_slice())
+        .unwrap_or(&[]);
+    let page = &doc.pagination[0].pages[0];
+
+    engine.build_render_tree(
+        page,
+        &section.paragraphs,
+        &section.paragraphs,
+        &section.paragraphs,
+        &composed,
+        &styles,
+        &section.section_def.footnote_shape,
+        &doc.document.bin_data_content,
+        None,
+        sec_mt,
+        Some(&section.section_def.page_border_fill),
+        section.section_def.outline_numbering_id,
+        &[],
+    )
+}
+
+fn issue_1481_find_table_and_host_mark_y(
+    node: &crate::renderer::render_tree::RenderNode,
+    para_idx: usize,
+    table_y: &mut Option<f64>,
+    mark_y: &mut Option<f64>,
+) {
+    use crate::renderer::render_tree::RenderNodeType;
+
+    match &node.node_type {
+        RenderNodeType::Table(table) if table.para_index == Some(para_idx) => {
+            *table_y = Some(node.bbox.y);
+        }
+        RenderNodeType::TextRun(run)
+            if run.para_index == Some(para_idx)
+                && run.cell_context.is_none()
+                && run.text.is_empty()
+                && run.is_para_end =>
+        {
+            *mark_y = Some(node.bbox.y);
+        }
+        _ => {}
+    }
+
+    for child in &node.children {
+        issue_1481_find_table_and_host_mark_y(child, para_idx, table_y, mark_y);
+    }
+}
+
+fn issue_1481_collect_outside_empty_para_marks(
+    node: &crate::renderer::render_tree::RenderNode,
+    marks: &mut Vec<(usize, f64)>,
+) {
+    use crate::renderer::render_tree::RenderNodeType;
+
+    if let RenderNodeType::TextRun(run) = &node.node_type {
+        if let Some(para_idx) = run.para_index {
+            if run.cell_context.is_none() && run.text.is_empty() && run.is_para_end {
+                marks.push((para_idx, node.bbox.y));
+            }
+        }
+    }
+
+    for child in &node.children {
+        issue_1481_collect_outside_empty_para_marks(child, marks);
+    }
+}
+
+fn issue_1481_collect_layer_control_mark_y(value: &Value, marks: &mut Vec<f64>) {
+    match value {
+        Value::Object(map) => {
+            if map.get("type").and_then(Value::as_str) == Some("textControlMark")
+                && map.get("isParaEnd").and_then(Value::as_bool) == Some(true)
+            {
+                if let Some(y) = map
+                    .get("bbox")
+                    .and_then(|bbox| bbox.get("y"))
+                    .and_then(Value::as_f64)
+                {
+                    marks.push(y);
+                }
+            }
+            for child in map.values() {
+                issue_1481_collect_layer_control_mark_y(child, marks);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                issue_1481_collect_layer_control_mark_y(item, marks);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn issue_1481_layer_control_mark_y(doc: &HwpDocument) -> Vec<f64> {
+    let json = doc
+        .get_page_layer_tree_native(0)
+        .expect("PageLayerTree JSON");
+    let parsed: Value = serde_json::from_str(&json).expect("PageLayerTree JSON 파싱");
+    let mut marks = Vec::new();
+    issue_1481_collect_layer_control_mark_y(&parsed, &mut marks);
+    marks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    marks
 }
 
 #[test]
-fn style_creation_and_application_reject_ids_above_hwp_u8_storage() {
+fn issue_1470_style_update_reflows_and_keeps_margin_unit() {
+    use crate::model::style::{CharShape, ParaShape, Style};
+
     let mut doc = HwpDocument::create_empty();
-    doc.create_blank_document_native().unwrap();
-    let base_style = doc.document().doc_info.styles[0].clone();
-    let before = doc.document().doc_info.styles.len();
+    doc.document.doc_info.char_shapes.push(CharShape::default());
+    doc.document.doc_info.para_shapes.push(ParaShape::default());
+    doc.document.doc_info.styles.push(Style {
+        local_name: "바탕글".to_string(),
+        english_name: "Normal".to_string(),
+        lang_id: 1042,
+        para_shape_id: 0,
+        char_shape_id: 0,
+        ..Default::default()
+    });
+    doc.insert_text_native(0, 0, 0, "스타일 줄간격 검증")
+        .expect("텍스트 입력");
+
+    let style_id = doc.create_style(
+        r#"{"name":"검증 스타일","englishName":"Issue1470","type":0,"nextStyleId":0,"baseParaShapeId":0,"baseCharShapeId":0}"#,
+    );
+    assert!(style_id >= 0, "스타일 생성");
+    doc.apply_style_native(0, 0, style_id as usize)
+        .expect("스타일 적용");
+
+    let before_spacing = doc.document.sections[0].paragraphs[0]
+        .line_segs
+        .first()
+        .map(|ls| ls.line_spacing)
+        .unwrap_or_default();
+
+    assert!(
+        doc.update_style_shapes(
+            style_id as u32,
+            "{}",
+            r#"{"marginLeft":3000,"lineSpacing":300,"lineSpacingType":"Percent"}"#,
+        ),
+        "스타일 문단 모양 수정"
+    );
+
+    let para = &doc.document.sections[0].paragraphs[0];
+    let ps = &doc.document.doc_info.para_shapes[para.para_shape_id as usize];
+    assert_eq!(para.style_id, style_id as u8);
     assert_eq!(
-        doc.create_style(r#"{"name":"invalid-next","type":0,"nextStyleId":256}"#),
-        -1
+        ps.margin_left, 3000,
+        "15pt raw(2x) 여백이 30pt로 중복 변환되면 안 됨"
     );
-    assert_eq!(doc.document().doc_info.styles.len(), before);
+    assert_eq!(ps.line_spacing, 300);
+    let after_spacing = para
+        .line_segs
+        .first()
+        .map(|ls| ls.line_spacing)
+        .unwrap_or_default();
+    assert_ne!(
+        after_spacing, before_spacing,
+        "스타일 줄간격 변경 후 LineSeg가 즉시 재계산되어야 한다"
+    );
+}
 
-    doc.document_mut()
-        .doc_info
-        .styles
-        .resize(256, base_style.clone());
-    let before = doc.document().doc_info.styles.len();
-    assert_eq!(doc.create_style(r#"{"name":"overflow","type":0}"#), -1);
-    assert_eq!(doc.document().doc_info.styles.len(), before);
+#[test]
+fn issue_1470_style_apply_preserves_direct_char_shape() {
+    use crate::model::paragraph::CharShapeRef;
+    use crate::model::style::{CharShape, ParaShape, Style};
 
-    doc.document_mut().doc_info.styles.push(base_style);
-    let result = doc.apply_style_native(0, 0, 256);
-    assert!(result.is_err());
-    assert_eq!(doc.document().sections[0].paragraphs[0].style_id, 0);
+    let mut doc = HwpDocument::create_empty();
+    doc.document.doc_info.char_shapes = vec![
+        CharShape {
+            base_size: 1000,
+            ..Default::default()
+        },
+        CharShape {
+            base_size: 1200,
+            ..Default::default()
+        },
+        CharShape {
+            bold: true,
+            ..Default::default()
+        },
+    ];
+    doc.document.doc_info.para_shapes = vec![
+        ParaShape::default(),
+        ParaShape {
+            margin_left: 1000,
+            ..Default::default()
+        },
+    ];
+    doc.document.doc_info.styles = vec![
+        Style {
+            local_name: "바탕글".to_string(),
+            english_name: "Normal".to_string(),
+            lang_id: 1042,
+            para_shape_id: 0,
+            char_shape_id: 0,
+            ..Default::default()
+        },
+        Style {
+            local_name: "새 문단 스타일".to_string(),
+            english_name: "Issue1470Apply".to_string(),
+            lang_id: 1042,
+            para_shape_id: 1,
+            char_shape_id: 1,
+            ..Default::default()
+        },
+    ];
+    doc.insert_text_native(0, 0, 0, "가나다라")
+        .expect("텍스트 입력");
+
+    let para = &mut doc.document.sections[0].paragraphs[0];
+    para.style_id = 0;
+    para.para_shape_id = 0;
+    para.char_shapes = vec![CharShapeRef {
+        start_pos: 0,
+        char_shape_id: 0,
+    }];
+    para.apply_char_shape_range(1, 3, 2);
+
+    doc.apply_style_native(0, 0, 1).expect("문단 스타일 적용");
+
+    let para = &doc.document.sections[0].paragraphs[0];
+    assert_eq!(para.style_id, 1);
+    assert_eq!(para.para_shape_id, 1);
+    let refs: Vec<(u32, u32)> = para
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(
+        refs,
+        vec![(0, 1), (1, 2), (3, 1)],
+        "스타일 기본 글자 모양만 새 스타일로 바뀌고 직접 글자 모양 range는 유지되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_style_update_preserves_direct_char_shape() {
+    use crate::model::paragraph::CharShapeRef;
+    use crate::model::style::{CharShape, ParaShape, Style};
+
+    let mut doc = HwpDocument::create_empty();
+    doc.document.doc_info.char_shapes = vec![
+        CharShape {
+            base_size: 1000,
+            ..Default::default()
+        },
+        CharShape {
+            base_size: 1200,
+            ..Default::default()
+        },
+        CharShape {
+            bold: true,
+            ..Default::default()
+        },
+    ];
+    doc.document.doc_info.para_shapes = vec![
+        ParaShape::default(),
+        ParaShape {
+            margin_left: 1000,
+            ..Default::default()
+        },
+    ];
+    doc.document.doc_info.styles = vec![
+        Style {
+            local_name: "바탕글".to_string(),
+            english_name: "Normal".to_string(),
+            lang_id: 1042,
+            para_shape_id: 0,
+            char_shape_id: 0,
+            ..Default::default()
+        },
+        Style {
+            local_name: "편집 대상 스타일".to_string(),
+            english_name: "Issue1470Update".to_string(),
+            lang_id: 1042,
+            para_shape_id: 1,
+            char_shape_id: 1,
+            ..Default::default()
+        },
+    ];
+    doc.insert_text_native(0, 0, 0, "가나다라")
+        .expect("텍스트 입력");
+
+    let para = &mut doc.document.sections[0].paragraphs[0];
+    para.style_id = 1;
+    para.para_shape_id = 1;
+    para.char_shapes = vec![CharShapeRef {
+        start_pos: 0,
+        char_shape_id: 1,
+    }];
+    para.apply_char_shape_range(1, 3, 2);
+
+    assert!(
+        doc.update_style_shapes(1, r#"{"fontSize":1400}"#, "{}"),
+        "스타일 글자 모양 수정"
+    );
+
+    let updated_csid = doc.document.doc_info.styles[1].char_shape_id as u32;
+    assert_ne!(
+        updated_csid, 1,
+        "스타일 CharShape가 새 ID로 갱신되어야 한다"
+    );
+
+    let para = &doc.document.sections[0].paragraphs[0];
+    let refs: Vec<(u32, u32)> = para
+        .char_shapes
+        .iter()
+        .map(|cs| (cs.start_pos, cs.char_shape_id))
+        .collect();
+    assert_eq!(
+        refs,
+        vec![(0, updated_csid), (1, 2), (3, updated_csid)],
+        "스타일 편집 전파 시 직접 글자 모양 range는 유지되어야 한다"
+    );
+}
+
+/// [#4325] `table.dirty`가 문서 범위로 지워지고 구역 범위로 소비되는 스코프 불일치 회귀.
+///
+/// `updateStyleShapes`는 스타일을 쓰는 모든 구역의 표를 `mark_cell_control_dirty`로
+/// dirty 마킹한 뒤, `0..num_sections`을 돌며 구역별로 `rebuild_section`을 호출한다.
+/// `rebuild_section(0)`이 유발하는 `paginate()` 패스는 아직 `dirty_sections[1]`이
+/// false라 구역 1을 건너뛰지만, 그 패스 끝에서 표 dirty 플래그를 지우는 루프가
+/// 문서 전체 범위였다 — 건너뛴 구역 1의 표까지 dirty가 사라졌다. 이후
+/// `rebuild_section(1)`이 구역 1을 실제로 재측정할 차례가 오면 `table.dirty`가
+/// 이미 false라 `measure_section_incremental`이 변경 전 `MeasuredTable`을 그대로
+/// clone해 구역 1의 표 높이가 영구히 stale로 남았다(원본 편집 전까지 복구 안 됨).
+#[test]
+fn issue_4325_style_update_second_section_table_not_left_stale() {
+    use crate::model::style::{CharShape, ParaShape, Style};
+
+    let mut doc = HwpDocument::create_empty();
+    doc.document.doc_info.char_shapes.push(CharShape {
+        base_size: 1000, // 10pt
+        ..Default::default()
+    });
+    doc.document.doc_info.para_shapes.push(ParaShape::default());
+    doc.document.doc_info.styles.push(Style {
+        local_name: "바탕글".to_string(),
+        english_name: "Normal".to_string(),
+        lang_id: 1042,
+        para_shape_id: 0,
+        char_shape_id: 0,
+        ..Default::default()
+    });
+
+    // 구역 0에 2x2 표 삽입 + 줄바꿈되는 셀 텍스트 (이슈 실측: "같은 표 + 줄바꿈되는 텍스트")
+    doc.create_table_native(0, 0, 0, 2, 2)
+        .expect("표 삽입 (구역0)");
+    let wrap_text = "가".repeat(120);
+    doc.insert_text_in_cell_native(0, 0, 0, 0, 0, 0, &wrap_text)
+        .expect("셀 텍스트 삽입 (구역0)");
+
+    // 구역 1: 구역 0과 완전히 같은 표+텍스트를 가진 구역을 추가한다 (이슈 실측: 2구역 문서).
+    let mut two_section_doc = doc.document.clone();
+    let section0 = two_section_doc.sections[0].clone();
+    two_section_doc.sections.push(section0);
+    doc.set_document(two_section_doc);
+
+    assert_eq!(doc.document.sections.len(), 2, "구역 2개 문서 준비");
+    assert_eq!(doc.measured_tables.len(), 2);
+    assert_eq!(
+        doc.measured_tables[0][0].total_height, doc.measured_tables[1][0].total_height,
+        "복제 직후 두 구역의 표 높이는 같아야 한다 (기준선)"
+    );
+    assert!(
+        doc.dirty_sections.iter().all(|d| !d),
+        "set_document 직후 paginate가 두 구역을 모두 처리해야 한다"
+    );
+    let before_height = doc.measured_tables[0][0].total_height;
+
+    // 스타일 글자모양을 36pt로 일괄 변경 (이슈 실측 시나리오)
+    assert!(
+        doc.update_style_shapes(0, r#"{"fontSize":3600}"#, "{}"),
+        "스타일 글자모양 수정 (36pt)"
+    );
+
+    let after0 = doc.measured_tables[0][0].total_height;
+    let after1 = doc.measured_tables[1][0].total_height;
+
+    assert!(
+        after0 > before_height,
+        "구역0 표 높이는 36pt 반영으로 커져야 한다 (before={before_height}, after0={after0})"
+    );
+    assert_eq!(
+        after0, after1,
+        "issue #4325 회귀: 구역1 표가 구역0과 동일한 표/텍스트인데도 stale MeasuredTable로 \
+         남았다 (before={before_height}, after0={after0}, after1={after1})"
+    );
+    assert_eq!(
+        doc.measured_tables[0][0].row_heights, doc.measured_tables[1][0].row_heights,
+        "issue #4325 회귀: 구역1 표의 행 높이가 구역0과 달라지면 안 된다"
+    );
+}
+
+#[test]
+fn issue_1470_character_style_does_not_replace_para_style() {
+    use crate::model::paragraph::CharShapeRef;
+    use crate::model::style::{CharShape, ParaShape, Style};
+
+    let mut doc = HwpDocument::create_empty();
+    doc.document.doc_info.char_shapes = vec![
+        CharShape {
+            base_size: 1000,
+            ..Default::default()
+        },
+        CharShape {
+            italic: true,
+            ..Default::default()
+        },
+    ];
+    doc.document.doc_info.para_shapes = vec![ParaShape::default()];
+    doc.document.doc_info.styles = vec![
+        Style {
+            local_name: "바탕글".to_string(),
+            english_name: "Normal".to_string(),
+            lang_id: 1042,
+            para_shape_id: 0,
+            char_shape_id: 0,
+            ..Default::default()
+        },
+        Style {
+            local_name: "글자 스타일".to_string(),
+            english_name: "Issue1470Char".to_string(),
+            style_type: 1,
+            lang_id: 1042,
+            para_shape_id: 0,
+            char_shape_id: 1,
+            ..Default::default()
+        },
+    ];
+    doc.insert_text_native(0, 0, 0, "글자스타일")
+        .expect("텍스트 입력");
+
+    let para = &mut doc.document.sections[0].paragraphs[0];
+    para.style_id = 0;
+    para.para_shape_id = 0;
+    para.char_shapes = vec![CharShapeRef {
+        start_pos: 0,
+        char_shape_id: 0,
+    }];
+
+    doc.apply_style_native(0, 0, 1).expect("글자 스타일 적용");
+
+    let para = &doc.document.sections[0].paragraphs[0];
+    assert_eq!(
+        para.style_id, 0,
+        "글자 스타일은 문단 스타일 ID를 바꾸지 않는다"
+    );
+    assert_eq!(
+        para.para_shape_id, 0,
+        "글자 스타일은 문단 모양 ID를 바꾸지 않는다"
+    );
+    assert_eq!(
+        para.char_shape_id_at(0),
+        Some(1),
+        "글자 스타일 CharShape는 글자 모양에 적용되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_create_table_ex_applies_size_options() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    let col_widths = [4000, 6000];
+    let row_heights = [3000, 5000];
+    doc.create_table_ex_native(0, 0, 0, 2, 2, true, Some(&col_widths), Some(&row_heights))
+        .expect("확장 표 생성");
+
+    let table = doc.document.sections[0].paragraphs[0]
+        .controls
+        .iter()
+        .find_map(|c| match c {
+            Control::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("표 컨트롤");
+    assert!(
+        table.common.treat_as_char,
+        "상세 옵션의 글자처럼 취급이 반영되어야 한다"
+    );
+    assert_eq!(table.common.width, 10000);
+    assert_eq!(table.common.height, 8000);
+    assert_eq!(table.cells[0].width, 4000);
+    assert_eq!(table.cells[1].width, 6000);
+    assert_eq!(table.cells[0].height, 3000);
+    assert_eq!(table.cells[2].height, 5000);
+}
+
+#[test]
+fn issue_1481_create_table_keeps_first_line_mark_for_escape() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_ex_native(0, 0, 1, 3, 5, false, None, None)
+        .expect("상세 대화상자 경로의 일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+    let section = &doc.document.sections[0];
+
+    assert_eq!(table_para_idx, 0, "새 문서 첫 표는 첫 줄에 만들어져야 한다");
+    assert!(
+        section.paragraphs.len() >= 2,
+        "표 뒤 빈 문단은 유지되어야 한다"
+    );
+    assert!(section.paragraphs[0].text.is_empty());
+    assert_eq!(section.paragraphs[0].char_count, 9);
+    assert!(section.paragraphs[0].has_para_text);
+    assert!(!section.paragraphs[0].line_segs.is_empty());
+    assert!(matches!(
+        section.paragraphs[table_para_idx].controls.first(),
+        Some(Control::Table(_))
+    ));
+    assert!(section.paragraphs[table_para_idx + 1].text.is_empty());
+    assert!(section.paragraphs[table_para_idx + 1].controls.is_empty());
+    assert_eq!(section.paragraphs[table_para_idx + 1].char_count, 1);
+    assert!(!section.paragraphs[table_para_idx + 1].line_segs.is_empty());
+
+    let moved = doc
+        .move_vertical(0, 0, 0, -1, 0.0, table_para_idx as u32, 0, 0, 0)
+        .expect("첫 셀에서 위쪽 이동");
+    let moved: Value = serde_json::from_str(&moved).expect("moveVertical JSON");
+    assert_eq!(
+        moved["paragraphIndex"].as_u64(),
+        Some(table_para_idx as u64)
+    );
+    assert_eq!(moved["charOffset"].as_u64(), Some(0));
+    assert!(
+        moved.get("parentParaIndex").is_none(),
+        "첫 셀 위쪽 이동은 같은 첫 줄의 표 밖 조판부호 위치로 나가야 한다"
+    );
+
+    let tree = issue_1481_first_page_render_tree(&doc);
+    let mut table_y = None;
+    let mut host_mark_y = None;
+    issue_1481_find_table_and_host_mark_y(
+        &tree.root,
+        table_para_idx,
+        &mut table_y,
+        &mut host_mark_y,
+    );
+    let table_y = table_y.expect("표 렌더 노드 y");
+    let host_mark_y = host_mark_y.expect("표 host 문단부호 y");
+    assert!(
+        (table_y - host_mark_y).abs() < 1.0,
+        "기본 자리차지 표의 첫 조판부호는 빈 줄이 아니라 표 상단과 겹쳐야 한다: table_y={table_y}, mark_y={host_mark_y}"
+    );
+    doc.set_show_paragraph_marks(true);
+    let layer_marks = issue_1481_layer_control_mark_y(&doc);
+    let layer_marks_above_table = layer_marks
+        .iter()
+        .filter(|y| **y < table_y - 1.0)
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        layer_marks_above_table.is_empty(),
+        "새 문서 빈 문단 끝에서 표를 만들 때 생성 경로가 빈 줄을 남기면 안 된다: table_y={table_y}, layer_marks_above={layer_marks_above_table:?}, all={layer_marks:?}"
+    );
+    doc.set_show_paragraph_marks(false);
+
+    let mut outside_marks = Vec::new();
+    issue_1481_collect_outside_empty_para_marks(&tree.root, &mut outside_marks);
+    let marks_above_table = outside_marks
+        .iter()
+        .filter(|(_, y)| *y < table_y - 1.0)
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        marks_above_table.is_empty(),
+        "표 생성 직후 표 위에 별도 빈 줄 조판부호가 있으면 안 된다: table_y={table_y}, marks={marks_above_table:?}, all={outside_marks:?}"
+    );
+
+    let enter_result = doc
+        .split_paragraph_native(0, table_para_idx, 0, None)
+        .expect("표 앞 조판부호 위치 Enter");
+    let enter_para_idx = issue_1481_json_usize(&enter_result, "paraIdx");
+    assert_eq!(
+        enter_para_idx,
+        table_para_idx + 1,
+        "자리차지 표 앞 Enter는 표 아래 문단으로 커서를 보내야 한다"
+    );
+    let section_after_enter = &doc.document.sections[0];
+    assert!(matches!(
+        section_after_enter.paragraphs[table_para_idx]
+            .controls
+            .first(),
+        Some(Control::Table(_))
+    ));
+    assert_eq!(
+        section_after_enter.paragraphs[table_para_idx].char_count, 9,
+        "Enter 후에도 표 host 문단은 빈 문단으로 분리되면 안 된다"
+    );
+    assert!(section_after_enter.paragraphs[enter_para_idx]
+        .text
+        .is_empty());
+    assert!(section_after_enter.paragraphs[enter_para_idx]
+        .controls
+        .is_empty());
+    assert_eq!(section_after_enter.paragraphs[enter_para_idx].char_count, 1);
+    assert!(section_after_enter
+        .paragraphs
+        .get(enter_para_idx + 1)
+        .map(|p| p.text.is_empty() && p.controls.is_empty())
+        .unwrap_or(false));
+
+    let tree_after_enter = issue_1481_first_page_render_tree(&doc);
+    let mut table_y_after = None;
+    let mut host_mark_y_after = None;
+    issue_1481_find_table_and_host_mark_y(
+        &tree_after_enter.root,
+        table_para_idx,
+        &mut table_y_after,
+        &mut host_mark_y_after,
+    );
+    let table_y_after = table_y_after.expect("Enter 후 표 렌더 노드 y");
+    let host_mark_y_after = host_mark_y_after.expect("Enter 후 표 host 문단부호 y");
+    assert!(
+        (table_y_after - host_mark_y_after).abs() < 1.0,
+        "Enter 후에도 표 host 조판부호는 표 상단과 겹쳐야 한다: table_y={table_y_after}, mark_y={host_mark_y_after}"
+    );
+    let mut outside_marks_after = Vec::new();
+    issue_1481_collect_outside_empty_para_marks(&tree_after_enter.root, &mut outside_marks_after);
+    let marks_above_table_after = outside_marks_after
+        .iter()
+        .filter(|(_, y)| *y < table_y_after - 1.0)
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        marks_above_table_after.is_empty(),
+        "Enter 후에도 표 위에 별도 빈 줄 조판부호가 있으면 안 된다: table_y={table_y_after}, marks={marks_above_table_after:?}, all={outside_marks_after:?}"
+    );
+}
+
+#[test]
+fn issue_1481_create_table_preserves_user_blank_line_above() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    doc.split_paragraph_native(0, 0, 0, None)
+        .expect("사용자가 만든 빈 줄");
+    let table_result = doc
+        .create_table_ex_native(0, 1, 1, 3, 5, false, None, None)
+        .expect("두 번째 빈 문단에 일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+    let section = &doc.document.sections[0];
+
+    assert_eq!(
+        table_para_idx, 1,
+        "사용자가 표 위에 만든 빈 문단은 삭제하지 않고 현재 빈 문단만 표 host로 교체해야 한다"
+    );
+    assert!(section.paragraphs[0].text.is_empty());
+    assert!(section.paragraphs[0].controls.is_empty());
+    assert_eq!(section.paragraphs[0].char_count, 1);
+    assert!(matches!(
+        section.paragraphs[table_para_idx].controls.first(),
+        Some(Control::Table(_))
+    ));
+}
+
+#[test]
+fn issue_1481_create_table_empty_para_ignores_stale_offset() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_ex_native(0, 0, 2, 3, 5, false, None, None)
+        .expect("빈 문단의 초과 offset에서 일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+    let section = &doc.document.sections[0];
+
+    assert_eq!(
+        table_para_idx, 0,
+        "빈 문단 offset이 초과되어도 표 위에 생성 경로의 빈 줄을 남기면 안 된다"
+    );
+    assert!(matches!(
+        section.paragraphs[table_para_idx].controls.first(),
+        Some(Control::Table(_))
+    ));
+
+    let tree = issue_1481_first_page_render_tree(&doc);
+    let mut table_y = None;
+    let mut host_mark_y = None;
+    issue_1481_find_table_and_host_mark_y(
+        &tree.root,
+        table_para_idx,
+        &mut table_y,
+        &mut host_mark_y,
+    );
+    let table_y = table_y.expect("표 렌더 노드 y");
+    let host_mark_y = host_mark_y.expect("표 host 문단부호 y");
+    assert!(
+        (table_y - host_mark_y).abs() < 1.0,
+        "빈 문단 초과 offset에서도 첫 조판부호는 표 상단과 겹쳐야 한다: table_y={table_y}, mark_y={host_mark_y}"
+    );
+}
+
+#[test]
+fn issue_1481_blank_template_create_table_has_no_generated_blank_above() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native()
+        .expect("Studio 새 문서 템플릿 생성");
+    let table_result = doc
+        .create_table_ex_native(0, 0, 2, 3, 5, false, None, None)
+        .expect("blank2010 기반 빈 문단 초과 offset에서 일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+    let table_control_idx = issue_1481_json_usize(&table_result, "controlIdx");
+    let section = &doc.document.sections[0];
+
+    assert_eq!(
+        table_para_idx, 0,
+        "Studio 새 문서 템플릿에서도 첫 표는 첫 줄에 만들어져야 한다"
+    );
+    assert_eq!(
+        table_control_idx, 2,
+        "blank2010의 SectionDef/ColumnDef 구조 컨트롤 뒤에 표 컨트롤이 보존되어야 한다"
+    );
+    assert!(matches!(
+        section.paragraphs[table_para_idx]
+            .controls
+            .get(table_control_idx),
+        Some(Control::Table(_))
+    ));
+
+    let tree = issue_1481_first_page_render_tree(&doc);
+    let mut table_y = None;
+    let mut host_mark_y = None;
+    issue_1481_find_table_and_host_mark_y(
+        &tree.root,
+        table_para_idx,
+        &mut table_y,
+        &mut host_mark_y,
+    );
+    let table_y = table_y.expect("표 렌더 노드 y");
+    let host_mark_y = host_mark_y.expect("표 host 문단부호 y");
+    assert!(
+        (table_y - host_mark_y).abs() < 1.0,
+        "blank2010 경로에서도 첫 조판부호는 표 상단과 겹쳐야 한다: table_y={table_y}, mark_y={host_mark_y}"
+    );
+
+    doc.set_show_paragraph_marks(true);
+    let layer_marks = issue_1481_layer_control_mark_y(&doc);
+    let layer_marks_above_table = layer_marks
+        .iter()
+        .filter(|y| **y < table_y - 1.0)
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        layer_marks_above_table.is_empty(),
+        "blank2010 경로에서도 표 위에 생성 경로 빈 줄을 남기면 안 된다: table_y={table_y}, layer_marks_above={layer_marks_above_table:?}, all={layer_marks:?}"
+    );
+    doc.set_show_paragraph_marks(false);
+}
+
+#[test]
+fn issue_1481_insert_column_keeps_create_table_height() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_native(0, 0, 0, 3, 5)
+        .expect("일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (original_width, original_height, original_raw_height, row_height_sum) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+        (
+            table.common.width,
+            table.common.height,
+            raw_common.height,
+            table.get_row_heights().iter().sum::<u32>(),
+        )
+    };
+
+    assert!(
+        original_height > row_height_sum,
+        "일반 표는 셀 저장 height 합보다 큰 외곽 height를 가진다"
+    );
+
+    doc.insert_table_column_native(0, table_para_idx, 0, 0, false)
+        .expect("왼쪽 열 추가");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+
+    assert_eq!(table.col_count, 6);
+    assert!(
+        table.common.width > original_width,
+        "열 추가 후 표 폭은 기준 열 폭만큼 증가해야 한다"
+    );
+    assert_eq!(
+        table.common.height, original_height,
+        "열 추가는 행 수를 바꾸지 않으므로 표 외곽 height를 보존해야 한다"
+    );
+    assert_eq!(
+        raw_common.height, original_raw_height,
+        "직렬화 원본 raw height도 표 외곽 height와 함께 보존해야 한다"
+    );
+    assert_eq!(
+        raw_common.height, table.common.height,
+        "raw height와 in-memory common height는 동기화되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1481_insert_row_keeps_create_table_display_height() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_native(0, 0, 0, 3, 5)
+        .expect("일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (original_height, original_raw_height, original_row_height_sum) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+        (
+            table.common.height,
+            raw_common.height,
+            table.get_row_heights().iter().sum::<u32>(),
+        )
+    };
+
+    assert!(
+        original_height > original_row_height_sum,
+        "일반 표는 셀 저장 height 합보다 큰 외곽 height를 가진다"
+    );
+
+    doc.insert_table_row_native(0, table_para_idx, 0, 0, false)
+        .expect("위쪽 줄 추가");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+    let expected_height = original_height + (original_height / 3);
+
+    assert_eq!(table.row_count, 4);
+    assert_eq!(
+        table.common.height, expected_height,
+        "줄 추가는 한 행의 표시 높이만큼 표 외곽 height를 늘려야 한다"
+    );
+    assert!(
+        table.common.height > original_raw_height,
+        "줄 추가 후 표 높이는 기존 외곽 height보다 커야 한다"
+    );
+    assert_eq!(
+        raw_common.height, table.common.height,
+        "raw height와 in-memory common height는 동기화되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1481_delete_row_keeps_create_table_display_height() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_native(0, 0, 0, 3, 5)
+        .expect("일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (original_height, original_row_height_sum) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        (
+            table.common.height,
+            table.get_row_heights().iter().sum::<u32>(),
+        )
+    };
+
+    assert!(
+        original_height > original_row_height_sum,
+        "일반 표는 셀 저장 height 합보다 큰 외곽 height를 가진다"
+    );
+
+    doc.delete_table_row_native(0, table_para_idx, 0, 0)
+        .expect("줄 지우기");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+    let expected_height = original_height - (original_height / 3);
+
+    assert_eq!(table.row_count, 2);
+    assert_eq!(
+        table.common.height, expected_height,
+        "줄 삭제는 삭제 행의 표시 높이만큼 표 외곽 height를 줄여야 한다"
+    );
+    assert!(
+        table.common.height > table.get_row_heights().iter().sum::<u32>(),
+        "삭제 후에도 일반 표의 표시 height가 셀 저장 height 합으로 붕괴하면 안 된다"
+    );
+    assert_eq!(
+        raw_common.height, table.common.height,
+        "raw height와 in-memory common height는 동기화되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1481_delete_column_keeps_create_table_height() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_native(0, 0, 0, 3, 5)
+        .expect("일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (original_width, original_height, original_raw_height, row_height_sum) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+        (
+            table.common.width,
+            table.common.height,
+            raw_common.height,
+            table.get_row_heights().iter().sum::<u32>(),
+        )
+    };
+
+    assert!(
+        original_height > row_height_sum,
+        "일반 표는 셀 저장 height 합보다 큰 외곽 height를 가진다"
+    );
+
+    doc.delete_table_column_native(0, table_para_idx, 0, 0)
+        .expect("칸 지우기");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+
+    assert_eq!(table.col_count, 4);
+    assert!(
+        table.common.width < original_width,
+        "열 삭제 후 표 폭은 삭제 열 폭만큼 줄어야 한다"
+    );
+    assert_eq!(
+        table.common.height, original_height,
+        "열 삭제는 행 수를 바꾸지 않으므로 표 외곽 height를 보존해야 한다"
+    );
+    assert_eq!(
+        raw_common.height, original_raw_height,
+        "직렬화 원본 raw height도 표 외곽 height와 함께 보존해야 한다"
+    );
+    assert_eq!(
+        raw_common.height, table.common.height,
+        "raw height와 in-memory common height는 동기화되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1481_resize_bottom_row_keeps_create_table_display_height() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc
+        .create_table_native(0, 0, 0, 3, 5)
+        .expect("일반 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (original_height, original_raw_height, original_row_height_sum, last_row_cells) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+        let last_row = table.row_count - 1;
+        (
+            table.common.height,
+            raw_common.height,
+            table.get_row_heights().iter().sum::<u32>(),
+            table
+                .cells
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, cell)| (cell.row == last_row).then_some(idx))
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    assert!(
+        original_height > original_row_height_sum,
+        "일반 표는 셀 저장 height 합보다 큰 외곽 height를 가진다"
+    );
+    assert_eq!(original_height, original_raw_height);
+    assert_eq!(last_row_cells.len(), 5);
+
+    let updates = last_row_cells
+        .iter()
+        .map(|cell_idx| format!(r#"{{"cellIdx":{},"heightDelta":300}}"#, cell_idx))
+        .collect::<Vec<_>>()
+        .join(",");
+    doc.resize_table_cells_native(0, table_para_idx, 0, &format!("[{}]", updates))
+        .expect("하단 행 resize");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let raw_common = parse_common_obj_attr(&table.raw_ctrl_data);
+    let row_height_sum = table.get_row_heights().iter().sum::<u32>();
+
+    assert_eq!(
+        table.common.height,
+        original_height + 300,
+        "하단선 resize는 기존 표시 height에 실제 행 높이 변화량만 반영해야 한다"
+    );
+    assert!(
+        table.common.height > row_height_sum,
+        "resize 후에도 생성 직후 표의 표시 height가 셀 저장 height 합으로 붕괴하면 안 된다"
+    );
+    assert_eq!(
+        raw_common.height, table.common.height,
+        "raw height와 in-memory common height는 동기화되어야 한다"
+    );
+}
+
+fn issue_1470_count_rendered_tables(
+    doc: &HwpDocument,
+    para_idx: usize,
+    control_idx: usize,
+) -> usize {
+    let layout = doc
+        .get_page_control_layout_native(0)
+        .expect("페이지 컨트롤 레이아웃");
+    let parsed: Value = serde_json::from_str(&layout).expect("레이아웃 JSON");
+    parsed["controls"]
+        .as_array()
+        .expect("controls 배열")
+        .iter()
+        .filter(|control| {
+            control["type"] == "table"
+                && control["paraIdx"].as_u64() == Some(para_idx as u64)
+                && control["controlIdx"].as_u64() == Some(control_idx as u64)
+        })
+        .count()
+}
+
+fn issue_1470_table_caption_number(doc: &HwpDocument, control_idx: usize) -> Option<(u16, u16)> {
+    use crate::model::control::Control;
+
+    let table = match doc.document.sections[0].paragraphs[0]
+        .controls
+        .get(control_idx)?
+    {
+        Control::Table(t) => t,
+        _ => return None,
+    };
+    table
+        .caption
+        .as_ref()?
+        .paragraphs
+        .first()?
+        .controls
+        .iter()
+        .find_map(|c| match c {
+            Control::AutoNumber(an) => Some((an.assigned_number, an.number)),
+            _ => None,
+        })
+}
+
+fn issue_1470_picture_caption_number(doc: &HwpDocument, control_idx: usize) -> Option<(u16, u16)> {
+    use crate::model::control::Control;
+
+    let picture = match doc.document.sections[0].paragraphs[0]
+        .controls
+        .get(control_idx)?
+    {
+        Control::Picture(p) => p,
+        _ => return None,
+    };
+    picture
+        .caption
+        .as_ref()?
+        .paragraphs
+        .first()?
+        .controls
+        .iter()
+        .find_map(|c| match c {
+            Control::AutoNumber(an) => Some((an.assigned_number, an.number)),
+            _ => None,
+        })
+}
+
+#[test]
+fn issue_1470_create_table_ex_tac_renders_once() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "본문 앞")
+        .expect("본문 텍스트 입력");
+    let insert_at = doc
+        .get_paragraph_length_native(0, 0)
+        .expect("문단 길이 조회");
+    let created = doc
+        .create_table_ex_native(
+            0,
+            0,
+            insert_at,
+            2,
+            2,
+            true,
+            Some(&[4000, 6000]),
+            Some(&[3000, 5000]),
+        )
+        .expect("TAC 표 생성");
+    let created: Value = serde_json::from_str(&created).expect("생성 결과 JSON");
+    let control_idx = created["controlIdx"].as_u64().expect("controlIdx") as usize;
+
+    assert_eq!(
+        issue_1470_count_rendered_tables(&doc, 0, control_idx),
+        1,
+        "문단 레이아웃에서 이미 그린 TAC 표를 PageItem 경로가 다시 그리면 안 된다"
+    );
+}
+
+#[test]
+fn issue_1470_create_table_ex_tac_caption_renders_once() {
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "캡션 표")
+        .expect("본문 텍스트 입력");
+    let insert_at = doc
+        .get_paragraph_length_native(0, 0)
+        .expect("문단 길이 조회");
+    let created = doc
+        .create_table_ex_native(0, 0, insert_at, 1, 1, true, None, None)
+        .expect("TAC 표 생성");
+    let created: Value = serde_json::from_str(&created).expect("생성 결과 JSON");
+    let control_idx = created["controlIdx"].as_u64().expect("controlIdx") as usize;
+    doc.set_table_properties_native(0, 0, control_idx, r#"{"hasCaption":true}"#)
+        .expect("캡션 생성");
+
+    assert_eq!(
+        issue_1470_count_rendered_tables(&doc, 0, control_idx),
+        1,
+        "캡션이 있는 TAC 표도 같은 컨트롤이 한 번만 렌더되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_picture_caption_can_be_removed_and_renumbers() {
+    use crate::model::control::Control;
+
+    fn minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    let mut doc = HwpDocument::create_empty();
+    let image = minimal_png();
+    let first = doc
+        .insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &image,
+            5000,
+            5000,
+            1,
+            1,
+            "png",
+            "first",
+            None,
+            None,
+        )
+        .expect("첫 번째 그림 삽입");
+    let first_idx = issue_1481_json_usize(&first, "controlIdx");
+    let second = doc
+        .insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &image,
+            5000,
+            5000,
+            1,
+            1,
+            "png",
+            "second",
+            None,
+            None,
+        )
+        .expect("두 번째 그림 삽입");
+    let second_idx = issue_1481_json_usize(&second, "controlIdx");
+
+    for control_idx in [first_idx, second_idx] {
+        doc.set_picture_properties_native(0, 0, control_idx, r#"{"hasCaption":true}"#)
+            .expect("그림 캡션 생성");
+    }
+
+    assert_eq!(
+        issue_1470_picture_caption_number(&doc, first_idx),
+        Some((1, 1))
+    );
+    assert_eq!(
+        issue_1470_picture_caption_number(&doc, second_idx),
+        Some((2, 2))
+    );
+
+    doc.set_picture_properties_native(0, 0, first_idx, r#"{"hasCaption":false}"#)
+        .expect("그림 캡션 삭제");
+
+    let first_picture = match &doc.document.sections[0].paragraphs[0].controls[first_idx] {
+        Control::Picture(p) => p,
+        other => panic!("첫 번째 컨트롤이 그림이 아님: {other:?}"),
+    };
+    assert!(
+        first_picture.caption.is_none(),
+        "hasCaption=false는 그림 캡션 슬롯을 삭제해야 한다"
+    );
+    assert_eq!(
+        first_picture.common.attr & (1 << 29),
+        0,
+        "그림 캡션 attr bit도 내려야 한다"
+    );
+    let props: Value = serde_json::from_str(
+        &doc.get_picture_properties_native(0, 0, first_idx)
+            .expect("그림 속성 조회"),
+    )
+    .expect("그림 속성 JSON");
+    assert_eq!(
+        props["hasCaption"], false,
+        "그림 속성창의 중앙 캡션 없음 선택은 hasCaption=false로 되돌아와야 한다"
+    );
+    assert_eq!(
+        issue_1470_picture_caption_number(&doc, second_idx),
+        Some((1, 1)),
+        "앞 그림 캡션 삭제 후 뒤 그림 캡션 번호가 1로 재배정되어야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_picture_caption_path_cursor_and_control_paste() {
+    use crate::model::control::Control;
+
+    fn minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    let mut doc = HwpDocument::create_empty();
+    let image = minimal_png();
+    let inserted = doc
+        .insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &image,
+            5000,
+            5000,
+            1,
+            1,
+            "png",
+            "caption-path",
+            None,
+            None,
+        )
+        .expect("그림 삽입");
+    let pic_idx = issue_1481_json_usize(&inserted, "controlIdx");
+    doc.set_picture_properties_native(0, 0, pic_idx, r#"{"hasCaption":true}"#)
+        .expect("그림 캡션 생성");
+
+    let path = [(pic_idx, 0usize, 0usize)];
+    let path_json = format!(
+        r#"[{{"controlIndex":{},"cellIndex":0,"cellParaIndex":0}}]"#,
+        pic_idx
+    );
+    let rect = doc.get_cursor_rect_by_path_native(0, 0, &path_json, 0);
+    assert!(
+        rect.is_ok(),
+        "그림 캡션 cellPath도 커서 좌표를 찾아야 한다: {:?}",
+        rect.err()
+    );
+
+    doc.copy_control_native(0, 0, &[], pic_idx)
+        .expect("그림 개체 복사");
+    let pasted = doc.paste_internal_in_cell_by_path_native(0, 0, &path, 0);
+    assert!(
+        pasted.is_ok(),
+        "그림 캡션 위치에도 내부 그림 클립보드를 붙여넣을 수 있어야 한다: {:?}",
+        pasted.err()
+    );
+    let picture = match &doc.document.sections[0].paragraphs[0].controls[pic_idx] {
+        Control::Picture(p) => p,
+        other => panic!("그림 컨트롤이 아님: {other:?}"),
+    };
+    let caption = picture.caption.as_ref().expect("그림 캡션 존재");
+    assert!(
+        caption.paragraphs[0]
+            .controls
+            .iter()
+            .any(|control| matches!(control, Control::Picture(_))),
+        "그림 caption path 붙여넣기는 캡션 문단 안에 그림 컨트롤을 보존해야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_table_caption_keeps_autonumber_and_can_be_removed() {
+    use crate::model::control::Control;
+
+    let mut doc = HwpDocument::create_empty();
+    doc.create_table_ex_native(0, 0, 0, 1, 1, true, None, None)
+        .expect("표 생성");
+
+    doc.set_table_properties_native(0, 0, 0, r#"{"hasCaption":true}"#)
+        .expect("캡션 생성");
+    let table = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    let caption = table.caption.as_ref().expect("캡션 존재");
+    let cap_para = caption.paragraphs.first().expect("캡션 문단");
+    assert_eq!(cap_para.text, "표  ");
+    assert_eq!(cap_para.char_count, 13);
+    assert_eq!(cap_para.char_offsets, vec![0, 1, 2, 11]);
+    assert!(
+        cap_para
+            .controls
+            .iter()
+            .any(|c| matches!(c, Control::AutoNumber(_))),
+        "표 캡션 번호는 literal 텍스트가 아니라 AutoNumber 컨트롤로 유지되어야 한다"
+    );
+
+    doc.set_table_properties_native(0, 0, 0, r#"{"hasCaption":false}"#)
+        .expect("캡션 삭제");
+    let table = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    assert!(
+        table.caption.is_none(),
+        "hasCaption=false가 기존 캡션을 삭제해야 한다"
+    );
+    assert_eq!(table.attr & (1 << 29), 0, "캡션 attr bit도 내려야 한다");
+}
+
+#[test]
+fn issue_1470_table_caption_renumbers_after_delete() {
+    let mut doc = HwpDocument::create_empty();
+    for _ in 0..3 {
+        doc.create_table_ex_native(0, 0, 0, 1, 1, true, None, None)
+            .expect("표 생성");
+    }
+    for control_idx in 0..3 {
+        doc.set_table_properties_native(0, 0, control_idx, r#"{"hasCaption":true}"#)
+            .expect("캡션 생성");
+    }
+
+    assert_eq!(issue_1470_table_caption_number(&doc, 0), Some((1, 1)));
+    assert_eq!(issue_1470_table_caption_number(&doc, 1), Some((2, 2)));
+    assert_eq!(issue_1470_table_caption_number(&doc, 2), Some((3, 3)));
+
+    doc.set_table_properties_native(0, 0, 1, r#"{"hasCaption":false}"#)
+        .expect("중간 캡션 삭제");
+    doc.set_table_properties_native(
+        0,
+        0,
+        2,
+        r#"{"captionDirection":0,"captionVertAlign":1,"captionWidth":2400,"captionSpacing":600}"#,
+    )
+    .expect("뒤 캡션 속성 수정");
+
+    assert_eq!(
+        issue_1470_table_caption_number(&doc, 0),
+        Some((1, 1)),
+        "앞 표 캡션 번호는 1을 유지해야 한다"
+    );
+    assert_eq!(
+        issue_1470_table_caption_number(&doc, 1),
+        None,
+        "삭제한 중간 표 캡션은 없어야 한다"
+    );
+    assert_eq!(
+        issue_1470_table_caption_number(&doc, 2),
+        Some((2, 2)),
+        "중간 캡션 삭제 후 뒤 표 캡션의 assigned_number/number가 2로 재배정되어야 한다"
+    );
+
+    let svg = doc.render_page_svg_native(0).expect("SVG 렌더링");
+    assert!(
+        svg.contains(">표<") && svg.contains(">1<") && svg.contains(">2<") && !svg.contains(">3<"),
+        "렌더링 결과도 중간 캡션 삭제 후 표 1, 표 2만 표시해야 한다"
+    );
+}
+
+#[test]
+fn issue_1470_table_caption_edit_keeps_autonumber() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CaptionDirection, CaptionVertAlign};
+
+    let mut doc = HwpDocument::create_empty();
+    doc.create_table_ex_native(0, 0, 0, 1, 1, true, None, None)
+        .expect("표 생성");
+    doc.set_table_properties_native(0, 0, 0, r#"{"hasCaption":true}"#)
+        .expect("캡션 생성");
+
+    doc.set_table_properties_native(
+        0,
+        0,
+        0,
+        r#"{"captionDirection":0,"captionVertAlign":1,"captionWidth":2400,"captionSpacing":600}"#,
+    )
+    .expect("캡션 속성 수정");
+
+    let table = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    let caption = table.caption.as_ref().expect("캡션 존재");
+    assert_eq!(caption.direction, CaptionDirection::Left);
+    assert_eq!(caption.vert_align, CaptionVertAlign::Center);
+    assert_eq!(caption.width, 2400);
+    assert_eq!(caption.spacing, 600);
+
+    let cap_para = caption.paragraphs.first().expect("캡션 문단");
+    assert_eq!(cap_para.text, "표  ");
+    assert_eq!(cap_para.char_offsets, vec![0, 1, 2, 11]);
+    assert!(
+        cap_para.controls.iter().any(
+            |c| matches!(c, Control::AutoNumber(an) if an.assigned_number == 1 && an.number == 1)
+        ),
+        "캡션 속성 수정 후에도 AutoNumber 컨트롤과 번호가 유지되어야 한다"
+    );
 }
 
 #[test]
@@ -115,22 +1553,42 @@ fn test_page_layer_tree_export_uses_schema_contract() {
     let json = doc
         .get_page_layer_tree_native(0)
         .expect("empty document layer tree should export");
+    let parsed: Value = serde_json::from_str(&json).expect("PageLayerTree JSON");
 
-    assert!(json.contains(&format!(
-        "\"schemaVersion\":{}",
-        LAYER_TREE_SCHEMA.schema_version
-    )));
-    assert!(json.contains(&format!(
-        "\"resourceTableVersion\":{}",
-        LAYER_TREE_SCHEMA.resource_table_version
-    )));
-    assert!(json.contains(&format!("\"unit\":\"{}\"", LAYER_TREE_SCHEMA.unit)));
-    assert!(json.contains(&format!(
-        "\"coordinateSystem\":\"{}\"",
-        LAYER_TREE_SCHEMA.coordinate_system
-    )));
-    assert!(json.contains("\"profile\":\"screen\""));
-    assert!(json.contains("\"outputOptions\":{"));
+    assert_eq!(
+        parsed["schemaVersion"].as_u64(),
+        Some(LAYER_TREE_SCHEMA.schema_version as u64)
+    );
+    assert_eq!(
+        parsed["resourceTableVersion"].as_u64(),
+        Some(LAYER_TREE_SCHEMA.resource_table_version as u64)
+    );
+    assert_eq!(parsed["unit"].as_str(), Some(LAYER_TREE_SCHEMA.unit));
+    assert_eq!(
+        parsed["coordinateSystem"].as_str(),
+        Some(LAYER_TREE_SCHEMA.coordinate_system)
+    );
+    assert_eq!(parsed["profile"].as_str(), Some("screen"));
+    assert!(parsed["buildOptions"].is_object());
+    assert!(parsed["debugOptions"].is_object());
+    assert!(parsed["outputOptions"].is_object());
+}
+
+#[test]
+fn test_page_layer_tree_export_uses_requested_profile() {
+    let doc = HwpDocument::create_empty();
+    for (profile, expected) in [
+        (RenderProfile::FastPreview, "fastPreview"),
+        (RenderProfile::Screen, "screen"),
+        (RenderProfile::Print, "print"),
+        (RenderProfile::HighQuality, "highQuality"),
+    ] {
+        let json = doc
+            .get_page_layer_tree_with_profile_native(0, profile)
+            .expect("profiled layer tree should export");
+        let parsed: Value = serde_json::from_str(&json).expect("PageLayerTree JSON");
+        assert_eq!(parsed["profile"].as_str(), Some(expected));
+    }
 }
 
 #[test]
@@ -145,12 +1603,34 @@ fn test_page_layer_tree_export_preserves_output_options() {
     let json = doc
         .get_page_layer_tree_native(0)
         .expect("layer tree should export output options");
+    let parsed: Value = serde_json::from_str(&json).expect("PageLayerTree JSON");
 
-    assert!(json.contains("\"showParagraphMarks\":true"));
-    assert!(json.contains("\"showControlCodes\":true"));
-    assert!(json.contains("\"showTransparentBorders\":true"));
-    assert!(json.contains("\"clipEnabled\":false"));
-    assert!(json.contains("\"debugOverlay\":true"));
+    assert_eq!(
+        parsed["buildOptions"]["showTransparentBorders"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(parsed["buildOptions"]["clipEnabled"].as_bool(), Some(false));
+    assert_eq!(parsed["debugOptions"]["debugOverlay"].as_bool(), Some(true));
+    assert_eq!(
+        parsed["outputOptions"]["showParagraphMarks"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["outputOptions"]["showControlCodes"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["outputOptions"]["showTransparentBorders"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        parsed["outputOptions"]["clipEnabled"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        parsed["outputOptions"]["debugOverlay"].as_bool(),
+        Some(true)
+    );
 }
 
 #[test]
@@ -163,6 +1643,8 @@ fn test_canvaskit_replay_plan_export_uses_mode_policy() {
     assert!(default_json.contains("\"mode\":\"default\""));
     assert!(default_json.contains("\"hiddenCanvas2dOverlayAllowed\":false"));
     assert!(default_json.contains("\"directReplayRequired\":true"));
+    assert!(default_json.contains("\"requiredFontFamilies\""));
+    assert!(default_json.contains("\"requiredFontFamiliesComplete\":true"));
 
     let compat_json = doc
         .get_canvaskit_replay_plan_native(0, "compat")
@@ -176,6 +1658,44 @@ fn test_canvaskit_replay_plan_export_uses_mode_policy() {
     let message = error.to_string();
     assert!(message.contains("canvas2d"));
     assert!(message.contains("allowed modes: default, compat"));
+}
+
+#[test]
+fn test_empty_document_canvaskit_preflight_api_schema() {
+    let doc = HwpDocument::create_empty();
+
+    let json = doc
+        .get_canvaskit_document_preflight("default", "screen")
+        .expect("empty document CanvasKit preflight should export");
+    let parsed: Value = serde_json::from_str(&json).expect("CanvasKit preflight JSON");
+
+    assert_eq!(parsed["schemaVersion"].as_u64(), Some(1));
+    assert_eq!(parsed["mode"].as_str(), Some("default"));
+    assert_eq!(parsed["profile"].as_str(), Some("screen"));
+    assert!(matches!(
+        parsed["status"].as_str(),
+        Some("eligible" | "ineligible" | "incomplete")
+    ));
+    assert!(parsed["eligible"].is_boolean());
+    assert!(parsed["complete"].is_boolean());
+    assert_eq!(parsed["pageCount"].as_u64(), Some(1));
+    assert!(parsed["scannedPages"].is_u64());
+    assert!(parsed["scannedWorkUnits"].is_u64());
+    assert_eq!(parsed["limits"]["maxPages"].as_u64(), Some(128));
+    assert_eq!(parsed["limits"]["maxWorkUnits"].as_u64(), Some(50_000));
+    assert_eq!(parsed["limits"]["maxBlockers"].as_u64(), Some(32));
+    assert_eq!(
+        parsed["limits"]["maxRequiredFontFamilies"].as_u64(),
+        Some(256)
+    );
+    assert!(parsed["summary"]["totalItems"].is_u64());
+    assert!(parsed["blockers"].is_array());
+    assert!(parsed["requiredFontFamilies"].is_array());
+    assert!(parsed["capabilityDigest"]
+        .as_str()
+        .is_some_and(|digest| digest.len() == 71 && digest.starts_with("blake3:")));
+    assert!(parsed.get("root").is_none());
+    assert!(parsed.get("resources").is_none());
 }
 
 #[test]
@@ -208,6 +1728,15 @@ fn test_normalize_canvas_scale_clamps_request_and_canvas_extent() {
     let scale = normalize_canvas_scale(20_000.0, 10_000.0, 1.0)
         .expect("large finite page should be scaled down");
     assert!((scale - (16_384.0 / 20_000.0)).abs() < f64::EPSILON);
+}
+
+#[test]
+fn test_scaled_canvas_extent_keeps_fractional_a4_edge() {
+    // A4를 CSS 96dpi 좌표로 환산한 뒤 144dpi(1.5x) bitmap으로 옮기는 경계값이다.
+    // `as u32` 절사 회귀 시 각각 1190 × 1683이 되어 마지막 물리 픽셀이 사라진다.
+    assert_eq!(scaled_canvas_extent(793.700_787, 1.5), 1191);
+    assert_eq!(scaled_canvas_extent(1_122.519_685, 1.5), 1684);
+    assert_eq!(scaled_canvas_extent(16_384.25, 1.0), 16_384);
 }
 
 #[test]
@@ -353,7 +1882,7 @@ fn create_doc_with_table() -> HwpDocument {
         ..Default::default()
     };
 
-    let table = Table {
+    let mut table = Table {
         row_count: 2,
         col_count: 2,
         padding: Padding {
@@ -446,6 +1975,7 @@ fn create_doc_with_table() -> HwpDocument {
         ],
         ..Default::default()
     };
+    table.rebuild_grid();
 
     let parent_para = Paragraph {
         text: String::new(),
@@ -470,6 +2000,92 @@ fn create_doc_with_table() -> HwpDocument {
     doc
 }
 
+/// #2424 page-count commit 검증용: 한 쪽에 거의 차는 1열 RowBreak 표.
+/// 마지막 cell의 줄 수만 늘리면 표 continuation이 한 쪽 더 필요해진다.
+fn create_doc_with_page_count_boundary_table() -> HwpDocument {
+    use crate::model::control::Control;
+    use crate::model::document::SectionDef;
+    use crate::model::page::PageDef;
+    use crate::model::table::{Cell, Table, TablePageBreak};
+    use crate::model::Padding;
+
+    let mut doc = HwpDocument::create_empty();
+    let mut document = Document::default();
+    let page_def = PageDef {
+        width: 59528,
+        height: 84188,
+        margin_left: 8504,
+        margin_right: 8504,
+        margin_top: 5669,
+        margin_bottom: 4252,
+        margin_header: 4252,
+        margin_footer: 4252,
+        ..Default::default()
+    };
+    let row_count = 13u16;
+    let mut cells = Vec::with_capacity(row_count as usize);
+    for row in 0..row_count {
+        let text = if row + 1 == row_count {
+            "가"
+        } else {
+            "고정"
+        };
+        cells.push(Cell {
+            row,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            width: if row + 1 == row_count { 2_200 } else { 42_000 },
+            height: if row + 1 == row_count { 600 } else { 5_250 },
+            paragraphs: vec![Paragraph {
+                text: text.to_string(),
+                char_count: text.chars().count() as u32,
+                char_offsets: make_char_offsets(text),
+                line_segs: vec![LineSeg {
+                    line_height: 400,
+                    baseline_distance: 320,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+    }
+    let mut table = Table {
+        row_count,
+        col_count: 1,
+        page_break: TablePageBreak::RowBreak,
+        padding: Padding {
+            left: 100,
+            right: 100,
+            top: 100,
+            bottom: 100,
+        },
+        cells,
+        ..Default::default()
+    };
+    table.rebuild_grid();
+    let parent_para = Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![LineSeg {
+            line_height: 400,
+            baseline_distance: 320,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    document.sections.push(Section {
+        section_def: SectionDef {
+            page_def,
+            ..Default::default()
+        },
+        paragraphs: vec![parent_para],
+        raw_stream: None,
+    });
+    doc.set_document(document);
+    doc
+}
+
 #[test]
 fn test_insert_text_in_cell() {
     let mut doc = create_doc_with_table();
@@ -478,12 +2094,660 @@ fn test_insert_text_in_cell() {
     let json = result.unwrap();
     assert!(json.contains("\"ok\":true"));
     assert!(json.contains("\"charOffset\":3"));
+    assert!(
+        !json.contains("cellFlowChanged"),
+        "immediate insert response schema must remain unchanged"
+    );
 
     if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
         assert_eq!(table.cells[0].paragraphs[0].text, "셀추가A");
     } else {
         panic!("표 컨트롤을 찾을 수 없음");
     }
+}
+
+#[test]
+fn issue2424_deferred_delete_preserves_immediate_schema_and_tracks_ime_revision() {
+    let mut immediate = create_doc_with_table();
+    let immediate_raw = immediate
+        .delete_text_in_cell_native(0, 0, 0, 0, 0, 1, 1)
+        .expect("immediate cell delete");
+    let immediate_result: Value =
+        serde_json::from_str(&immediate_raw).expect("immediate delete json");
+    assert_eq!(immediate_result["charOffset"], 1);
+    assert!(
+        immediate_result.get("cellFlowChanged").is_none(),
+        "existing immediate response schema must remain unchanged"
+    );
+
+    let mut doc = create_doc_with_table();
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 1, "ㅎ")
+        .expect("first IME insert");
+    let first_revision = doc
+        .deferred_pagination_descriptor
+        .as_ref()
+        .expect("first IME descriptor")
+        .revision;
+
+    let delete_raw = doc
+        .delete_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 1, 1)
+        .expect("IME replacement delete");
+    let delete_result: Value = serde_json::from_str(&delete_raw).expect("deferred delete json");
+    assert_eq!(delete_result["charOffset"], 1);
+    assert!(delete_result["cellFlowChanged"].is_boolean());
+    let delete_revision = doc
+        .deferred_pagination_descriptor
+        .as_ref()
+        .expect("delete descriptor")
+        .revision;
+    assert!(delete_revision > first_revision);
+
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 1, "하")
+        .expect("second IME insert");
+    let final_descriptor = doc
+        .deferred_pagination_descriptor
+        .as_ref()
+        .expect("latest IME descriptor");
+    assert!(final_descriptor.revision > delete_revision);
+    assert_eq!(
+        (
+            final_descriptor.section_index,
+            final_descriptor.para_index,
+            final_descriptor.control_index,
+            final_descriptor.cell_index,
+            final_descriptor.cell_para_index,
+        ),
+        (0, 0, 0, 0, 0)
+    );
+    match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => assert_eq!(table.cells[0].paragraphs[0].text, "셀하A"),
+        other => panic!("table control expected: {other:?}"),
+    }
+
+    doc.flush_deferred_pagination().expect("IME output barrier");
+    assert!(doc.deferred_pagination_descriptor.is_none());
+}
+
+#[test]
+fn issue2424_page_count_is_held_until_shadow_layout_commits() {
+    let mut doc = create_doc_with_page_count_boundary_table();
+    let initial_page_count = doc.page_count();
+    assert_eq!(initial_page_count, 1, "fixture must begin on one page");
+
+    let inserted = "가".repeat(48);
+    let edit_raw = doc
+        .insert_text_in_cell_native_deferred_pagination(0, 0, 0, 12, 0, 1, &inserted)
+        .expect("deferred boundary insert");
+    let edit: Value = serde_json::from_str(&edit_raw).expect("edit json");
+    assert_eq!(edit["cellFlowChanged"], true, "fixture must add cell lines");
+    assert_eq!(
+        doc.page_count(),
+        initial_page_count,
+        "deferred edit must keep the public page count"
+    );
+
+    let begin = doc.core.begin_deferred_pagination(1);
+    assert_eq!(begin.state, DeferredPaginationJobState::Pending);
+    assert_eq!(begin.page_count, initial_page_count);
+
+    let completed = loop {
+        let step = doc.core.step_deferred_pagination(1);
+        match step.state {
+            DeferredPaginationJobState::Pending => {
+                assert_eq!(
+                    step.page_count, initial_page_count,
+                    "incomplete shadow fragments must not publish a page count"
+                );
+            }
+            DeferredPaginationJobState::Complete => break step,
+            state => panic!("unexpected shadow status: {state:?}"),
+        }
+    };
+    assert!(
+        completed.page_count > initial_page_count,
+        "final shadow commit must publish the added page: {completed:?}"
+    );
+    assert_eq!(doc.page_count(), completed.page_count);
+}
+
+#[test]
+fn deferred_cell_replace_applies_ime_atomically() {
+    use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+
+    fn contains_text(node: &RenderNode, needle: &str) -> bool {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.text.contains(needle) {
+                return true;
+            }
+        }
+        node.children
+            .iter()
+            .any(|child| contains_text(child, needle))
+    }
+
+    let mut doc = create_doc_with_table();
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "ㅎ")
+        .expect("seed composition");
+    doc.build_page_render_tree(0).expect("warm page tree");
+
+    let raw = doc
+        .replace_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, 1, "하")
+        .expect("atomic composition replace");
+    let result: Value = serde_json::from_str(&raw).expect("replace result json");
+
+    assert_eq!(result["charOffset"].as_u64(), Some(3));
+    assert_eq!(result["cellFlowChanged"].as_bool(), Some(false));
+    match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => {
+            let para = &table.cells[0].paragraphs[0];
+            assert_eq!(para.text, "셀A하");
+            assert_eq!(para.char_count, 3);
+            assert_eq!(para.char_offsets, make_char_offsets("셀A하"));
+        }
+        other => panic!("table control expected: {other:?}"),
+    }
+
+    let transient_tree = doc.build_page_render_tree(0).expect("transient page tree");
+    assert!(
+        contains_text(&transient_tree.root, "하"),
+        "warm page tree must expose the final composition before pagination"
+    );
+    assert_eq!(doc.event_log.len(), 2, "seed insert + atomic replace");
+    assert!(matches!(
+        doc.event_log.last(),
+        Some(crate::model::event::DocumentEvent::CellTextChanged {
+            section: 0,
+            para: 0,
+            ctrl: 0,
+            cell: 0,
+        })
+    ));
+}
+
+#[test]
+fn deferred_cell_replace_reports_real_flow_boundary() {
+    use crate::model::shape::{Caption, CaptionDirection};
+
+    let mut doc = create_doc_with_table();
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => {
+            table.caption = Some(Caption {
+                direction: CaptionDirection::Bottom,
+                width: 2_000,
+                max_width: 2_000,
+                paragraphs: vec![Paragraph {
+                    text: "가".to_string(),
+                    char_count: 1,
+                    char_offsets: make_char_offsets("가"),
+                    line_segs: vec![LineSeg {
+                        line_height: 400,
+                        baseline_distance: 320,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        other => panic!("table control expected: {other:?}"),
+    }
+    doc.reflow_cell_paragraph(0, 0, 0, 65534, 0);
+
+    let raw = doc
+        .replace_text_in_cell_native_deferred_pagination(
+            0,
+            0,
+            0,
+            65534,
+            0,
+            0,
+            1,
+            "가나다라마바사아",
+        )
+        .expect("caption boundary replace");
+    let result: Value = serde_json::from_str(&raw).expect("boundary result json");
+    assert_eq!(result["cellFlowChanged"].as_bool(), Some(true));
+    match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => assert!(
+            table.caption.as_ref().expect("table caption").paragraphs[0]
+                .line_segs
+                .len()
+                > 1,
+            "replacement must cross a line-flow boundary"
+        ),
+        other => panic!("table control expected: {other:?}"),
+    }
+}
+
+#[test]
+fn deferred_cell_replace_preserves_clickhere_range_and_offsets() {
+    let mut doc = create_doc_with_table();
+    let mut legacy = create_doc_with_table();
+    doc.insert_click_here_field_at_in_cell(0, 0, 0, 0, 0, 2, false, "안내", "메모", "이름", true)
+        .expect("insert empty ClickHere");
+    legacy
+        .insert_click_here_field_at_in_cell(0, 0, 0, 0, 0, 2, false, "안내", "메모", "이름", true)
+        .expect("insert legacy empty ClickHere");
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "ㅎ")
+        .expect("seed field composition");
+    legacy
+        .insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "ㅎ")
+        .expect("seed legacy field composition");
+    doc.event_log.clear();
+    legacy.event_log.clear();
+
+    doc.replace_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, 1, "하")
+        .expect("replace field composition");
+    legacy
+        .delete_text_in_cell_native(0, 0, 0, 0, 0, 2, 1)
+        .expect("legacy field composition delete");
+    legacy
+        .insert_text_in_cell_native(0, 0, 0, 0, 0, 2, "하")
+        .expect("legacy field composition insert");
+
+    let para = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => &table.cells[0].paragraphs[0],
+        other => panic!("table control expected: {other:?}"),
+    };
+    let legacy_para = match &legacy.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => &table.cells[0].paragraphs[0],
+        other => panic!("legacy table control expected: {other:?}"),
+    };
+    assert_eq!(para.text, "셀A하");
+    assert_eq!(para.char_offsets, legacy_para.char_offsets);
+    assert_eq!(para.field_ranges.len(), 1);
+    assert_eq!(
+        para.field_ranges[0].control_idx,
+        legacy_para.field_ranges[0].control_idx
+    );
+    assert_eq!(
+        para.field_ranges[0].start_char_idx,
+        legacy_para.field_ranges[0].start_char_idx
+    );
+    assert_eq!(
+        para.field_ranges[0].end_char_idx,
+        legacy_para.field_ranges[0].end_char_idx
+    );
+    assert_eq!(para.field_ranges[0].start_char_idx, 2);
+    assert_eq!(para.field_ranges[0].end_char_idx, 3);
+    assert_eq!(
+        doc.event_log.len(),
+        1,
+        "replace emits only final cell state"
+    );
+    assert_eq!(
+        legacy.event_log.len(),
+        2,
+        "legacy delete+insert exposes two intermediate events"
+    );
+}
+
+#[test]
+fn deferred_cell_replace_rejects_invalid_input_before_mutation() {
+    let mut doc = create_doc_with_table();
+    let before = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.cells[0].paragraphs[0].text.clone(),
+        other => panic!("table control expected: {other:?}"),
+    };
+
+    let result = doc.replace_text_in_cell_native_deferred_pagination(
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        1,
+        "가나다라마바사아자",
+    );
+
+    assert!(
+        result.is_err(),
+        "more than eight replacement chars must fail"
+    );
+    match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => assert_eq!(table.cells[0].paragraphs[0].text, before),
+        other => panic!("table control expected: {other:?}"),
+    }
+}
+
+#[test]
+fn issue2214_deferred_table_caption_reports_flow_change() {
+    use crate::model::shape::{Caption, CaptionDirection};
+
+    fn caption_paragraph(doc: &HwpDocument) -> &Paragraph {
+        match &doc.document.sections[0].paragraphs[0].controls[0] {
+            Control::Table(table) => &table.caption.as_ref().expect("table caption").paragraphs[0],
+            other => panic!("table control expected: {other:?}"),
+        }
+    }
+
+    fn relative_flow(paragraph: &Paragraph) -> Option<i64> {
+        let first = paragraph.line_segs.first()?;
+        let last = paragraph.line_segs.last()?;
+        Some(
+            i64::from(last.vertical_pos)
+                + i64::from(last.line_height)
+                + i64::from(last.line_spacing)
+                - i64::from(first.vertical_pos),
+        )
+    }
+
+    let mut doc = create_doc_with_table();
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => {
+            table.caption = Some(Caption {
+                direction: CaptionDirection::Bottom,
+                width: 2_000,
+                max_width: 2_000,
+                paragraphs: vec![Paragraph {
+                    text: "가".to_string(),
+                    char_count: 1,
+                    char_offsets: make_char_offsets("가"),
+                    line_segs: vec![LineSeg {
+                        line_height: 400,
+                        baseline_distance: 320,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        other => panic!("table control expected: {other:?}"),
+    }
+    doc.reflow_cell_paragraph(0, 0, 0, 65534, 0);
+
+    let mut saw_boundary = false;
+    for inserted in 0..32 {
+        let before = relative_flow(caption_paragraph(&doc));
+        let raw = doc
+            .insert_text_in_cell_native_deferred_pagination(0, 0, 0, 65534, 0, 1 + inserted, "가")
+            .expect("deferred caption insert");
+        let after = relative_flow(caption_paragraph(&doc));
+        let result: Value = serde_json::from_str(&raw).expect("caption edit result json");
+        let reported = result["cellFlowChanged"]
+            .as_bool()
+            .expect("caption flow result");
+        assert_eq!(
+            reported,
+            before != after,
+            "caption input {} flow signal",
+            inserted + 1
+        );
+        if reported {
+            saw_boundary = true;
+            assert!(
+                caption_paragraph(&doc).line_segs.len() > 1,
+                "caption flow boundary must add a line"
+            );
+            break;
+        }
+    }
+    assert!(
+        saw_boundary,
+        "caption deferred input must report a wrapping flow boundary"
+    );
+}
+
+#[test]
+fn issue2424_deferred_pagination_descriptor_tracks_latest_edit_until_flush() {
+    let mut doc = create_doc_with_table();
+    assert!(doc.deferred_pagination_descriptor.is_none());
+
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 1, "x")
+        .expect("first deferred insert");
+    let first = doc
+        .deferred_pagination_descriptor
+        .clone()
+        .expect("first target descriptor");
+    assert_eq!(first.revision, 1);
+    assert_eq!(
+        (
+            first.section_index,
+            first.para_index,
+            first.control_index,
+            first.cell_index,
+            first.cell_para_index,
+        ),
+        (0, 0, 0, 0, 0)
+    );
+    assert_eq!(first.target_first_page, Some(0));
+    assert_ne!(first.table_structure_fingerprint, 0);
+    assert_eq!(
+        doc.deferred_pagination_target_status(&first),
+        crate::document_core::DeferredPaginationTargetStatus::Current
+    );
+
+    // 앞선 입력에서 이미 flow boundary가 있었다고 가정하면 같은 target의 후속 stable
+    // 입력이 descriptor의 pending boundary를 지우면 안 된다.
+    doc.deferred_pagination_descriptor
+        .as_mut()
+        .expect("pending descriptor")
+        .cell_flow_changed = true;
+
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "y")
+        .expect("replacement deferred insert");
+    let second = doc
+        .deferred_pagination_descriptor
+        .as_ref()
+        .expect("replacement target descriptor");
+    assert_eq!(second.revision, 2);
+    assert!(second.cell_flow_changed);
+    assert_eq!(
+        second.table_structure_fingerprint, first.table_structure_fingerprint,
+        "text-only edit must preserve the target table structure"
+    );
+    assert_eq!(
+        doc.deferred_pagination_target_status(&first),
+        crate::document_core::DeferredPaginationTargetStatus::Superseded,
+        "a newer deferred edit must invalidate an older job revision"
+    );
+    let second = second.clone();
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::Current
+    );
+
+    let removed_paragraph = match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.cells[0]
+            .paragraphs
+            .pop()
+            .expect("target cell paragraph"),
+        _ => panic!("target table"),
+    };
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::TargetMissing
+    );
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.cells[0].paragraphs.push(removed_paragraph),
+        _ => panic!("target table"),
+    }
+
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.row_count = table.row_count.saturating_add(1),
+        _ => panic!("target table"),
+    }
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::StructureChanged
+    );
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.row_count = table.row_count.saturating_sub(1),
+        _ => panic!("target table"),
+    }
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::Current
+    );
+
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table.cells[0].paragraphs[0]
+            .controls
+            .push(Control::Bookmark(Default::default())),
+        _ => panic!("target table"),
+    }
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::StructureChanged,
+        "cell paragraph control structure changes must invalidate the descriptor"
+    );
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => {
+            table.cells[0].paragraphs[0].controls.pop();
+        }
+        _ => panic!("target table"),
+    }
+    assert_eq!(
+        doc.deferred_pagination_target_status(&second),
+        crate::document_core::DeferredPaginationTargetStatus::Current
+    );
+
+    let third_raw = doc
+        .insert_text_in_cell_native_deferred_pagination(0, 0, 0, 1, 0, 0, "z")
+        .expect("different target deferred insert");
+    let third_result: Value = serde_json::from_str(&third_raw).expect("different target result");
+    let third = doc
+        .deferred_pagination_descriptor
+        .as_ref()
+        .expect("different target descriptor");
+    assert_eq!(third.revision, 3);
+    assert_eq!(third.cell_index, 1);
+    assert_eq!(
+        third.cell_flow_changed,
+        third_result["cellFlowChanged"].as_bool().unwrap(),
+        "a different target must not inherit the previous flow signal"
+    );
+
+    doc.flush_deferred_pagination().expect("full flush");
+    assert!(
+        doc.deferred_pagination_descriptor.is_none(),
+        "successful full pagination must consume the pending descriptor"
+    );
+}
+
+#[test]
+fn issue2308_deferred_cell_edit_uses_path_revision_without_section_invalidation() {
+    use crate::renderer::render_normalization::RenderPathEntry;
+
+    let mut doc = create_doc_with_table();
+    let section_revision_before = doc.render_normalization.section_revisions[0];
+
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 1, "가")
+        .expect("deferred table-cell insert");
+
+    assert_eq!(
+        doc.render_normalization.section_revisions[0], section_revision_before,
+        "a structure-stable cell edit must not invalidate the section projection"
+    );
+    let revision = doc
+        .render_normalization
+        .path_revisions
+        .iter()
+        .find_map(|(path, revision)| match path.entries.as_slice() {
+            [RenderPathEntry::TableCell {
+                control_index: 0,
+                cell_index: 0,
+                paragraph_index: 0,
+            }] => Some(*revision),
+            _ => None,
+        });
+    assert_eq!(revision, Some(1), "the edited logical path revision");
+}
+
+#[test]
+fn issue2308_immediate_edit_rederives_existing_compat_projection() {
+    use crate::model::image::Picture;
+    use crate::model::shape::{CommonObjAttr, TextWrap};
+
+    fn floating_picture() -> Control {
+        Control::Picture(Box::new(Picture {
+            common: CommonObjAttr {
+                height: 50_000,
+                text_wrap: TextWrap::Square,
+                allow_overlap: false,
+                treat_as_char: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+    }
+
+    let mut doc = create_doc_with_table();
+    let Control::Table(table) = &mut doc.document.sections[0].paragraphs[0].controls[0] else {
+        panic!("table control");
+    };
+    table.cells[0].paragraphs[0] = Paragraph {
+        controls: vec![floating_picture(), floating_picture()],
+        line_segs: vec![LineSeg {
+            line_height: 400,
+            baseline_distance: 320,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let document = doc.document.clone();
+    doc.set_document(document);
+    assert!(
+        doc.render_normalization.sections[0].is_some(),
+        "the synthetic cell image stack must create a #2004 compatibility projection"
+    );
+    let revision_before = doc.render_normalization.section_revisions[0];
+
+    doc.insert_text_in_cell_native(0, 0, 0, 0, 0, 0, "x")
+        .expect("immediate edit in a projected cell");
+
+    assert_ne!(
+        doc.render_normalization.section_revisions[0], revision_before,
+        "an existing compatibility projection must be invalidated"
+    );
+    assert!(
+        doc.render_normalization.sections[0].is_none(),
+        "visible source text removes the stack gate, so no stale projection may survive"
+    );
+}
+
+#[test]
+fn issue2214_invalid_shape_cell_index_does_not_mutate_text() {
+    let mut doc = HwpDocument::create_empty();
+    let inserted = doc
+        .create_shape_control_native(
+            0,
+            0,
+            0,
+            21_600,
+            7_200,
+            0,
+            0,
+            true,
+            "TopAndBottom",
+            "textbox",
+            false,
+            false,
+            &[],
+        )
+        .expect("create textbox shape");
+    let inserted: Value = serde_json::from_str(&inserted).expect("shape result json");
+    let para_idx = inserted["paraIdx"].as_u64().expect("shape paraIdx") as usize;
+    let control_idx = inserted["controlIdx"].as_u64().expect("shape controlIdx") as usize;
+    let before = doc
+        .get_cell_paragraph_ref(0, para_idx, control_idx, 0, 0)
+        .expect("textbox paragraph")
+        .text
+        .clone();
+
+    let result =
+        doc.insert_text_in_cell_native_deferred_pagination(0, para_idx, control_idx, 1, 0, 0, "x");
+
+    assert!(result.is_err(), "nonzero Shape cell index must fail");
+    assert_eq!(
+        doc.get_cell_paragraph_ref(0, para_idx, control_idx, 0, 0)
+            .expect("textbox paragraph after invalid call")
+            .text,
+        before,
+        "invalid Shape cell index must fail before mutation"
+    );
 }
 
 #[test]
@@ -498,6 +2762,112 @@ fn test_delete_text_in_cell() {
         assert_eq!(table.cells[1].paragraphs[0].text, "B");
     } else {
         panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+#[test]
+fn test_table_transpose_clipboard_native_api() {
+    let mut doc = create_doc_with_table();
+    assert!(!doc.has_table_transpose_clipboard_native());
+
+    let copy = doc
+        .copy_table_cells_transposed_native(0, 0, 0, 0, 0, 1, 1)
+        .unwrap();
+    let copy_json: Value = serde_json::from_str(&copy).unwrap();
+    assert_eq!(copy_json["ok"], true);
+    assert_eq!(copy_json["sourceRows"], 2);
+    assert_eq!(copy_json["sourceCols"], 2);
+    assert!(doc.has_table_transpose_clipboard_native());
+
+    let paste = doc
+        .paste_table_cells_transposed_native(0, 0, 0, 0, 0)
+        .unwrap();
+    let paste_json: Value = serde_json::from_str(&paste).unwrap();
+    assert_eq!(paste_json["ok"], true);
+    assert_eq!(paste_json["targetRows"], 2);
+    assert_eq!(paste_json["targetCols"], 2);
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert_eq!(table.cells[0].paragraphs[0].text, "셀A");
+        assert_eq!(table.cells[1].paragraphs[0].text, "셀C");
+        assert_eq!(table.cells[2].paragraphs[0].text, "셀B");
+        assert_eq!(table.cells[3].paragraphs[0].text, "셀D");
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+    assert!(matches!(
+        doc.event_log.last(),
+        Some(crate::model::event::DocumentEvent::TableCellsTransposed {
+            section: 0,
+            para: 0,
+            ctrl: 0,
+        })
+    ));
+}
+
+#[test]
+fn test_table_transpose_in_place_native_api() {
+    let mut doc = create_doc_with_table();
+
+    let result = doc.transpose_table_cells_in_place_native(0, 0, 0).unwrap();
+    let json: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["sourceRows"], 2);
+    assert_eq!(json["sourceCols"], 2);
+    assert_eq!(json["targetRows"], 2);
+    assert_eq!(json["targetCols"], 2);
+
+    assert_eq!(doc.document.sections[0].paragraphs.len(), 1);
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert_eq!(table.row_count, 2);
+        assert_eq!(table.col_count, 2);
+        assert_eq!(table.cells[0].paragraphs[0].text, "셀A");
+        assert_eq!(table.cells[1].paragraphs[0].text, "셀C");
+        assert_eq!(table.cells[2].paragraphs[0].text, "셀B");
+        assert_eq!(table.cells[3].paragraphs[0].text, "셀D");
+    } else {
+        panic!("행/열이 바뀐 기존 표 컨트롤을 찾을 수 없음");
+    }
+}
+
+#[test]
+fn test_table_transpose_paste_as_new_table_native_api() {
+    let mut doc = create_doc_with_table();
+    doc.copy_table_cells_transposed_native(0, 0, 0, 0, 0, 1, 1)
+        .unwrap();
+
+    let paste = doc
+        .paste_table_cells_transposed_as_new_table_native(0, 0, 0)
+        .unwrap();
+    let paste_json: Value = serde_json::from_str(&paste).unwrap();
+    assert_eq!(paste_json["ok"], true);
+    assert_eq!(paste_json["paraIdx"], 1);
+    assert_eq!(paste_json["controlIdx"], 0);
+    assert_eq!(paste_json["targetRows"], 2);
+    assert_eq!(paste_json["targetCols"], 2);
+
+    if let Some(Control::Table(source_table)) =
+        doc.document.sections[0].paragraphs[0].controls.first()
+    {
+        assert_eq!(source_table.cells[0].paragraphs[0].text, "셀A");
+        assert_eq!(source_table.cells[1].paragraphs[0].text, "셀B");
+        assert_eq!(source_table.cells[2].paragraphs[0].text, "셀C");
+        assert_eq!(source_table.cells[3].paragraphs[0].text, "셀D");
+    } else {
+        panic!("원본 표 컨트롤을 찾을 수 없음");
+    }
+
+    if let Some(Control::Table(target_table)) =
+        doc.document.sections[0].paragraphs[1].controls.first()
+    {
+        assert_eq!(target_table.row_count, 2);
+        assert_eq!(target_table.col_count, 2);
+        assert_eq!(target_table.cells[0].paragraphs[0].text, "셀A");
+        assert_eq!(target_table.cells[1].paragraphs[0].text, "셀C");
+        assert_eq!(target_table.cells[2].paragraphs[0].text, "셀B");
+        assert_eq!(target_table.cells[3].paragraphs[0].text, "셀D");
+    } else {
+        panic!("행/열 바꿈 붙여넣기 표 컨트롤을 찾을 수 없음");
     }
 }
 
@@ -667,6 +3037,159 @@ fn test_merge_table_cells() {
     }
 }
 
+/// [merge stale local-resize] 병합으로 셀 배열 인덱스가 바뀌면
+/// local_resize_cell_widths의 cell 인덱스 참조가 stale 해진다.
+///
+/// 2×2 표에서 셀 3(row=1,col=1)에 로컬 resize 폭을 저장해 둔 뒤 (0,0)~(0,1)을 병합하면
+/// Table::merge_cells()가 비주 셀 하나를 retain()으로 제거해 cells.len()이 4→3으로
+/// 줄어든다. local_resize_cell_widths가 갱신되지 않으면 이제 존재하지 않는 인덱스 3을
+/// 계속 가리켜, 이 값을 cells[idx]로 읽는 렌더링/직렬화 경로가 범위를 벗어나거나
+/// 병합 후 엉뚱한 셀에 로컬 resize 폭을 적용하게 된다.
+#[test]
+fn test_merge_table_cells_clears_stale_local_resize_widths() {
+    let mut doc = create_doc_with_table();
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first_mut()
+    {
+        // 병합 전: 셀 인덱스 3(row=1,col=1)에 로컬 resize 폭 저장.
+        table.local_resize_cell_widths.push((3, 1234));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    // (0,0)~(0,1) 병합 — 비주 셀 하나 제거, cells.len() 4→3.
+    doc.merge_table_cells_native(0, 0, 0, 0, 0, 0, 1).unwrap();
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert_eq!(
+            table.cells.len(),
+            3,
+            "병합으로 비주 셀 하나가 제거돼야 함(전제 확인)"
+        );
+        assert!(
+            table.local_resize_cell_widths.is_empty(),
+            "병합 후 셀 인덱스가 재배치되므로 local_resize_cell_widths의 stale 참조(인덱스 3)가 \
+             비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+/// [delete_row stale local-resize] 행 삭제로 셀 배열 인덱스가 바뀌면
+/// local_resize_cell_heights의 cell 인덱스 참조가 stale 해진다.
+///
+/// 3×2 표(row 0,1,2 × col 0,1)에서 셀 인덱스 2(row=1,col=0)에 로컬 resize 높이를
+/// 저장해 둔 뒤 row 0을 삭제하면 Table::delete_row()가 row 0의 셀 2개를 retain()으로
+/// 제거해 cells.len()이 6→4로 줄고, 남은 셀을 sort_by_key(row, col)로 재정렬한다.
+/// local_resize_cell_heights가 갱신되지 않으면 이제 존재하지 않거나(범위 초과) 엉뚱한
+/// 셀을 가리키는 stale 참조가 남아, 이 값을 cells[idx]로 읽는 렌더링/직렬화 경로가
+/// 패닉하거나 삭제 후 남은 엉뚱한 셀에 잘못된 로컬 resize 높이를 적용하게 된다.
+#[test]
+fn test_delete_table_row_clears_stale_local_resize_heights() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc.create_table_native(0, 0, 0, 3, 2).expect("3x2 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first_mut()
+    {
+        // 삭제 전: 셀 인덱스 2(row=1,col=0)에 로컬 resize 높이 저장.
+        table.local_resize_cell_heights.push((2, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    // row 0 삭제 — 셀 2개 제거, cells.len() 6→4.
+    doc.delete_table_row_native(0, table_para_idx, 0, 0)
+        .expect("행 삭제");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first()
+    {
+        assert_eq!(
+            table.cells.len(),
+            4,
+            "행 삭제로 셀 2개가 제거돼야 함(전제 확인)"
+        );
+        assert!(
+            table.local_resize_cell_heights.is_empty(),
+            "행 삭제 후 셀 인덱스가 재배치되므로 local_resize_cell_heights의 stale 참조(인덱스 2)가 \
+             비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+/// [insert_row/insert_column stale local-resize] 행/열 삽입으로 셀 배열 인덱스가
+/// 바뀌면 local_resize_cell_widths/heights의 cell 인덱스 참조가 stale 해진다.
+///
+/// Table::insert_row()/insert_column()은 새 셀을 push()한 뒤 sort_by_key(row, col)로
+/// 전체 셀 배열을 재정렬한다(delete_row가 retain()+정렬로 stale을 만드는 것과 같은
+/// 근본 원인). 3×2 표에서 셀 인덱스 2에 로컬 resize 값을 저장해 둔 뒤 행을 삽입하면
+/// 재정렬로 인덱스 2가 더 이상 같은 셀을 가리키지 않으므로, 이 값을 cells[idx]로
+/// 읽는 렌더링/직렬화 경로가 엉뚱한 셀에 잘못된 로컬 resize 값을 적용하게 된다.
+/// 열 삽입도 동일 원인으로 같은 결과를 낳는다.
+#[test]
+fn test_insert_table_row_and_column_clear_stale_local_resize() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc.create_table_native(0, 0, 0, 3, 2).expect("3x2 표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first_mut()
+    {
+        table.local_resize_cell_widths.push((2, 1234));
+        table.local_resize_cell_heights.push((2, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    doc.insert_table_row_native(0, table_para_idx, 0, 0, true)
+        .expect("행 삽입");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first()
+    {
+        assert!(
+            table.local_resize_cell_widths.is_empty() && table.local_resize_cell_heights.is_empty(),
+            "행 삽입 후 셀 인덱스가 재배치되므로 local_resize_cell_widths/heights의 \
+             stale 참조(인덱스 2)가 비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first_mut()
+    {
+        table.local_resize_cell_widths.push((2, 1234));
+        table.local_resize_cell_heights.push((2, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    doc.insert_table_column_native(0, table_para_idx, 0, 0, true)
+        .expect("열 삽입");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[table_para_idx]
+        .controls
+        .first()
+    {
+        assert!(
+            table.local_resize_cell_widths.is_empty() && table.local_resize_cell_heights.is_empty(),
+            "열 삽입 후에도 local_resize_cell_widths/heights의 stale 참조가 비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
 #[test]
 fn test_split_table_cell() {
     let mut doc = create_doc_with_table();
@@ -687,6 +3210,81 @@ fn test_split_table_cell() {
         let cell = &table.cells[0];
         assert_eq!(cell.col_span, 1);
         assert_eq!(cell.row_span, 1);
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+/// [delete_table_column/split_table_cell stale local-resize] #2832/#2843/#2853과
+/// 동일한 버그 클래스의 마지막 두 인스턴스. Table::delete_column()/split_cell()이
+/// cells 배열의 인덱스 배치를 바꾸므로, local_resize_cell_widths/heights가 물고 있던
+/// 이전 cell_idx는 정리되지 않으면 stale 참조로 남는다.
+#[test]
+fn test_delete_table_column_and_split_cell_clear_stale_local_resize() {
+    let mut doc = create_doc_with_table();
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first_mut()
+    {
+        table.local_resize_cell_widths.push((1, 1234));
+        table.local_resize_cell_heights.push((1, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+    doc.delete_table_column_native(0, 0, 0, 0).expect("열 삭제");
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert!(
+            table.local_resize_cell_widths.is_empty() && table.local_resize_cell_heights.is_empty(),
+            "열 삭제 후 local_resize_cell_widths/heights의 stale 참조가 비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first_mut()
+    {
+        table.local_resize_cell_widths.push((0, 1234));
+        table.local_resize_cell_heights.push((0, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+    doc.merge_table_cells_native(0, 0, 0, 0, 0, 1, 0)
+        .expect("병합");
+    doc.split_table_cell_native(0, 0, 0, 0, 0).expect("분할");
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert!(
+            table.local_resize_cell_widths.is_empty() && table.local_resize_cell_heights.is_empty(),
+            "셀 분할 후 local_resize_cell_widths/heights의 stale 참조가 비워져야 한다"
+        );
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+}
+
+/// [split_table_cells_in_range stale local-resize] split_table_cell_native/
+/// split_table_cell_into_native와 동일하게 split_table_cells_in_range_native도
+/// Table::split_cells_in_range()가 내부적으로 split_cell_into()를 반복 호출해
+/// cells 배열의 인덱스 배치를 바꾼다. 그런데 이 커맨드만 local_resize_cell_widths/
+/// heights를 비우지 않아 stale 참조가 남는다.
+#[test]
+fn test_split_table_cells_in_range_clears_stale_local_resize() {
+    let mut doc = create_doc_with_table();
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first_mut()
+    {
+        table.local_resize_cell_widths.push((1, 1234));
+        table.local_resize_cell_heights.push((1, 5678));
+    } else {
+        panic!("표 컨트롤을 찾을 수 없음");
+    }
+
+    doc.split_table_cells_in_range_native(0, 0, 0, 0, 0, 1, 1, 2, 2, false)
+        .expect("범위 분할");
+
+    if let Some(Control::Table(table)) = doc.document.sections[0].paragraphs[0].controls.first() {
+        assert!(
+            table.local_resize_cell_widths.is_empty() && table.local_resize_cell_heights.is_empty(),
+            "범위 분할 후 local_resize_cell_widths/heights의 stale 참조가 비워져야 한다"
+        );
     } else {
         panic!("표 컨트롤을 찾을 수 없음");
     }
@@ -1851,7 +4449,7 @@ fn test_web_saved_vs_original_detailed() {
         let saved_bc = saved_doc.bin_data_content.iter().find(|c| c.id == bc.id);
         match saved_bc {
             Some(sbc) => {
-                if bc.data.len() == sbc.data.len() && bc.data == sbc.data {
+                if bc.data.len() == sbc.data.len() && bc.data.load() == sbc.data.load() {
                     eprintln!(
                         "  ID {}: 동일 ({}B, ext={})",
                         bc.id,
@@ -2121,6 +4719,351 @@ fn test_paste_inline_picture_no_cascade() {
         offs,
         vec![1000, 1000, 1000],
         "inline 그림에 cascade 적용됨: {offs:?}"
+    );
+}
+
+/// 섹션 0에서 첫 번째 표 컨트롤의 (para_idx, ctrl_idx)를 찾는다.
+fn find_table_pos(doc: &HwpDocument) -> (usize, usize) {
+    use crate::model::control::Control;
+    for (pi, p) in doc.document.sections[0].paragraphs.iter().enumerate() {
+        for (ci, c) in p.controls.iter().enumerate() {
+            if matches!(c, Control::Table(_)) {
+                return (pi, ci);
+            }
+        }
+    }
+    panic!("표 컨트롤 없음");
+}
+
+/// #1323: 표 셀 안 이미지 붙여넣기 — merge_from 컨트롤 병합으로 그림·CTRL_DATA가
+/// 보존되어야 한다. 수정 전에는 에러 없이 조용히 누락되었다.
+#[test]
+fn test_paste_picture_into_table_cell() {
+    use crate::model::control::Control;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    // CTRL_DATA 인덱스 정렬 검증용 레코드 부여
+    doc.document.sections[0].paragraphs[0].ctrl_data_records = vec![Some(vec![7, 7, 7])];
+    doc.copy_control_native(0, 0, &[], 0).expect("그림 복사");
+
+    doc.create_table_ex_native(0, 1, 0, 2, 2, true, None, None)
+        .expect("표 생성");
+    let (t_para, t_ctrl) = find_table_pos(&doc);
+
+    doc.paste_internal_in_cell_native(0, t_para, t_ctrl, 0, 0, 0)
+        .expect("셀에 그림 붙여넣기");
+
+    let table = match &doc.document.sections[0].paragraphs[t_para].controls[t_ctrl] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    let mut found = None;
+    for p in &table.cells[0].paragraphs {
+        for (i, c) in p.controls.iter().enumerate() {
+            if matches!(c, Control::Picture(_)) {
+                found = Some((p, i));
+            }
+        }
+    }
+    let (cell_para, pic_idx) = found.expect("셀 안에 그림 컨트롤이 보존되어야 한다 (#1323)");
+    assert_eq!(
+        cell_para.ctrl_data_records.get(pic_idx).cloned().flatten(),
+        Some(vec![7, 7, 7]),
+        "CTRL_DATA가 controls 인덱스 정렬을 유지한 채 보존되어야 한다"
+    );
+}
+
+/// #1323: path 기반 셀 붙여넣기(paste_internal_in_cell_by_path)도 동일하게 그림을 보존한다.
+#[test]
+fn test_paste_picture_into_cell_by_path() {
+    use crate::model::control::Control;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    doc.copy_control_native(0, 0, &[], 0).expect("그림 복사");
+
+    doc.create_table_ex_native(0, 1, 0, 2, 2, true, None, None)
+        .expect("표 생성");
+    let (t_para, t_ctrl) = find_table_pos(&doc);
+
+    // path = [(ctrl_idx, cell_idx, cell_para_idx)] — 셀 1의 문단 0에 붙여넣기
+    doc.paste_internal_in_cell_by_path_native(0, t_para, &[(t_ctrl, 1, 0)], 0)
+        .expect("path 기반 셀 붙여넣기");
+
+    let table = match &doc.document.sections[0].paragraphs[t_para].controls[t_ctrl] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    let pic_count: usize = table.cells[1]
+        .paragraphs
+        .iter()
+        .map(|p| {
+            p.controls
+                .iter()
+                .filter(|c| matches!(c, Control::Picture(_)))
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        pic_count, 1,
+        "path 기반 붙여넣기에서도 그림 컨트롤이 보존되어야 한다 (#1323)"
+    );
+}
+
+/// #1323: 그림 캡션 안 붙여넣기(Control::Picture 분기)도 컨트롤을 보존한다.
+#[test]
+fn test_paste_picture_into_picture_caption() {
+    use crate::model::control::Control;
+    use crate::model::shape::Caption;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    doc.copy_control_native(0, 0, &[], 0).expect("그림 복사");
+
+    // 본문 그림에 캡션 부여
+    match &mut doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Picture(p) => {
+            p.caption = Some(Caption {
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            });
+        }
+        other => panic!("그림이 아님: {other:?}"),
+    }
+
+    doc.paste_internal_in_cell_native(0, 0, 0, 0, 0, 0)
+        .expect("캡션에 그림 붙여넣기");
+
+    let caption = match &doc.document.sections[0].paragraphs[0].controls[0] {
+        Control::Picture(p) => p.caption.as_ref().expect("캡션 존재"),
+        other => panic!("그림이 아님: {other:?}"),
+    };
+    let pic_count: usize = caption
+        .paragraphs
+        .iter()
+        .map(|p| {
+            p.controls
+                .iter()
+                .filter(|c| matches!(c, Control::Picture(_)))
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        pic_count, 1,
+        "캡션 안에 붙여넣은 그림 컨트롤이 보존되어야 한다 (#1323)"
+    );
+}
+
+/// #1323 부수 해소: 본문 문단 시작 Backspace 병합 시 병합 대상 문단의 컨트롤이
+/// 보존되어야 한다 (수정 전에는 merge_from이 controls를 드롭).
+#[test]
+fn test_merge_paragraph_preserves_controls() {
+    use crate::model::control::Control;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    // 문단 1에 텍스트 입력 후 문단 0(그림 문단)으로 병합
+    doc.insert_text_native(0, 1, 0, "가나")
+        .expect("텍스트 입력");
+    doc.merge_paragraph_native(0, 1).expect("문단 병합");
+
+    let para = &doc.document.sections[0].paragraphs[0];
+    assert_eq!(para.text, "가나");
+    assert_eq!(
+        para.controls
+            .iter()
+            .filter(|c| matches!(c, Control::Picture(_)))
+            .count(),
+        1,
+        "백스페이스 병합 시 그림 컨트롤이 보존되어야 한다 (#1323)"
+    );
+    assert_eq!(
+        para.control_text_positions(),
+        vec![0],
+        "그림은 병합된 텍스트 앞 위치를 유지해야 한다"
+    );
+}
+
+/// #1323 부수 해소: 셀 문단 시작 Backspace 병합(merge_paragraph_in_cell) 시
+/// 병합 대상 셀 문단의 컨트롤이 보존되어야 한다.
+#[test]
+fn test_merge_paragraph_in_cell_preserves_controls() {
+    use crate::model::control::Control;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    doc.create_table_ex_native(0, 1, 0, 2, 2, true, None, None)
+        .expect("표 생성");
+    let (t_para, t_ctrl) = find_table_pos(&doc);
+
+    // 셀 0에 그림 문단을 두 번째 문단으로 구성
+    let pic_para = doc.document.sections[0].paragraphs[0].clone();
+    match &mut doc.document.sections[0].paragraphs[t_para].controls[t_ctrl] {
+        Control::Table(t) => t.cells[0].paragraphs.push(pic_para),
+        other => panic!("표가 아님: {other:?}"),
+    }
+
+    doc.merge_paragraph_in_cell_native(0, t_para, t_ctrl, 0, 1)
+        .expect("셀 문단 병합");
+
+    let table = match &doc.document.sections[0].paragraphs[t_para].controls[t_ctrl] {
+        Control::Table(t) => t,
+        other => panic!("표가 아님: {other:?}"),
+    };
+    assert_eq!(
+        table.cells[0].paragraphs.len(),
+        1,
+        "셀 문단이 병합되어야 한다"
+    );
+    assert_eq!(
+        table.cells[0].paragraphs[0]
+            .controls
+            .iter()
+            .filter(|c| matches!(c, Control::Picture(_)))
+            .count(),
+        1,
+        "셀 백스페이스 병합 시 그림 컨트롤이 보존되어야 한다 (#1323)"
+    );
+}
+
+/// #1323: 셀에 그림을 붙여넣은 문서가 HWP5 직렬화 → 재파싱 후에도 그림을 보존한다.
+/// (char_count 역산·char_offsets 갭 인코딩이 직렬화 계약과 정합함을 검증)
+#[test]
+fn test_paste_picture_into_table_cell_hwp5_roundtrip() {
+    use crate::model::control::Control;
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    doc.copy_control_native(0, 0, &[], 0).expect("그림 복사");
+    doc.create_table_ex_native(0, 1, 0, 2, 2, true, None, None)
+        .expect("표 생성");
+    let (t_para, t_ctrl) = find_table_pos(&doc);
+    doc.paste_internal_in_cell_native(0, t_para, t_ctrl, 0, 0, 0)
+        .expect("셀에 그림 붙여넣기");
+
+    let bytes = doc.export_hwp_native().expect("HWP5 직렬화");
+    let doc2 = HwpDocument::from_bytes(&bytes).expect("재파싱");
+
+    let mut found = false;
+    for p in &doc2.document.sections[0].paragraphs {
+        for c in &p.controls {
+            if let Control::Table(t) = c {
+                for cell_para in t.cells.iter().flat_map(|cl| cl.paragraphs.iter()) {
+                    if cell_para
+                        .controls
+                        .iter()
+                        .any(|cc| matches!(cc, Control::Picture(_)))
+                    {
+                        found = true;
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        found,
+        "HWP5 round-trip 후에도 셀 안 그림 컨트롤이 보존되어야 한다 (#1323)"
+    );
+}
+
+/// #1323 시각 검증 보조: 표 셀/글상자에 붙여넣은 그림이 SVG 렌더링에 실제
+/// `<image>` 요소로 나타나는지 검증한다. BinData를 실제 등록(insert_picture)하여
+/// 렌더러가 data URI 이미지를 방출하는 경로를 그대로 사용한다.
+#[test]
+fn test_paste_picture_into_cell_and_textbox_renders_in_svg() {
+    fn minimal_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+    fn parse_idx(res: &str, key: &str) -> usize {
+        res.split(&format!("\"{}\":", key))
+            .nth(1)
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("missing {key} in {res}"))
+    }
+    fn count_images(svg: &str) -> usize {
+        svg.matches("<image").count()
+    }
+
+    let mut doc = create_doc_with_floating_picture(true, 0, 0);
+    // 헬퍼의 기본 그림은 BinData가 없으므로 실제 그림을 별도 삽입해 사용한다
+    let res = doc
+        .insert_picture_native(
+            0,
+            1,
+            0,
+            &[],
+            &minimal_png(),
+            5000,
+            5000,
+            1,
+            1,
+            "png",
+            "",
+            None,
+            None,
+        )
+        .expect("본문 그림 삽입");
+    let pic_para = parse_idx(&res, "paraIdx");
+    let pic_ctrl = parse_idx(&res, "controlIdx");
+
+    let svg_before = doc.render_page_svg_native(0).expect("기준 SVG 렌더");
+    let base = count_images(&svg_before);
+    assert!(base >= 1, "본문 그림이 SVG에 렌더되어야 한다: {base}");
+
+    doc.copy_control_native(0, pic_para, &[], pic_ctrl)
+        .expect("그림 복사");
+
+    // 표 셀에 붙여넣기 → <image> 1개 증가
+    // (기존 문단은 모두 그림 컨트롤을 보유하므로 표 전용 빈 문단을 추가)
+    doc.document.sections[0]
+        .paragraphs
+        .push(Paragraph::default());
+    let empty_para = doc.document.sections[0].paragraphs.len() - 1;
+    doc.create_table_ex_native(0, empty_para, 0, 2, 2, true, None, None)
+        .expect("표 생성");
+    let (t_para, t_ctrl) = find_table_pos(&doc);
+    doc.paste_internal_in_cell_native(0, t_para, t_ctrl, 0, 0, 0)
+        .expect("셀에 그림 붙여넣기");
+
+    let svg_cell = doc.render_page_svg_native(0).expect("셀 paste 후 SVG 렌더");
+    assert_eq!(
+        count_images(&svg_cell),
+        base + 1,
+        "셀에 붙여넣은 그림이 SVG에 렌더되어야 한다 (#1323)"
+    );
+
+    // 글상자에 붙여넣기 → <image> 1개 더 증가
+    let tb_res = doc
+        .create_shape_control_native(
+            0,
+            t_para,
+            0,
+            21600,
+            7200,
+            0,
+            0,
+            true,
+            "TopAndBottom",
+            "textbox",
+            false,
+            false,
+            &[],
+        )
+        .expect("글상자 생성");
+    let tb_para = parse_idx(&tb_res, "paraIdx");
+    let tb_ctrl = parse_idx(&tb_res, "controlIdx");
+    doc.paste_internal_in_cell_native(0, tb_para, tb_ctrl, 0, 0, 0)
+        .expect("글상자에 그림 붙여넣기");
+
+    let svg_tb = doc
+        .render_page_svg_native(0)
+        .expect("글상자 paste 후 SVG 렌더");
+    assert_eq!(
+        count_images(&svg_tb),
+        base + 2,
+        "글상자에 붙여넣은 그림이 SVG에 렌더되어야 한다 (#1323)"
     );
 }
 
@@ -2878,6 +5821,12 @@ fn test_table_utility_functions() {
     assert_eq!(w2, 0.0);
     assert_eq!(s2, 0);
 
+    // rgb() 내부에 공백이 있어도 색상 토큰이 쪼개지지 않아야 한다.
+    let (w3, c3, s3) = super::parse_css_border_shorthand("1px solid rgb(255, 0, 0)");
+    assert!((w3 - 0.75).abs() < 0.01, "border width 1px -> 0.75pt");
+    assert_eq!(c3, 0x0000FF, "border color red (BGR)");
+    assert_eq!(s3, 1, "border style solid");
+
     // css_border_width_to_hwp
     assert_eq!(super::css_border_width_to_hwp(0.28), 0); // 0.28pt ≈ 0.1mm → index 0
     assert!(super::css_border_width_to_hwp(1.0) >= 5); // 1.0pt ≈ 0.35mm → index 5+
@@ -2888,6 +5837,46 @@ fn test_table_utility_functions() {
         Some(3)
     );
     assert_eq!(super::parse_html_attr_u16(r#"<td>"#, "colspan"), None);
+}
+
+#[test]
+fn test_css_color_rgba_and_border_width_keywords() {
+    // rgba() 색상: 브라우저는 반투명/알파 포함 색을 rgba(r, g, b, a)로 직렬화한다.
+    assert_eq!(
+        super::css_color_to_hwp_bgr("rgba(255, 0, 0, 1)"),
+        Some(0x0000FF),
+        "rgba() 불투명 빨강 → BGR"
+    );
+    assert_eq!(
+        super::css_color_to_hwp_bgr("rgba(0, 128, 255, 0.5)"),
+        Some(0xFF8000),
+        "rgba() 반투명 색도 RGB 성분은 파싱되어야 함"
+    );
+    // 완전 투명(alpha=0)은 색 없음으로 처리
+    assert_eq!(
+        super::css_color_to_hwp_bgr("rgba(255, 0, 0, 0)"),
+        None,
+        "rgba() alpha=0 → 색 없음"
+    );
+
+    // border 축약형의 rgba() 색상
+    let (w, c, s) = super::parse_css_border_shorthand("1px solid rgba(255, 0, 0, 1)");
+    assert!((w - 0.75).abs() < 0.01, "border width 1px -> 0.75pt");
+    assert_eq!(c, 0x0000FF, "border rgba() 색상 빨강 (BGR)");
+    assert_eq!(s, 1, "border style solid");
+
+    // CSS 표준 border-width 키워드: thin(1px)/medium(3px)/thick(5px)
+    // 키워드를 인식하지 못하면 width 0 → 테두리 전체가 소실된다.
+    let (w_thin, _, s_thin) = super::parse_css_border_shorthand("thin solid #000000");
+    assert!((w_thin - 0.75).abs() < 0.01, "thin = 1px = 0.75pt");
+    assert_eq!(s_thin, 1);
+
+    let (w_med, c_med, _) = super::parse_css_border_shorthand("medium solid #ff0000");
+    assert!((w_med - 2.25).abs() < 0.01, "medium = 3px = 2.25pt");
+    assert_eq!(c_med, 0x0000FF);
+
+    let (w_thick, _, _) = super::parse_css_border_shorthand("thick solid #000000");
+    assert!((w_thick - 3.75).abs() < 0.01, "thick = 5px = 3.75pt");
 }
 
 #[test]
@@ -12571,7 +15560,9 @@ fn test_save_table_1x1() {
     };
 
     // DocInfo에 실선 테두리 BorderFill 추가 (참조: bf[0])
-    use crate::model::style::{BorderFill, BorderLine, BorderLineType, DiagonalLine, Fill};
+    use crate::model::style::{
+        BorderFill, BorderLine, BorderLineType, CenterLine, DiagonalLine, Fill,
+    };
     let solid_border = BorderLine {
         line_type: BorderLineType::Solid,
         width: 1,
@@ -12586,7 +15577,9 @@ fn test_save_table_1x1() {
             width: 0,
             color: 0,
         },
+        center_line: CenterLine::None,
         fill: Fill::default(),
+        three_d: false,
     };
     doc.document.doc_info.border_fills.push(new_bf);
     let table_bf_id = doc.document.doc_info.border_fills.len() as u16; // 1-based ID
@@ -13045,7 +16038,7 @@ fn test_analyze_reference_picture() {
             bc.data.len()
         );
         if bc.data.len() >= 8 {
-            let sig = &bc.data[..8];
+            let sig = &bc.data.load()[..8];
             let format = if sig[0..2] == [0xFF, 0xD8] {
                 "JPEG"
             } else if sig[0..4] == [0x89, 0x50, 0x4E, 0x47] {
@@ -13364,7 +16357,11 @@ fn test_save_picture() {
         border_opacity: ref_pic.border_opacity,
         instance_id: ref_pic.instance_id,
         raw_picture_extra: ref_pic.raw_picture_extra.clone(),
+        effects: ref_pic.effects.clone(),
         caption: None,
+        img_dim: (0, 0),
+        reverse: ref_pic.reverse,
+        lock: false,
     };
 
     // 5. 문단 구성 (참조 파일: 단일 문단에 SectionDef + ColumnDef + Picture)
@@ -14509,7 +17506,9 @@ fn test_save_pic_in_table() {
     });
 
     // 4. DocInfo에 BorderFill 추가 (표 테두리용)
-    use crate::model::style::{BorderFill, BorderLine, BorderLineType, DiagonalLine, Fill};
+    use crate::model::style::{
+        BorderFill, BorderLine, BorderLineType, CenterLine, DiagonalLine, Fill,
+    };
     let solid_border = BorderLine {
         line_type: BorderLineType::Solid,
         width: 1,
@@ -14524,7 +17523,9 @@ fn test_save_pic_in_table() {
             width: 0,
             color: 0,
         },
+        center_line: CenterLine::None,
         fill: Fill::default(),
+        three_d: false,
     };
     doc.document.doc_info.border_fills.push(new_bf);
     let table_bf_id = doc.document.doc_info.border_fills.len() as u16;
@@ -14550,7 +17551,11 @@ fn test_save_pic_in_table() {
         border_opacity: ref_pic.border_opacity,
         instance_id: ref_pic.instance_id,
         raw_picture_extra: ref_pic.raw_picture_extra.clone(),
+        effects: ref_pic.effects.clone(),
         caption: None,
+        img_dim: (0, 0),
+        reverse: ref_pic.reverse,
+        lock: false,
     };
 
     // 6. 셀 내부 문단 구성 (cc=9: gso(8)+CR(1), mask=0x00000800)
@@ -15831,7 +18836,7 @@ fn test_diag_double_enter_save() {
     let split_offset = 4; // 4번째 글자 뒤에서 분할 (사용자 시나리오)
 
     // === 엔터 1회 ===
-    let result1 = doc.split_paragraph_native(0, target_para, split_offset);
+    let result1 = doc.split_paragraph_native(0, target_para, split_offset, None);
     assert!(result1.is_ok(), "1차 분할 실패: {:?}", result1.err());
     eprintln!("\n--- 1차 분할 (offset={}) ---", split_offset);
 
@@ -15861,7 +18866,7 @@ fn test_diag_double_enter_save() {
 
     // === 엔터 2회 (새 문단의 시작에서 다시 분할) ===
     let new_para_idx = target_para + 1;
-    let result2 = doc.split_paragraph_native(0, new_para_idx, 0);
+    let result2 = doc.split_paragraph_native(0, new_para_idx, 0, None);
     assert!(result2.is_ok(), "2차 분할 실패: {:?}", result2.err());
     eprintln!("\n--- 2차 분할 (문단[{}], offset=0) ---", new_para_idx);
 
@@ -17002,6 +20007,56 @@ fn test_get_table_bbox() {
     eprintln!("표 bbox: {}", json);
 }
 
+/// #2400: page-local pointer 좌표는 같은 page 의 표 fragment bbox와 비교해야 한다.
+#[test]
+fn test_get_table_bbox_at_page_for_giant_multi_page_cell() {
+    use std::path::Path;
+
+    for path in [
+        "rhwp-studio/public/samples/issue1949_giant_cell_nested_tables_perf.hwp",
+        "samples/issue1949_giant_cell_nested_tables_perf.hwpx",
+    ] {
+        let data = std::fs::read(Path::new(path)).expect("#2400 권위 샘플 읽기");
+        let doc = HwpDocument::from_bytes(&data).expect("#2400 권위 샘플 파싱");
+        assert_eq!(doc.page_count(), 115, "{path}: page count");
+
+        let legacy: Value = serde_json::from_str(
+            &doc.get_table_bbox_native(0, 0, 2)
+                .expect("legacy 첫 fragment bbox"),
+        )
+        .expect("legacy bbox JSON");
+        let current: Value = serde_json::from_str(
+            &doc.get_table_bbox_at_page_native(0, 0, 2, 113)
+                .expect("page 113 fragment bbox"),
+        )
+        .expect("page-scoped bbox JSON");
+
+        assert_eq!(legacy["pageIndex"].as_u64(), Some(0), "{path}: legacy page");
+        assert_eq!(
+            current["pageIndex"].as_u64(),
+            Some(113),
+            "{path}: current fragment page"
+        );
+
+        let click_y = 1057.3;
+        let legacy_bottom = legacy["y"].as_f64().unwrap() + legacy["height"].as_f64().unwrap();
+        let current_bottom = current["y"].as_f64().unwrap() + current["height"].as_f64().unwrap();
+        assert!(
+            (click_y - legacy_bottom).abs() <= 5.0,
+            "{path}: 재현점은 첫 fragment 하단에 잘못 걸리는 전제"
+        );
+        assert!(
+            (click_y - current_bottom).abs() > 5.0,
+            "{path}: 현재 fragment에서는 실제 경계가 아님"
+        );
+
+        assert!(
+            doc.get_table_bbox_at_page_native(0, 0, 2, 115).is_err(),
+            "{path}: 범위 밖 page가 첫 fragment로 fallback하면 안 됨"
+        );
+    }
+}
+
 /// 표 컨트롤 삭제 테스트 (wasm_api 내부 접근)
 #[test]
 fn test_delete_table_control() {
@@ -17023,6 +20078,11 @@ fn test_delete_table_control() {
 
     // 삭제 전 char_count
     let before_char_count = doc.document.sections[0].paragraphs[3].char_count;
+    let before_next_vpos = doc.document.sections[0]
+        .paragraphs
+        .get(4)
+        .and_then(|p| p.line_segs.first())
+        .map(|ls| ls.vertical_pos);
 
     // 표 bbox 조회 성공 확인
     let bbox_result = doc.get_table_bbox_native(0, 3, 0);
@@ -17043,6 +20103,22 @@ fn test_delete_table_control() {
         before_char_count - 8,
         "char_count 8 감소 확인"
     );
+
+    if let (Some(before), Some(after)) = (
+        before_next_vpos,
+        doc.document.sections[0]
+            .paragraphs
+            .get(4)
+            .and_then(|p| p.line_segs.first())
+            .map(|ls| ls.vertical_pos),
+    ) {
+        assert!(
+            after < before,
+            "표 삭제 후 다음 문단 vpos가 위로 당겨져야 함: before={}, after={}",
+            before,
+            after
+        );
+    }
 
     eprintln!(
         "표 삭제: 컨트롤 {}→{}, char_count {}→{}",
@@ -18281,7 +21357,7 @@ fn test_blank2020_enter_corruption_diagnosis() {
         );
 
         // 엔터 (split at 0)
-        let result = doc.split_paragraph_native(0, 0, 0);
+        let result = doc.split_paragraph_native(0, 0, 0, None);
         eprintln!("  split result: {:?}", result);
 
         // 분할 후 문단 정보
@@ -18365,7 +21441,7 @@ fn test_repeated_enter_on_empty_paragraph() {
     println!("Insert: {}", result);
 
     // 2. 첫 번째 Enter (텍스트 끝에서)
-    let result1 = doc.split_paragraph_native(0, 0, 3).unwrap();
+    let result1 = doc.split_paragraph_native(0, 0, 3, None).unwrap();
     println!("Split 1 (para=0, offset=3): {}", result1);
     assert!(result1.contains("\"ok\":true"));
     assert_eq!(doc.document.sections[0].paragraphs.len(), 2);
@@ -18380,7 +21456,7 @@ fn test_repeated_enter_on_empty_paragraph() {
     );
 
     // 3. 두 번째 Enter (빈 문단에서)
-    let result2 = doc.split_paragraph_native(0, 1, 0).unwrap();
+    let result2 = doc.split_paragraph_native(0, 1, 0, None).unwrap();
     println!("Split 2 (para=1, offset=0): {}", result2);
     assert!(result2.contains("\"ok\":true"));
     assert!(result2.contains("\"paraIdx\":2"));
@@ -18395,7 +21471,7 @@ fn test_repeated_enter_on_empty_paragraph() {
     );
 
     // 4. 세 번째 Enter
-    let result3 = doc.split_paragraph_native(0, 2, 0).unwrap();
+    let result3 = doc.split_paragraph_native(0, 2, 0, None).unwrap();
     println!("Split 3 (para=2, offset=0): {}", result3);
     assert!(result3.contains("\"ok\":true"));
 
@@ -21138,7 +24214,7 @@ fn test_page13_enter_propagation() {
 
     // page 13 (idx=12)의 pi=199 앞에서 엔터
     eprintln!("=== splitParagraph(0, 199, 0) ===");
-    let result = doc.split_paragraph_native(0, 199, 0).unwrap();
+    let result = doc.split_paragraph_native(0, 199, 0, None).unwrap();
     assert!(result.contains("\"ok\":true"));
 
     let pages_after = doc.pagination[0].pages.len();
@@ -21257,7 +24333,9 @@ fn test_page12_enter_table_placement_scan() {
             table_pi_before, has_table_before
         );
 
-        let result = doc.split_paragraph_native(0, split_pi, offset).unwrap();
+        let result = doc
+            .split_paragraph_native(0, split_pi, offset, None)
+            .unwrap();
         assert!(
             result.contains("\"ok\":true"),
             "split failed at pi={}: {}",
@@ -21365,7 +24443,7 @@ fn test_page12_enter_table_placement() {
     );
 
     // pi=199 앞에서 엔터 (pi=199를 분할하여 빈 문단 삽입)
-    let result = doc.split_paragraph_native(0, 199, 0).unwrap();
+    let result = doc.split_paragraph_native(0, 199, 0, None).unwrap();
     assert!(result.contains("\"ok\":true"), "split failed: {}", result);
 
     let pages_after = doc.pagination[0].pages.len();
@@ -21417,7 +24495,7 @@ fn test_split_paragraph_page_count_stability() {
     eprintln!("  pages_before = {}", pages_before);
 
     // pi=199 앞에서 엔터 (offset=0으로 분할)
-    let result = doc.split_paragraph_native(0, 199, 0).unwrap();
+    let result = doc.split_paragraph_native(0, 199, 0, None).unwrap();
     assert!(result.contains("\"ok\":true"), "split failed: {}", result);
 
     let pages_after = doc.pagination.iter().map(|r| r.pages.len()).sum::<usize>();
@@ -21445,7 +24523,7 @@ fn test_logical_offset_insert_after_inline_table() {
 
     // Enter로 새 문단 생성 (기존 컨트롤이 있는 pi=0 대신 깨끗한 pi=1 사용)
     doc.insert_text_native(0, 0, 0, "test").unwrap();
-    doc.split_paragraph_native(0, 0, 4).unwrap();
+    doc.split_paragraph_native(0, 0, 4, None).unwrap();
 
     // pi=1에 "abc" 입력
     doc.insert_text_native(0, 1, 0, "abc").unwrap();
@@ -21455,7 +24533,7 @@ fn test_logical_offset_insert_after_inline_table() {
 
     // offset=3 위치에 인라인 TAC 2×2 표 삽입
     let result = doc
-        .create_table_ex_native(0, 1, 3, 2, 2, true, Some(&[6777, 6777]))
+        .create_table_ex_native(0, 1, 3, 2, 2, true, Some(&[6777, 6777]), None)
         .unwrap();
     eprintln!("  createTableEx result: {}", result);
     // logicalOffset: "abc"(3) + [표](1) = 4
@@ -21520,9 +24598,9 @@ fn test_logical_offset_insert_after_inline_table() {
 
     // ── 핵심 검증: charOffset > text_len으로 직접 삽입 ──
     // 새 문서에서 "가나다" + [표] 구조 생성, charOffset=4로 삽입
-    doc.split_paragraph_native(0, 1, 6).unwrap(); // pi=2 생성
+    doc.split_paragraph_native(0, 1, 6, None).unwrap(); // pi=2 생성
     doc.insert_text_native(0, 2, 0, "가나다").unwrap();
-    doc.create_table_ex_native(0, 2, 3, 1, 1, true, Some(&[5000]))
+    doc.create_table_ex_native(0, 2, 3, 1, 1, true, Some(&[5000]), None)
         .unwrap();
     let para2 = &doc.document.sections[0].paragraphs[2];
     let tl = para2.text.chars().count();
@@ -21556,7 +24634,7 @@ fn test_create_inline_tac_table() {
     // 1. pi=0에 "TC #20" 입력
     doc.insert_text_native(0, 0, 0, "TC #20").unwrap();
     // 2. Enter → pi=1 생성
-    doc.split_paragraph_native(0, 0, 6).unwrap();
+    doc.split_paragraph_native(0, 0, 6, None).unwrap();
     // 3. pi=1에 "tacglkj 표 3 배치 시작" 입력
     doc.insert_text_native(0, 1, 0, "tacglkj 표 3 배치 시작")
         .unwrap();
@@ -21570,7 +24648,7 @@ fn test_create_inline_tac_table() {
     // 4. pi=1, char_offset=text_len 위치에 인라인 TAC 2×2 표 생성
     // 열 폭: 6777 HU × 2 = 13554 HU (tac-case-001.hwp과 동일)
     let result = doc
-        .create_table_ex_native(0, 1, text_len, 2, 2, true, Some(&[6777, 6777]))
+        .create_table_ex_native(0, 1, text_len, 2, 2, true, Some(&[6777, 6777]), None)
         .unwrap();
     eprintln!("  createTableEx result: {}", result);
     assert!(
@@ -21618,8 +24696,10 @@ fn test_create_inline_tac_table() {
         .unwrap();
 
     // Enter → pi=2
-    let pi1_len = doc.document.sections[0].paragraphs[1].text.chars().count();
-    doc.split_paragraph_native(0, 1, pi1_len).unwrap();
+    let pi1_len = crate::document_core::helpers::logical_paragraph_length(
+        &doc.document.sections[0].paragraphs[1],
+    );
+    doc.split_paragraph_native(0, 1, pi1_len, None).unwrap();
     // pi=2에 텍스트
     doc.insert_text_native(0, 2, 0, "tacglkj 가나 옮").unwrap();
 
@@ -21637,12 +24717,8 @@ fn test_create_inline_tac_table() {
     // is_tac_table_inline 확인
     let seg_w = para.line_segs.first().map(|s| s.segment_width).unwrap_or(0);
     if let crate::model::control::Control::Table(t) = &para.controls[0] {
-        let is_inline = crate::renderer::height_measurer::is_tac_table_inline(
-            t,
-            seg_w,
-            &para.text,
-            &para.controls,
-        );
+        let is_inline =
+            crate::renderer::height_measurer::is_tac_table_inline_in_para(t, seg_w, para);
         eprintln!("  is_tac_table_inline: {} (seg_w={})", is_inline, seg_w);
         assert!(is_inline, "인라인 TAC 표로 판별되어야 함");
     }
@@ -21717,4 +24793,3708 @@ fn test_reflow_linesegs_empty_document_returns_zero() {
     let mut doc = HwpDocument::create_empty();
     let count = doc.reflow_linesegs();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn test_create_blank_document_clears_previous_hwpx_validation_warnings() {
+    let bytes = std::fs::read("samples/hwpx_sample2.hwpx").expect("HWPX 샘플 읽기");
+    let mut doc = HwpDocument::new(&bytes).expect("HWPX 샘플 로드");
+
+    let before: Value = serde_json::from_str(&doc.get_validation_warnings()).expect("경고 JSON");
+    assert!(
+        before["count"].as_u64().unwrap_or(0) > 0,
+        "재현 샘플은 HWPX validation warning이 있어야 함: {before}"
+    );
+    assert_eq!(doc.get_source_format(), "hwpx");
+
+    doc.create_blank_document_native()
+        .expect("새 문서 생성 성공");
+
+    let after: Value = serde_json::from_str(&doc.get_validation_warnings()).expect("경고 JSON");
+    assert_eq!(
+        after["count"].as_u64(),
+        Some(0),
+        "새 문서는 이전 HWPX warning을 물려받으면 안 됨: {after}"
+    );
+    assert_eq!(doc.get_source_format(), "hwp");
+}
+
+#[test]
+fn test_hml_source_format_is_reported_without_reusing_hwp_save_path() {
+    let bytes = br#"<?xml version="1.0" encoding="UTF-8"?>
+<HWPML Style="embed" SubVersion="9.0.1.0" Version="2.9">
+  <HEAD SecCnt="1" />
+  <BODY><SECTION Id="0"><P ParaShape="0" Style="0"><TEXT CharShape="0"><CHAR>HML</CHAR></TEXT></P></SECTION></BODY>
+  <TAIL />
+</HWPML>"#;
+    let doc = HwpDocument::new(bytes).expect("HML 문서를 열어야 한다");
+
+    assert_eq!(doc.get_source_format(), "hml");
+}
+
+#[test]
+fn test_hml_save_state_is_one_canonical_dto_for_hml_non_hml_and_unknown_equation() {
+    let lawful = br#"<HWPML Version="2.91"><HEAD/><BODY><SECTION><P><TEXT><CHAR>ok</CHAR></TEXT></P></SECTION></BODY><TAIL/></HWPML>"#;
+    let mut doc = HwpDocument::new(lawful).expect("lawful HML");
+    let state: Value = serde_json::from_str(&doc.get_hml_save_state()).expect("save state JSON");
+    assert_eq!(
+        state,
+        serde_json::json!({
+            "sourceFormat": "hml",
+            "hmlSavable": true,
+            "blockers": [],
+        })
+    );
+
+    doc.create_blank_document_native()
+        .expect("non-HML blank document");
+    let state: Value = serde_json::from_str(&doc.get_hml_save_state()).expect("save state JSON");
+    assert_eq!(
+        state,
+        serde_json::json!({
+            "sourceFormat": "hwp",
+            "hmlSavable": false,
+            "blockers": [{
+                "code": "HML_SOURCE_REQUIRED",
+                "xmlPath": "/HWPML",
+                "message": "HML 원본 문서만 HML로 저장할 수 있습니다",
+                "preserved": false,
+            }],
+        })
+    );
+
+    let unknown = br#"<HWPML Version="2.91"><HEAD/><BODY><SECTION><P><TEXT><EQUATION FutureAttr="1"><SCRIPT>x</SCRIPT><FUTURE/></EQUATION></TEXT></P></SECTION></BODY><TAIL/></HWPML>"#;
+    let doc = HwpDocument::new(unknown).expect("unknown equation semantics remain readable");
+    let state: Value = serde_json::from_str(&doc.get_hml_save_state()).expect("save state JSON");
+    assert_eq!(state["hmlSavable"], false);
+    assert_eq!(state["sourceFormat"], "hml");
+    assert_eq!(state["blockers"].as_array().map(Vec::len), Some(2));
+    for blocker in state["blockers"].as_array().unwrap() {
+        assert_eq!(blocker["code"], "HML_UNSUPPORTED_EQUATION_SEMANTICS");
+        assert_eq!(blocker["preserved"], false);
+    }
+}
+
+#[test]
+fn test_unknown_equation_values_survive_edit_undo_redo_and_save_state() {
+    let unknown = br#"<HWPML Version="2.91"><HEAD/><BODY><SECTION><P><TEXT><EQUATION><SCRIPT>x</SCRIPT><FUTURE Mode="matrix&amp;inline">secret &lt; value</FUTURE></EQUATION></TEXT></P></SECTION></BODY><TAIL/></HWPML>"#;
+    let mut doc = HwpDocument::new(unknown).expect("unknown equation semantics remain readable");
+    let before_snapshot = doc.save_snapshot_native();
+
+    doc.set_equation_properties_native(0, 0, 0, None, None, r#"{"script":"x^2 + 2"}"#)
+        .expect("equation edit should apply");
+    let after_snapshot = doc.save_snapshot_native();
+
+    let assert_values = |doc: &HwpDocument| {
+        let state: Value =
+            serde_json::from_str(&doc.get_hml_save_state()).expect("save state JSON");
+        let blockers = state["blockers"].as_array().expect("blocker array");
+        assert!(blockers.iter().any(|blocker| {
+            blocker["xmlPath"] == "/HWPML/BODY/SECTION/P/TEXT/EQUATION/FUTURE/@Mode"
+                && blocker["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Mode=matrix&inline"))
+                && blocker["preserved"] == false
+        }));
+        assert!(blockers.iter().any(|blocker| {
+            blocker["xmlPath"] == "/HWPML/BODY/SECTION/P/TEXT/EQUATION/FUTURE/#text"
+                && blocker["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("#text=secret < value"))
+                && blocker["preserved"] == false
+        }));
+    };
+
+    assert_values(&doc);
+    doc.restore_snapshot_native(before_snapshot)
+        .expect("undo snapshot should restore");
+    assert_values(&doc);
+    doc.restore_snapshot_native(after_snapshot)
+        .expect("redo snapshot should restore");
+    assert_values(&doc);
+}
+
+#[test]
+fn test_hml_open_metadata_exposes_import_warnings() {
+    let bytes = include_bytes!("../../samples/hml/formatting_table.hml");
+    let doc = HwpDocument::new(bytes).expect("real HML fixture should open");
+    let metadata: Value =
+        serde_json::from_str(&doc.get_hml_open_metadata()).expect("HML metadata JSON");
+
+    assert_eq!(metadata["format"], "hml");
+    assert_eq!(metadata["hwpmlVersion"], "2.91");
+    assert_eq!(metadata["encoding"], "utf-8");
+    assert_eq!(metadata["resourceCount"], 0);
+    assert_eq!(metadata["hmlSavable"], true);
+    assert_eq!(metadata["saveBlockers"], serde_json::json!([]));
+    assert!(metadata["warnings"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|warning| warning["xmlPath"] == "/HWPML/TAIL/SCRIPTCODE")
+    }));
+}
+
+#[test]
+fn test_hml_open_metadata_escapes_special_characters_as_valid_json() {
+    let bytes = include_bytes!("../../samples/hml/formatting_table.hml");
+    let mut doc = HwpDocument::new(bytes).expect("real HML fixture should open");
+    let special = "2.91\"\\\n한글\t";
+    let metadata = doc
+        .core
+        .hml_metadata
+        .as_mut()
+        .expect("HML metadata should exist");
+    metadata.hwpml_version = Some(special.to_string());
+    metadata.warnings[0].message = special.to_string();
+
+    let json: Value = serde_json::from_str(&doc.get_hml_open_metadata())
+        .expect("metadata must remain valid JSON");
+
+    assert_eq!(json["hwpmlVersion"], special);
+    assert_eq!(json["warnings"][0]["message"], special);
+}
+
+#[test]
+fn test_export_hml_binding_preserves_edit_and_fragment() {
+    let bytes = include_bytes!("../../samples/hml/formatting_table.hml");
+    let mut doc = HwpDocument::new(bytes).expect("real HML fixture should open");
+    let (section_index, paragraph_index) = doc
+        .document()
+        .sections
+        .iter()
+        .enumerate()
+        .find_map(|(section_index, section)| {
+            section
+                .paragraphs
+                .iter()
+                .position(|paragraph| !paragraph.text.is_empty())
+                .map(|paragraph_index| (section_index, paragraph_index))
+        })
+        .expect("fixture should contain text");
+    doc.insert_text_native(section_index, paragraph_index, 0, "WASM_EDIT_")
+        .expect("apply public edit");
+
+    let exported = doc.export_hml().expect("exportHml should succeed");
+
+    assert_eq!(
+        crate::parser::detect_format(&exported),
+        crate::parser::FileFormat::Hml
+    );
+    assert!(String::from_utf8_lossy(&exported).contains("<SCRIPTCODE"));
+    let reparsed = DocumentCore::from_bytes(&exported).expect("exportHml output should reparse");
+    assert!(
+        reparsed.document().sections[section_index].paragraphs[paragraph_index]
+            .text
+            .starts_with("WASM_EDIT_")
+    );
+}
+
+#[test]
+fn test_export_hml_error_message_exposes_blocker_codes() {
+    let fixture = std::str::from_utf8(include_bytes!("../../samples/hml/formatting_table.hml"))
+        .expect("fixture is UTF-8");
+    let lossy = fixture.replacen("Type=\"None\"", "Type=\"Dash\"", 1);
+    let doc = HwpDocument::new(lossy.as_bytes()).expect("lossy HML should import");
+    let error = doc
+        .core
+        .export_hml_native()
+        .expect_err("lossy import must block exportHml");
+    let blocker = &error.blockers()[0];
+
+    let message = super::format_hml_export_error(&error);
+
+    assert!(message.contains(blocker.code), "{message}");
+    assert!(message.contains(&blocker.xml_path), "{message}");
+    assert!(message.contains(&blocker.message), "{message}");
+}
+
+#[test]
+fn test_hml_open_metadata_uses_shared_preflight_for_import_and_ir_loss() {
+    let fixture = std::str::from_utf8(include_bytes!("../../samples/hml/formatting_table.hml"))
+        .expect("fixture is UTF-8");
+    let lossy = fixture.replacen("Type=\"None\"", "Type=\"Dash\"", 1);
+    let import_loss = HwpDocument::new(lossy.as_bytes()).expect("lossy HML should import");
+    let import_json: Value =
+        serde_json::from_str(&import_loss.get_hml_open_metadata()).expect("metadata JSON");
+    assert_eq!(import_json["hmlSavable"], false);
+    assert!(import_json["saveBlockers"]
+        .as_array()
+        .is_some_and(|blockers| {
+            blockers.iter().any(|blocker| {
+                blocker["code"] == "UNSUPPORTED_ATTRIBUTE"
+                    && blocker["xmlPath"]
+                        == "/HWPML/HEAD/MAPPINGTABLE/BORDERFILLLIST/BORDERFILL/LEFTBORDER"
+                    && blocker["message"]
+                        .as_str()
+                        .is_some_and(|message| !message.is_empty())
+            })
+        }));
+
+    let mut edited_ir = HwpDocument::new(fixture.as_bytes()).expect("lawful HML should import");
+    edited_ir.document_mut().sections[0].paragraphs[0].column_type =
+        crate::model::paragraph::ColumnBreakType::Section;
+    let ir_json: Value =
+        serde_json::from_str(&edited_ir.get_hml_open_metadata()).expect("metadata JSON");
+    assert_eq!(ir_json["hmlSavable"], false);
+    assert!(ir_json["saveBlockers"].as_array().is_some_and(|blockers| {
+        blockers.iter().any(|blocker| {
+            blocker["code"] == "HML_UNSUPPORTED_IR"
+                && blocker["xmlPath"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                && blocker["message"]
+                    .as_str()
+                    .is_some_and(|message| !message.is_empty())
+        })
+    }));
+}
+
+#[test]
+fn test_hml_open_metadata_reports_mixed_import_and_ir_loss() {
+    let fixture = std::str::from_utf8(include_bytes!("../../samples/hml/formatting_table.hml"))
+        .expect("fixture is UTF-8");
+    let lossy = fixture.replacen("Type=\"None\"", "Type=\"Dash\"", 1);
+    let mut doc = HwpDocument::new(lossy.as_bytes()).expect("lossy HML should import");
+    doc.document_mut().sections[0].paragraphs[0].column_type =
+        crate::model::paragraph::ColumnBreakType::Section;
+
+    let metadata: Value =
+        serde_json::from_str(&doc.get_hml_open_metadata()).expect("metadata JSON");
+    let blockers = metadata["saveBlockers"]
+        .as_array()
+        .expect("save blockers array");
+
+    assert_eq!(metadata["hmlSavable"], false);
+    assert!(blockers
+        .iter()
+        .any(|blocker| blocker["code"] == "UNSUPPORTED_ATTRIBUTE"));
+    assert!(blockers
+        .iter()
+        .any(|blocker| blocker["code"] == "HML_UNSUPPORTED_IR"));
+}
+
+#[test]
+fn test_reflow_linesegs_keeps_hwpx_sample2_page_count_for_textrun_warnings() {
+    let bytes = std::fs::read("samples/hwpx_sample2.hwpx").expect("HWPX 샘플 읽기");
+    let mut doc = HwpDocument::new(&bytes).expect("HWPX 샘플 로드");
+
+    let before_page_count = doc.page_count();
+    let before: Value = serde_json::from_str(&doc.get_validation_warnings()).expect("경고 JSON");
+    assert_eq!(before_page_count, 29);
+    assert_eq!(before["count"].as_u64(), Some(151));
+
+    let reflowed = doc.reflow_linesegs();
+
+    assert_eq!(
+        reflowed, 0,
+        "LinesegTextRunReflow 경고는 페이지 수를 바꿀 수 있어 자동 보정하지 않음"
+    );
+    assert_eq!(
+        doc.page_count(),
+        before_page_count,
+        "권장 보정으로 HWPX 페이지 수가 바뀌면 안 됨"
+    );
+}
+
+// ---------- #1413: insertPictureEx(options object) 동치 ----------
+
+/// `insertPictureEx`(options JSON + image_data)가 positional `insertPicture` 와
+/// 동일하게 동작해야 한다. 같은 입력으로 두 문서에 각각 삽입 → 렌더 SVG 의 이미지
+/// 수와 반환 JSON 의 paraIdx/controlIdx 가 일치.
+#[test]
+fn task1413_insert_picture_ex_equivalent_to_positional() {
+    fn png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+    fn count_images(svg: &str) -> usize {
+        svg.matches("<image").count()
+    }
+
+    // positional 경로
+    let mut doc_pos = HwpDocument::create_empty();
+    let res_pos = doc_pos
+        .insert_picture(
+            0,
+            0,
+            0,
+            "",
+            &png(),
+            4000,
+            3000,
+            100,
+            80,
+            "png",
+            "",
+            None,
+            None,
+        )
+        .expect("positional insertPicture");
+
+    // *Ex 경로 — 동일 입력을 options JSON 으로
+    let mut doc_ex = HwpDocument::create_empty();
+    let options = r#"{"sectionIdx":0,"paraIdx":0,"charOffset":0,"cellPath":"",
+        "width":4000,"height":3000,"naturalWidthPx":100,"naturalHeightPx":80,
+        "extension":"png","description":""}"#;
+    let res_ex = doc_ex
+        .insert_picture_ex(options, &png())
+        .expect("insertPictureEx");
+
+    // 반환 JSON 동치 (paraIdx/controlIdx)
+    assert_eq!(res_pos, res_ex, "*Ex 반환이 positional 과 동일해야 함");
+
+    // 렌더 결과 동치 (이미지 수)
+    let svg_pos = doc_pos.render_page_svg_native(0).expect("svg pos");
+    let svg_ex = doc_ex.render_page_svg_native(0).expect("svg ex");
+    assert_eq!(
+        count_images(&svg_pos),
+        count_images(&svg_ex),
+        "*Ex 렌더 이미지 수가 positional 과 동일해야 함"
+    );
+    assert_eq!(count_images(&svg_ex), 1, "그림 1개 삽입");
+}
+
+/// options JSON 의 키 누락 시 positional default 와 동일 처리 (description/extension/
+/// paperOffset 부재).
+#[test]
+fn task1413_insert_picture_ex_optional_keys_default() {
+    fn png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x00, 0x00, 0x00,
+            0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
+    }
+    // optional 키(extension/description/paperOffset/cellPath) 생략 — 본문 inline 삽입.
+    let mut doc = HwpDocument::create_empty();
+    let res = doc
+        .insert_picture_ex(
+            r#"{"sectionIdx":0,"paraIdx":0,"width":4000,"height":3000,"naturalWidthPx":100,"naturalHeightPx":80}"#,
+            &png(),
+        )
+        .expect("insertPictureEx with optional keys omitted");
+    assert!(
+        res.contains("\"ok\":true") || res.contains("paraIdx"),
+        "삽입 성공: {res}"
+    );
+}
+
+// ---------- #1413 2단계: 고인자(9~11) *Ex 동치 ----------
+
+/// splitTableCellInto vs splitTableCellIntoEx 동치.
+#[test]
+fn task1413_split_table_cell_into_ex_equivalent() {
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos
+        .split_table_cell_into(0, 0, 0, 0, 0, 2, 2, true, false)
+        .expect("positional splitTableCellInto");
+
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex
+        .split_table_cell_into_ex(
+            r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"row":0,"col":0,
+                "nRows":2,"mCols":2,"equalRowHeight":true,"mergeFirst":false}"#,
+        )
+        .expect("splitTableCellIntoEx");
+    assert_eq!(res_pos, res_ex, "*Ex 가 positional 과 동일 반환");
+}
+
+/// splitTableCellsInRange vs splitTableCellsInRangeEx 동치.
+#[test]
+fn task1413_split_table_cells_in_range_ex_equivalent() {
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos
+        .split_table_cells_in_range(0, 0, 0, 0, 0, 0, 0, 2, 2, true)
+        .expect("positional splitTableCellsInRange");
+
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex
+        .split_table_cells_in_range_ex(
+            r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"startRow":0,"startCol":0,
+                "endRow":0,"endCol":0,"nRows":2,"mCols":2,"equalRowHeight":true}"#,
+        )
+        .expect("splitTableCellsInRangeEx");
+    assert_eq!(res_pos, res_ex, "*Ex 가 positional 과 동일 반환");
+}
+
+/// insertClickHereFieldInCell vs insertClickHereFieldInCellEx 동치.
+#[test]
+fn task1413_insert_click_here_field_in_cell_ex_equivalent() {
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos
+        .insert_click_here_field_in_cell_api(0, 0, 0, 0, 0, 0, false, "안내", "메모", "이름", true)
+        .expect("positional insertClickHereFieldInCell");
+
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex
+        .insert_click_here_field_in_cell_ex(
+            r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,
+                "charOffset":0,"isTextbox":false,"guide":"안내","memo":"메모","name":"이름","editable":true}"#,
+        )
+        .expect("insertClickHereFieldInCellEx");
+    assert_eq!(res_pos, res_ex, "*Ex 가 positional 과 동일 반환");
+}
+
+/// moveVertical vs moveVerticalEx 동치 (본문 — parentParaIdx 생략 = MAX).
+#[test]
+fn task1413_move_vertical_ex_equivalent() {
+    let mut doc_pos = HwpDocument::create_empty();
+    doc_pos
+        .insert_text_native(0, 0, 0, "첫째 줄\n둘째 줄\n셋째 줄")
+        .expect("텍스트 삽입");
+    let res_pos = doc_pos
+        .move_vertical(0, 0, 2, 1, 10.0, u32::MAX, 0, 0, 0)
+        .expect("positional moveVertical");
+
+    let mut doc_ex = HwpDocument::create_empty();
+    doc_ex
+        .insert_text_native(0, 0, 0, "첫째 줄\n둘째 줄\n셋째 줄")
+        .expect("텍스트 삽입");
+    let res_ex = doc_ex
+        .move_vertical_ex(
+            r#"{"sectionIdx":0,"paraIdx":0,"charOffset":2,"delta":1,"preferredX":10.0}"#,
+        )
+        .expect("moveVerticalEx");
+    assert_eq!(
+        res_pos, res_ex,
+        "*Ex 가 positional 과 동일 반환 (본문 이동)"
+    );
+}
+
+// ---------- #1413 3단계: 8인자 군 *Ex 동치 ----------
+
+#[test]
+fn task1413_set_page_hide_ex_equivalent() {
+    let mut doc_pos = HwpDocument::create_empty();
+    let res_pos = doc_pos
+        .set_page_hide(0, 0, true, false, true, false, true, false)
+        .expect("positional setPageHide");
+    let mut doc_ex = HwpDocument::create_empty();
+    let res_ex = doc_ex
+        .set_page_hide_ex(
+            r#"{"sec":0,"para":0,"hideHeader":true,"hideFooter":false,"hideMaster":true,
+                "hideBorder":false,"hideFill":true,"hidePageNum":false}"#,
+        )
+        .expect("setPageHideEx");
+    assert_eq!(res_pos, res_ex);
+}
+
+#[test]
+fn task1413_set_char_shape_id_in_cell_ex_equivalent() {
+    // char_shape_id=0 이 유효하려면 char_shapes 가 최소 1개 등록돼 있어야 한다
+    // (없으면 native 가 "범위 초과" Err → wasm JsValue 변환 패닉). 정상 입력으로 비교.
+    let mut doc_pos = create_doc_with_table();
+    doc_pos
+        .document
+        .doc_info
+        .char_shapes
+        .push(crate::model::style::CharShape::default());
+    let res_pos = doc_pos.set_char_shape_id_in_cell(0, 0, 0, 0, 0, 0, 0, 0);
+    let mut doc_ex = create_doc_with_table();
+    doc_ex
+        .document
+        .doc_info
+        .char_shapes
+        .push(crate::model::style::CharShape::default());
+    let res_ex = doc_ex.set_char_shape_id_in_cell_ex(
+        r#"{"secIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,
+            "startOffset":0,"endOffset":0,"charShapeId":0}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_get_selection_rects_in_cell_ex_equivalent() {
+    let doc = create_doc_with_table();
+    let res_pos = doc.get_selection_rects_in_cell(0, 0, 0, 0, 0, 0, 0, 0);
+    let res_ex = doc.get_selection_rects_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"startCellParaIdx":0,
+            "startCharOffset":0,"endCellParaIdx":0,"endCharOffset":0}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_export_selection_in_cell_html_ex_equivalent() {
+    let doc = create_doc_with_table();
+    let res_pos = doc.export_selection_in_cell_html(0, 0, 0, 0, 0, 0, 0, 0);
+    let res_ex = doc.export_selection_in_cell_html_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"startCellParaIdx":0,
+            "startCharOffset":0,"endCellParaIdx":0,"endCharOffset":0}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_delete_range_in_cell_ex_equivalent() {
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos.delete_range_in_cell(0, 0, 0, 0, 0, 0, 0, 0);
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex.delete_range_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"startCellParaIdx":0,
+            "startCharOffset":0,"endCellParaIdx":0,"endCharOffset":0}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_copy_selection_in_cell_ex_equivalent() {
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos.copy_selection_in_cell(0, 0, 0, 0, 0, 0, 0, 0);
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex.copy_selection_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"startCellParaIdx":0,
+            "startCharOffset":0,"endCellParaIdx":0,"endCharOffset":0}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_apply_char_format_in_cell_ex_equivalent() {
+    let props = r#"{"bold":true}"#;
+    let mut doc_pos = create_doc_with_table();
+    let res_pos = doc_pos.apply_char_format_in_cell(0, 0, 0, 0, 0, 0, 0, props);
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex.apply_char_format_in_cell_ex(
+        r#"{"secIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,
+            "startOffset":0,"endOffset":0,"props":{"bold":true}}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+#[test]
+fn task1413_insert_click_here_field_by_path_ex_equivalent() {
+    // 유효 cell path(표 para 0, control 0, cell 0)로 셀 안에 삽입. positional 과 *Ex 동치.
+    // (빈 path 는 native 에서 에러 → wasm JsValue 변환 패닉이라 정상 path 를 쓴다.)
+    let path = r#"[{"controlIndex":0,"cellIndex":0,"cellParaIndex":0}]"#;
+    let mut doc_pos = create_doc_with_table();
+    let res_pos =
+        doc_pos.insert_click_here_field_by_path_api(0, 0, path, 0, "안내", "메모", "이름", true);
+    let mut doc_ex = create_doc_with_table();
+    let res_ex = doc_ex.insert_click_here_field_by_path_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"path":"[{\"controlIndex\":0,\"cellIndex\":0,\"cellParaIndex\":0}]","charOffset":0,"guide":"안내","memo":"메모","name":"이름","editable":true}"#,
+    );
+    assert_eq!(format!("{res_pos:?}"), format!("{res_ex:?}"));
+}
+
+// ---------- #1413 4단계: 7인자 군 *Ex 동치 (13개) ----------
+
+// 표 셀(para0/control0/cell0)에 정상 동작하는 *InCell 류. 반환 동일성 비교.
+#[test]
+fn task1413_insert_text_in_cell_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.insert_text_in_cell(0, 0, 0, 0, 0, 0, "텍스트");
+    let mut b = create_doc_with_table();
+    let re = b.insert_text_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"text":"텍스트"}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[test]
+fn task1413_get_text_in_cell_ex_equivalent() {
+    let a = create_doc_with_table();
+    let rp = a.get_text_in_cell(0, 0, 0, 0, 0, 0, 1);
+    let re = a.get_text_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"count":1}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[test]
+fn task1413_delete_text_in_cell_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.delete_text_in_cell(0, 0, 0, 0, 0, 0, 1);
+    let mut b = create_doc_with_table();
+    let re = b.delete_text_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"count":1}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[test]
+fn task1413_paste_html_in_cell_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.paste_html_in_cell(0, 0, 0, 0, 0, 0, "<p>x</p>");
+    let mut b = create_doc_with_table();
+    let re = b.paste_html_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"html":"<p>x</p>"}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[test]
+fn task1413_merge_table_cells_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.merge_table_cells(0, 0, 0, 0, 0, 0, 1);
+    let mut b = create_doc_with_table();
+    let re = b.merge_table_cells_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"startRow":0,"startCol":0,"endRow":0,"endCol":1}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[test]
+fn task1413_insert_click_here_field_ex_equivalent() {
+    let mut a = HwpDocument::create_empty();
+    a.insert_text_native(0, 0, 0, "abc").unwrap();
+    let rp = a.insert_click_here_field_api(0, 0, 0, "안내", "메모", "이름", true);
+    let mut b = HwpDocument::create_empty();
+    b.insert_text_native(0, 0, 0, "abc").unwrap();
+    let re = b.insert_click_here_field_ex(
+        r#"{"sectionIdx":0,"paraIdx":0,"charOffset":0,"guide":"안내","memo":"메모","name":"이름","editable":true}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+// bool/String 반환 (JsValue 변환 없음 — 패닉 무관).
+#[test]
+fn task1413_set_active_field_in_cell_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.set_active_field_in_cell_api(0, 0, 0, 0, 0, 0, false);
+    let mut b = create_doc_with_table();
+    let re = b.set_active_field_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"isTextbox":false}"#,
+    );
+    assert_eq!(rp, re);
+}
+
+#[test]
+fn task1413_get_field_info_at_in_cell_ex_equivalent() {
+    let a = create_doc_with_table();
+    let rp = a.get_field_info_at_in_cell_api(0, 0, 0, 0, 0, 0, false);
+    let re = a.get_field_info_at_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"isTextbox":false}"#,
+    );
+    assert_eq!(rp, re);
+}
+
+#[test]
+fn task1413_remove_field_at_in_cell_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.remove_field_at_in_cell_api(0, 0, 0, 0, 0, 0, false);
+    let mut b = create_doc_with_table();
+    let re = b.remove_field_at_in_cell_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"cellIdx":0,"cellParaIdx":0,"charOffset":0,"isTextbox":false}"#,
+    );
+    assert_eq!(rp, re);
+}
+
+#[test]
+fn task1413_evaluate_table_formula_ex_equivalent() {
+    let mut a = create_doc_with_table();
+    let rp = a.evaluate_table_formula(0, 0, 0, 0, 0, "=1+1", false);
+    let mut b = create_doc_with_table();
+    let re = b.evaluate_table_formula_ex(
+        r#"{"sectionIdx":0,"parentParaIdx":0,"controlIdx":0,"targetRow":0,"targetCol":0,"formula":"=1+1","writeResult":false}"#,
+    );
+    assert_eq!(format!("{rp:?}"), format!("{re:?}"));
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Issue2214TargetCut {
+    page_index: u32,
+    start_row: usize,
+    end_row: usize,
+    is_continuation: bool,
+    start_cut: Vec<usize>,
+    end_cut: Vec<usize>,
+    is_block_split: bool,
+}
+
+fn issue2214_target_cuts(doc: &HwpDocument) -> Vec<Issue2214TargetCut> {
+    use crate::renderer::pagination::PageItem;
+
+    let pages = doc
+        .core
+        .pagination
+        .iter()
+        .flat_map(|section| section.pages.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pages.len(),
+        doc.page_count() as usize,
+        "pagination page coverage"
+    );
+    pages
+        .into_iter()
+        .enumerate()
+        .map(|(global_page, page)| {
+            assert_eq!(page.section_index, 0, "#2214 target section");
+            assert_eq!(
+                page.page_index as usize, global_page,
+                "#2214 global page index"
+            );
+            let matches = page
+                .column_contents
+                .iter()
+                .flat_map(|column| column.items.iter())
+                .filter_map(|item| match item {
+                    PageItem::PartialTable {
+                        para_index: 0,
+                        control_index: 2,
+                        start_row,
+                        end_row,
+                        is_continuation,
+                        start_cut,
+                        end_cut,
+                        is_block_split,
+                        ..
+                    } => Some(Issue2214TargetCut {
+                        page_index: page.page_index,
+                        start_row: *start_row,
+                        end_row: *end_row,
+                        is_continuation: *is_continuation,
+                        start_cut: start_cut.clone(),
+                        end_cut: end_cut.clone(),
+                        is_block_split: *is_block_split,
+                    }),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "page {global_page}: exactly one target PartialTable fragment"
+            );
+            matches.into_iter().next().expect("one target fragment")
+        })
+        .collect()
+}
+
+fn issue2214_assert_cut_continuity(label: &str, state: &str, cuts: &[Issue2214TargetCut]) {
+    assert_eq!(cuts.len(), 115, "{label} {state}: target page coverage");
+    assert!(!cuts[0].is_continuation, "{label} {state}: first fragment");
+    assert!(
+        cuts[0].start_cut.is_empty(),
+        "{label} {state}: first fragment starts at row origin"
+    );
+    assert!(
+        cuts.last().expect("last target cut").end_cut.is_empty(),
+        "{label} {state}: final fragment consumes the target table"
+    );
+    assert!(
+        cuts.iter().all(|cut| !cut.is_block_split),
+        "{label} {state}: #2214 fixture must remain a non-block split chain"
+    );
+    for cut in cuts {
+        assert!(
+            cut.start_row < cut.end_row,
+            "{label} {state}: page {} row range must advance",
+            cut.page_index
+        );
+        if cut.start_row + 1 == cut.end_row && !cut.start_cut.is_empty() && !cut.end_cut.is_empty()
+        {
+            assert_eq!(
+                cut.start_cut.len(),
+                cut.end_cut.len(),
+                "{label} {state}: page {} cut arity",
+                cut.page_index
+            );
+            assert!(
+                cut.start_cut
+                    .iter()
+                    .zip(&cut.end_cut)
+                    .all(|(start, end)| end >= start),
+                "{label} {state}: page {} cut components must not rewind",
+                cut.page_index
+            );
+            assert!(
+                cut.start_cut
+                    .iter()
+                    .zip(&cut.end_cut)
+                    .any(|(start, end)| end > start),
+                "{label} {state}: page {} cut must consume at least one unit",
+                cut.page_index
+            );
+        }
+    }
+    for (page, pair) in cuts.windows(2).enumerate() {
+        assert!(
+            pair[1].is_continuation,
+            "{label} {state}: page {} must be a continuation",
+            page + 1
+        );
+        if pair[0].end_cut.is_empty() {
+            assert!(
+                pair[1].start_cut.is_empty(),
+                "{label} {state}: page {} row boundary must restart without a cut",
+                page + 1
+            );
+            assert_eq!(
+                pair[1].start_row,
+                pair[0].end_row,
+                "{label} {state}: page {} row boundary must be contiguous",
+                page + 1
+            );
+        } else {
+            assert_eq!(
+                pair[0].end_cut,
+                pair[1].start_cut,
+                "{label} {state}: page {} end_cut must equal page {} start_cut",
+                page,
+                page + 1
+            );
+            assert_eq!(
+                pair[1].start_row,
+                pair[0].end_row - 1,
+                "{label} {state}: page {} split row must continue",
+                page + 1
+            );
+        }
+    }
+}
+
+/// #2430의 giant-cell target은 원본 형식마다 한컴 2020 편집 후 줄 경계가 다르다.
+///
+/// HWP 저장 LINE_SEG는 56번째 ASCII `1`에서 fifth line으로 전환하지만, HWPX는
+/// 같은 한컴 2020 adapter-save oracle에서 61번째가 전환점이다 (Task #3820 Stage 86).
+/// 이 값을 각 test에 따로 쓰면 HWPX의 실제 61회 경계를 다시 HWP 값으로 회귀시킨다.
+fn issue2214_flow_boundary_insert_count(label: &str) -> usize {
+    match label {
+        "hwp" => 56,
+        "hwpx" => 61,
+        other => panic!("unknown #2214 fixture label: {other}"),
+    }
+}
+
+/// #2214 Stage 3: scoped cache coherence는 deferred pagination geometry를 유지하면서
+/// warm tree/cursor만 최신 edit으로 복구하고, explicit flush에서만 cut/bounds를 갱신한다.
+#[test]
+fn issue2214_scoped_cache_coherence_preserves_transient_pagination() {
+    use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+
+    fn target_tree_ranges(doc: &HwpDocument) -> Vec<(u32, usize, usize)> {
+        fn visit(node: &RenderNode, page: u32, ranges: &mut Vec<(u32, usize, usize)>) {
+            if let RenderNodeType::TextRun(run) = &node.node_type {
+                if let (Some(start), Some(ctx)) = (run.char_start, run.cell_context.as_ref()) {
+                    let target = ctx.parent_para_index == 0
+                        && ctx.path.len() == 1
+                        && ctx.path.first().is_some_and(|entry| {
+                            entry.control_index == 2
+                                && entry.cell_index == 2
+                                && entry.cell_para_index == 5
+                        });
+                    if target {
+                        assert!(run.char_overlap.is_none(), "target run must not overlap");
+                        assert_eq!(
+                            run.text.chars().count(),
+                            run.text.encode_utf16().count(),
+                            "fixture target run must be BMP"
+                        );
+                        let end = start + run.text.encode_utf16().count();
+                        assert!(end > start, "target run must advance");
+                        ranges.push((page, start, end));
+                    }
+                }
+            }
+            for child in &node.children {
+                visit(child, page, ranges);
+            }
+        }
+
+        let page = 0;
+        let tree = doc
+            .build_page_render_tree(page)
+            .unwrap_or_else(|e| panic!("page {page} tree: {e}"));
+        let mut ranges = Vec::new();
+        visit(&tree.root, page, &mut ranges);
+        ranges.sort_unstable_by_key(|(_, start, end)| (*start, *end));
+        assert!(!ranges.is_empty(), "target paragraph ranges");
+        let mut contiguous_end = 0;
+        for (page, start, end) in &ranges {
+            assert_eq!(
+                *start, contiguous_end,
+                "page {page}: target UTF-16 ranges must have no gap or overlap"
+            );
+            contiguous_end = *end;
+        }
+        ranges
+    }
+
+    for (label, relative) in [
+        ("hwp", "samples/issue1949_giant_cell_nested_tables_perf.hwp"),
+        (
+            "hwpx",
+            "samples/issue1949_giant_cell_nested_tables_perf.hwpx",
+        ),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let bytes = std::fs::read(path).expect("read #2214 fixture");
+        let mut doc = HwpDocument::from_bytes(&bytes).expect("load #2214 fixture");
+        let boundary_inserts = issue2214_flow_boundary_insert_count(label);
+        let target_end = 130 + boundary_inserts;
+
+        // 실제 Studio처럼 편집 전에 페이지 트리/셀 유닛을 warm한다.
+        let initial_ranges = target_tree_ranges(&doc);
+        assert_eq!(
+            initial_ranges.last().map(|(_, _, end)| *end),
+            Some(130),
+            "{label}: initial max char"
+        );
+        doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 130)
+            .expect("warm target cursor");
+        let initial_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "initial", &initial_cuts);
+
+        // #2195 이후에도 44번째 입력은 target paragraph의 상대 flow advance를 바꾼다.
+        // 다만 선언 셀 높이가 증가분을 흡수해 full pagination의 cut/bounds는 불변이다.
+        // render_normalized warm tree는 flush 전에도 매 mutation을 즉시 반영해야 한다.
+        // [#2430] HY/한양 ASCII advance는 0.497em이다. 그러나 저장 HWP LINE_SEG와
+        // HWPX adapter layout의 실제 한컴 2020 전환점은 각각 56/61회다.
+        for inserted in 0..boundary_inserts {
+            let raw = doc
+                .insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 130 + inserted, "1")
+                .expect("deferred sequential insert");
+            let result: Value = serde_json::from_str(&raw).expect("edit result json");
+            assert_eq!(
+                result["cellFlowChanged"].as_bool(),
+                Some(inserted + 1 == boundary_inserts),
+                "{label}: input {} flow signal",
+                inserted + 1
+            );
+        }
+        let transient_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "transient", &transient_cuts);
+        let transient_cut = transient_cuts[0].clone();
+        let transient_ranges = target_tree_ranges(&doc);
+        let transient_max = transient_ranges
+            .last()
+            .map(|(_, _, end)| *end)
+            .expect("transient target end");
+        let transient_rect = doc
+            .get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, target_end)
+            .expect("transient direct rect");
+
+        doc.flush_deferred_pagination()
+            .expect("explicit pagination control");
+        let flushed_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "full-flush", &flushed_cuts);
+        let flushed_cut = flushed_cuts[0].clone();
+        let flushed_ranges = target_tree_ranges(&doc);
+        let flushed_max = flushed_ranges
+            .last()
+            .map(|(_, _, end)| *end)
+            .expect("flushed target end");
+        let flushed_rect = doc
+            .get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, target_end)
+            .expect("flushed direct rect");
+
+        eprintln!(
+            "#2214 {label}: transient max={transient_max} rect={transient_rect}; flushed max={flushed_max} rect={flushed_rect}; cuts transient={transient_cut:?} flushed={flushed_cut:?}"
+        );
+
+        assert_eq!(
+            transient_max, target_end,
+            "{label}: scoped warm tree coherence"
+        );
+        assert_eq!(flushed_max, target_end, "{label}: flush oracle");
+        assert_eq!(
+            transient_ranges, flushed_ranges,
+            "{label}: transient target UTF-16 ranges must equal flush oracle"
+        );
+        assert_eq!(
+            initial_cuts, transient_cuts,
+            "{label}: scoped eviction must not change pagination fragments"
+        );
+        assert_eq!(transient_cut.start_cut, Vec::<usize>::new());
+        assert_eq!(
+            transient_cut.end_cut,
+            vec![37],
+            "{label}: transient page-zero cut"
+        );
+        assert_eq!(flushed_cut.start_cut, Vec::<usize>::new());
+        assert_eq!(
+            flushed_cut.end_cut,
+            vec![37],
+            "{label}: flushed page-zero cut"
+        );
+        assert_eq!(
+            transient_cut, flushed_cut,
+            "{label}: #2195 declared height must absorb the first-page advance"
+        );
+        let changed_pages = transient_cuts
+            .iter()
+            .zip(&flushed_cuts)
+            .enumerate()
+            .filter_map(|(page, (transient, flushed))| (transient != flushed).then_some(page))
+            .collect::<Vec<_>>();
+        eprintln!(
+            "#2214 {label}: PartialTable fragments={} changed_after_flush_count={}",
+            transient_cuts.len(),
+            changed_pages.len(),
+        );
+        assert_eq!(
+            transient_cuts.len(),
+            flushed_cuts.len(),
+            "{label}: page fingerprint count"
+        );
+        assert_eq!(
+            changed_pages,
+            (2..doc.page_count() as usize).collect::<Vec<_>>(),
+            "{label}: flush must realign downstream continuation cuts"
+        );
+        let transient_rect_json: Value =
+            serde_json::from_str(&transient_rect).expect("transient rect json");
+        let flushed_rect_json: Value =
+            serde_json::from_str(&flushed_rect).expect("flushed rect json");
+        for key in ["pageIndex", "x", "y", "height", "cellOverflowed"] {
+            assert_eq!(
+                transient_rect_json.get(key),
+                flushed_rect_json.get(key),
+                "{label}: transient cursor field {key} must equal flush oracle"
+            );
+        }
+        assert_eq!(
+            transient_rect_json.get("cellBounds"),
+            flushed_rect_json.get("cellBounds"),
+            "{label}: absorbed flow boundary must preserve cell bounds"
+        );
+        let transient_bounds_h = transient_rect_json["cellBounds"]["h"]
+            .as_f64()
+            .expect("transient bounds h");
+        let flushed_bounds_h = flushed_rect_json["cellBounds"]["h"]
+            .as_f64()
+            .expect("flushed bounds h");
+        assert!(
+            (transient_bounds_h - 945.9).abs() <= 0.2,
+            "{label}: transient bounds h={transient_bounds_h}"
+        );
+        assert!(
+            (flushed_bounds_h - 945.9).abs() <= 0.2,
+            "{label}: flushed bounds h={flushed_bounds_h}"
+        );
+        assert_eq!(doc.page_count(), 115, "{label}: page count");
+    }
+}
+
+/// #3137 Stage 3: stable cell edit가 돌려준 local x delta는 직전 absolute rect에 적용했을 때
+/// cache miss page-tree rebuild로 얻은 exact rect와 같아야 한다.
+#[test]
+fn issue3137_focused_cell_geometry_matches_exact_rect() {
+    #[derive(Debug, PartialEq, Eq)]
+    struct FocusedRunSnapshot {
+        text: String,
+        char_start: Option<usize>,
+        char_shape_id: Option<u32>,
+        para_shape_id: Option<u16>,
+        is_para_end: bool,
+        border_fill_id: u16,
+        bbox_bits: [u64; 4],
+        baseline_bits: u64,
+        font_family: String,
+        font_size_bits: u64,
+        letter_spacing_bits: u64,
+        ratio_bits: u64,
+        line_x_offset_bits: u64,
+        available_width_bits: u64,
+    }
+
+    fn focused_line_snapshot(
+        tree: &crate::renderer::render_tree::PageRenderTree,
+    ) -> ([u64; 4], Vec<FocusedRunSnapshot>) {
+        use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+
+        fn visit(node: &RenderNode) -> Option<([u64; 4], Vec<FocusedRunSnapshot>)> {
+            if let RenderNodeType::TextLine(line) = &node.node_type {
+                if line.section_index == Some(0)
+                    && line.para_index == Some(5)
+                    && line.line_index == Some(3)
+                    && node.children.iter().all(|child| {
+                        matches!(
+                            &child.node_type,
+                            RenderNodeType::TextRun(run)
+                                if run.cell_context.as_ref().is_some_and(|context| {
+                                    context.parent_para_index == 0
+                                        && context.path.len() == 1
+                                        && context.path[0].control_index == 2
+                                        && context.path[0].cell_index == 2
+                                        && context.path[0].cell_para_index == 5
+                                })
+                        )
+                    })
+                {
+                    let runs = node
+                        .children
+                        .iter()
+                        .map(|child| {
+                            let RenderNodeType::TextRun(run) = &child.node_type else {
+                                unreachable!("focused line children were validated as TextRun");
+                            };
+                            FocusedRunSnapshot {
+                                text: run.text.clone(),
+                                char_start: run.char_start,
+                                char_shape_id: run.char_shape_id,
+                                para_shape_id: run.para_shape_id,
+                                is_para_end: run.is_para_end,
+                                border_fill_id: run.border_fill_id,
+                                bbox_bits: [
+                                    child.bbox.x.to_bits(),
+                                    child.bbox.y.to_bits(),
+                                    child.bbox.width.to_bits(),
+                                    child.bbox.height.to_bits(),
+                                ],
+                                baseline_bits: run.baseline.to_bits(),
+                                font_family: run.style.font_family.clone(),
+                                font_size_bits: run.style.font_size.to_bits(),
+                                letter_spacing_bits: run.style.letter_spacing.to_bits(),
+                                ratio_bits: run.style.ratio.to_bits(),
+                                line_x_offset_bits: run.style.line_x_offset.to_bits(),
+                                available_width_bits: run.style.available_width.to_bits(),
+                            }
+                        })
+                        .collect();
+                    return Some((
+                        [
+                            node.bbox.x.to_bits(),
+                            node.bbox.y.to_bits(),
+                            node.bbox.width.to_bits(),
+                            node.bbox.height.to_bits(),
+                        ],
+                        runs,
+                    ));
+                }
+            }
+            node.children.iter().find_map(visit)
+        }
+
+        visit(&tree.root).expect("focused final TextLine")
+    }
+
+    fn assert_cached_line_matches_fresh(
+        doc: &HwpDocument,
+        label: &str,
+        operation: &str,
+        page_index: u32,
+    ) {
+        let cached = {
+            let cache = doc.core.page_tree_cache.borrow();
+            focused_line_snapshot(
+                cache
+                    .get(page_index as usize)
+                    .and_then(Option::as_ref)
+                    .unwrap_or_else(|| panic!("focused page tree cache page={page_index}")),
+            )
+        };
+        let fresh = focused_line_snapshot(
+            &doc.build_page_render_tree(page_index)
+                .expect("fresh focused page render tree"),
+        );
+        assert_eq!(
+            cached, fresh,
+            "{label} {operation}: patched TextLine must equal a fresh page build"
+        );
+    }
+
+    fn focused_patch_page_index(mutation: &Value, label: &str, operation: &str) -> u32 {
+        mutation["focusedPagePatch"]["pageIndex"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!("{label} {operation}: missing focused patch page: {mutation}")
+            }) as u32
+    }
+
+    fn rect_number(rect: &Value, key: &str) -> f64 {
+        rect[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("cursor rect field {key}: {rect}"))
+    }
+
+    fn assert_geometry(
+        label: &str,
+        operation: &str,
+        before_rect: &Value,
+        mutation: &Value,
+        after_rect: &Value,
+        expected_source: u64,
+        expected_target: u64,
+    ) {
+        assert_eq!(
+            mutation["cellFlowChanged"].as_bool(),
+            Some(false),
+            "{label} {operation}: stable flow"
+        );
+        assert_eq!(
+            mutation["focusedPageTreePatched"].as_bool(),
+            Some(true),
+            "{label} {operation}: focused page tree patch"
+        );
+        let page_patch = &mutation["focusedPagePatch"];
+        assert!(
+            page_patch.is_object(),
+            "{label} {operation}: focused page repaint patch missing: {mutation}"
+        );
+        assert_eq!(
+            page_patch["pageIndex"], before_rect["pageIndex"],
+            "{label} {operation}: focused page repaint page"
+        );
+        for key in ["x", "y", "width", "height"] {
+            let value = page_patch[key]
+                .as_f64()
+                .unwrap_or_else(|| panic!("{label} {operation}: page patch {key}"));
+            assert!(
+                value.is_finite(),
+                "{label} {operation}: non-finite page patch {key}={value}"
+            );
+            if key == "width" || key == "height" {
+                assert!(
+                    value > 0.0,
+                    "{label} {operation}: non-positive page patch {key}={value}"
+                );
+            }
+        }
+        let geometry = &mutation["focusedCursorGeometry"];
+        assert!(
+            geometry.is_object(),
+            "{label} {operation}: focused geometry missing: {mutation}"
+        );
+        assert_eq!(
+            geometry["sourceCharOffset"].as_u64(),
+            Some(expected_source),
+            "{label} {operation}: source offset"
+        );
+        assert_eq!(
+            geometry["targetCharOffset"].as_u64(),
+            Some(expected_target),
+            "{label} {operation}: target offset"
+        );
+        assert!(
+            geometry["revision"].as_u64().unwrap_or(0)
+                > geometry["baseRevision"].as_u64().unwrap_or(u64::MAX),
+            "{label} {operation}: revision chain"
+        );
+
+        for key in ["pageIndex", "y", "height", "cellOverflowed"] {
+            assert_eq!(
+                before_rect.get(key),
+                after_rect.get(key),
+                "{label} {operation}: stable cursor field {key}"
+            );
+        }
+        assert_eq!(
+            before_rect.get("cellBounds"),
+            after_rect.get("cellBounds"),
+            "{label} {operation}: stable cell bounds"
+        );
+        let predicted_x = rect_number(before_rect, "x") + rect_number(geometry, "deltaX");
+        let exact_x = rect_number(after_rect, "x");
+        assert!(
+            // 공개 rect는 0.1px로 직렬화되므로 직전 rounded 원점의 최대 반올림 오차를 허용한다.
+            (predicted_x - exact_x).abs() <= 0.051,
+            "{label} {operation}: predicted x={predicted_x}, exact x={exact_x}, geometry={geometry}"
+        );
+    }
+
+    for (label, relative) in [
+        ("hwp", "samples/issue1949_giant_cell_nested_tables_perf.hwp"),
+        (
+            "hwpx",
+            "samples/issue1949_giant_cell_nested_tables_perf.hwpx",
+        ),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let bytes = std::fs::read(path).expect("read #3137 fixture");
+        let mut doc = HwpDocument::from_bytes(&bytes).expect("load #3137 fixture");
+        // HWPX는 paragraph layout에는 full reflow를 쓰지만, same-line 결과라면
+        // cached tree tail patch는 fresh build와 동치여야 한다.
+        let supports_tail_cache_patch = true;
+
+        let rect_130: Value = serde_json::from_str(
+            &doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 130)
+                .expect("initial exact rect"),
+        )
+        .expect("initial rect json");
+        doc.get_cursor_rect_by_path_with_hint(
+            0,
+            0,
+            r#"[{"controlIndex":2,"cellIndex":2,"cellParaIndex":5}]"#,
+            130,
+            Some(0),
+        )
+        .expect("warm initial page tree cache");
+        let insert_1: Value = serde_json::from_str(
+            &doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 130, "1")
+                .expect("first stable insert"),
+        )
+        .expect("first insert json");
+        let rect_131: Value = serde_json::from_str(
+            &doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 131)
+                .expect("first exact rect"),
+        )
+        .expect("first exact rect json");
+        assert_eq!(
+            insert_1["cellFlowChanged"].as_bool(),
+            Some(false),
+            "{label} first insert flow"
+        );
+        // 원본 LineSeg가 첫 local reflow에서 합성 metrics로 정규화되는 문서는 첫 입력을
+        // exact fallback한다. 그 exact rect가 다음 revision의 재사용 기준점이 된다.
+        if insert_1["focusedCursorGeometry"].is_object() {
+            assert_geometry(label, "insert-1", &rect_130, &insert_1, &rect_131, 130, 131);
+        }
+        doc.get_cursor_rect_by_path_with_hint(
+            0,
+            0,
+            r#"[{"controlIndex":2,"cellIndex":2,"cellParaIndex":5}]"#,
+            131,
+            Some(0),
+        )
+        .expect("warm post-normalization page tree cache");
+
+        let insert_2: Value = serde_json::from_str(
+            &doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 131, "a")
+                .expect("second stable insert"),
+        )
+        .expect("second insert json");
+        assert_eq!(
+            insert_2["focusedPageTreePatched"].as_bool(),
+            Some(supports_tail_cache_patch),
+            "{label} insert-a same-line tail-cache policy"
+        );
+        if supports_tail_cache_patch {
+            assert_cached_line_matches_fresh(
+                &doc,
+                label,
+                "insert-a",
+                focused_patch_page_index(&insert_2, label, "insert-a"),
+            );
+        } else {
+            assert!(
+                doc.core
+                    .page_tree_cache
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none),
+                "{label} insert-a full reflow must invalidate cached page trees"
+            );
+        }
+        let rect_132: Value = serde_json::from_str(
+            &doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 132)
+                .expect("second exact rect"),
+        )
+        .expect("second exact rect json");
+        if supports_tail_cache_patch {
+            assert_geometry(label, "insert-a", &rect_131, &insert_2, &rect_132, 131, 132);
+        }
+
+        let replace: Value = serde_json::from_str(
+            &doc.replace_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 131, 1, "한")
+                .expect("stable IME replace"),
+        )
+        .expect("replace json");
+        if supports_tail_cache_patch {
+            assert_cached_line_matches_fresh(
+                &doc,
+                label,
+                "replace-ime",
+                focused_patch_page_index(&replace, label, "replace-ime"),
+            );
+        } else {
+            assert_eq!(replace["focusedPageTreePatched"].as_bool(), Some(false));
+            assert!(
+                doc.core
+                    .page_tree_cache
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none),
+                "{label} replace-ime full reflow must invalidate cached page trees"
+            );
+        }
+        let rect_replaced: Value = serde_json::from_str(
+            &doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 132)
+                .expect("replace exact rect"),
+        )
+        .expect("replace exact rect json");
+        if supports_tail_cache_patch {
+            assert_geometry(
+                label,
+                "replace-ime",
+                &rect_132,
+                &replace,
+                &rect_replaced,
+                132,
+                132,
+            );
+        }
+
+        let delete: Value = serde_json::from_str(
+            &doc.delete_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 131, 1)
+                .expect("stable backspace"),
+        )
+        .expect("delete json");
+        let delete_patched = delete["focusedPageTreePatched"].as_bool();
+        if delete_patched == Some(false) {
+            assert!(
+                doc.core
+                    .page_tree_cache
+                    .borrow()
+                    .iter()
+                    .all(Option::is_none),
+                "{label} delete-backward fallback must invalidate cached page trees"
+            );
+        }
+        let rect_deleted: Value = serde_json::from_str(
+            &doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 5, 131)
+                .expect("delete exact rect"),
+        )
+        .expect("delete exact rect json");
+        match delete_patched {
+            Some(true) => {
+                assert_cached_line_matches_fresh(
+                    &doc,
+                    label,
+                    "delete-backward",
+                    focused_patch_page_index(&delete, label, "delete-backward"),
+                );
+                assert_geometry(
+                    label,
+                    "delete-backward",
+                    &rect_replaced,
+                    &delete,
+                    &rect_deleted,
+                    132,
+                    131,
+                );
+            }
+            Some(false) => {
+                assert_eq!(
+                    rect_deleted["cellBounds"], rect_replaced["cellBounds"],
+                    "{label} delete-backward fallback must keep cell bounds"
+                );
+            }
+            other => panic!("{label} delete-backward patch flag must be boolean: {other:?}"),
+        }
+
+        // 중간 오프셋 편집은 후속 TextRun char_start까지 바꾸므로 보수적으로 전체
+        // 캐시 무효화한다. 같은 text를 되돌린 뒤 page tree를 다시 warm한다.
+        let middle_insert: Value = serde_json::from_str(
+            &doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 125, "x")
+                .expect("middle insert fallback"),
+        )
+        .expect("middle insert json");
+        assert_eq!(
+            middle_insert["focusedPageTreePatched"].as_bool(),
+            Some(false),
+            "{label}: middle edit must not patch the cached tail line"
+        );
+        assert!(
+            middle_insert["focusedPagePatch"].is_null(),
+            "{label}: middle edit must not expose a repaint patch"
+        );
+        assert!(
+            doc.core
+                .page_tree_cache
+                .borrow()
+                .iter()
+                .all(Option::is_none),
+            "{label}: middle edit must invalidate cached page trees"
+        );
+        let middle_delete: Value = serde_json::from_str(
+            &doc.delete_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 125, 1)
+                .expect("restore middle insert"),
+        )
+        .expect("middle delete json");
+        assert_eq!(
+            middle_delete["focusedPageTreePatched"].as_bool(),
+            Some(false),
+            "{label}: uncached restore must keep the full invalidation fallback"
+        );
+        doc.get_cursor_rect_by_path_with_hint(
+            0,
+            0,
+            r#"[{"controlIndex":2,"cellIndex":2,"cellParaIndex":5}]"#,
+            131,
+            Some(0),
+        )
+        .expect("rewarm after middle-edit fallback");
+
+        // 이 시나리오는 앞서 IME replace/backspace를 거치므로 #2214의 pristine
+        // 56/61 입력 경계를 재사용하지 않는다. 실제 첫 flow boundary까지 각 stable
+        // 입력은 cached patch, boundary 입력은 full invalidation이어야 한다.
+        let mut saw_flow_boundary = false;
+        for inserted in 0..512 {
+            let mutation: Value = serde_json::from_str(
+                &doc.insert_text_in_cell_native_deferred_pagination(
+                    0,
+                    0,
+                    2,
+                    2,
+                    5,
+                    131 + inserted,
+                    "1",
+                )
+                .expect("tail insert through flow boundary"),
+            )
+            .expect("tail boundary json");
+            let boundary = mutation["cellFlowChanged"].as_bool().unwrap_or_else(|| {
+                panic!(
+                    "{label}: tail input {} must report a boolean cell-flow signal: {mutation}",
+                    inserted + 2
+                )
+            });
+            assert_eq!(
+                mutation["focusedPageTreePatched"].as_bool(),
+                Some(supports_tail_cache_patch && !boundary),
+                "{label}: tail input {} patch signal",
+                inserted + 2
+            );
+            assert_eq!(
+                mutation["focusedPagePatch"].is_object(),
+                supports_tail_cache_patch && !boundary,
+                "{label}: tail input {} repaint patch signal",
+                inserted + 2
+            );
+            if boundary {
+                saw_flow_boundary = true;
+                break;
+            }
+        }
+        assert!(
+            saw_flow_boundary,
+            "{label}: IME-normalized tail input must eventually cross a line-flow boundary"
+        );
+        assert!(
+            doc.core
+                .page_tree_cache
+                .borrow()
+                .iter()
+                .all(Option::is_none),
+            "{label}: flow boundary must invalidate the focused page tree"
+        );
+    }
+}
+
+/// #2424 Stage D: 공개 pagination을 유지한 채 한 호출당 한 fragment만 전진하고,
+/// 마지막 step에서만 full-pagination oracle과 같은 cut chain을 원자적으로 commit한다.
+#[test]
+fn issue2424_resumable_pagination_commits_only_after_final_fragment() {
+    for (label, relative) in [
+        ("hwp", "samples/issue1949_giant_cell_nested_tables_perf.hwp"),
+        (
+            "hwpx",
+            "samples/issue1949_giant_cell_nested_tables_perf.hwpx",
+        ),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let bytes = std::fs::read(path).expect("read #2424 fixture");
+        let mut doc = HwpDocument::from_bytes(&bytes).expect("load #2424 fixture");
+        let boundary_inserts = issue2214_flow_boundary_insert_count(label);
+
+        for inserted in 0..boundary_inserts {
+            doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 130 + inserted, "1")
+                .expect("deferred sequential insert");
+        }
+        let transient_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "resumable-transient", &transient_cuts);
+
+        let begin: Value = serde_json::from_str(
+            &doc.begin_deferred_pagination(1)
+                .expect("begin resumable pagination"),
+        )
+        .expect("begin result json");
+        assert_eq!(begin["status"], "pending", "{label}: begin status");
+        assert_eq!(
+            issue2214_target_cuts(&doc),
+            transient_cuts,
+            "{label}: begin must not publish shadow pages"
+        );
+
+        let mut step_calls = 0usize;
+        let mut fragments_processed = 0usize;
+        loop {
+            let step: Value = serde_json::from_str(
+                &doc.step_deferred_pagination(1)
+                    .expect("step resumable pagination"),
+            )
+            .expect("step result json");
+            step_calls += 1;
+            fragments_processed +=
+                step["fragmentsProcessed"].as_u64().expect("fragment count") as usize;
+            match step["status"].as_str() {
+                Some("pending") => assert_eq!(
+                    issue2214_target_cuts(&doc),
+                    transient_cuts,
+                    "{label}: step {step_calls} published an incomplete shadow result"
+                ),
+                Some("complete") => break,
+                other => panic!("{label}: unexpected step status {other:?}: {step}"),
+            }
+        }
+
+        assert_eq!(step_calls, 115, "{label}: one macrotask per fragment");
+        assert_eq!(
+            fragments_processed, 115,
+            "{label}: every target fragment processed exactly once"
+        );
+        let committed_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "resumable-committed", &committed_cuts);
+        assert_eq!(
+            transient_cuts
+                .iter()
+                .zip(&committed_cuts)
+                .filter(|(before, after)| before != after)
+                .count(),
+            113,
+            "{label}: committed cut chain must match the full-pagination oracle"
+        );
+    }
+}
+
+/// #2424 리뷰 보정: line 5→4가 되는 삭제도 incomplete shadow cut을 게시하지 않고,
+/// 마지막 step에서 full-pagination oracle과 같은 continuation chain으로 돌아가야 한다.
+#[test]
+fn issue2424_resumable_delete_commits_only_after_final_fragment() {
+    for (label, relative) in [
+        ("hwp", "samples/issue1949_giant_cell_nested_tables_perf.hwp"),
+        (
+            "hwpx",
+            "samples/issue1949_giant_cell_nested_tables_perf.hwpx",
+        ),
+    ] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        let bytes = std::fs::read(path).expect("read #2424 fixture");
+        let mut doc = HwpDocument::from_bytes(&bytes).expect("load #2424 fixture");
+        let boundary_inserts = issue2214_flow_boundary_insert_count(label);
+        doc.insert_text_in_cell_native_deferred_pagination(
+            0,
+            0,
+            2,
+            2,
+            5,
+            130,
+            &"1".repeat(boundary_inserts),
+        )
+        .expect("prepare fifth cell line");
+        doc.flush_deferred_pagination()
+            .expect("commit expanded pagination");
+        let expanded_cuts = issue2214_target_cuts(&doc);
+        let expanded_line_starts = doc
+            .core
+            .get_cell_paragraph_ref(0, 0, 2, 2, 5)
+            .expect("expanded target paragraph")
+            .line_segs
+            .iter()
+            .map(|seg| seg.text_start)
+            .collect::<Vec<_>>();
+
+        let delete_raw = doc
+            .delete_text_in_cell_native_deferred_pagination(
+                0,
+                0,
+                2,
+                2,
+                5,
+                129 + boundary_inserts,
+                1,
+            )
+            .expect("deferred line-shrinking delete");
+        let delete: Value = serde_json::from_str(&delete_raw).expect("delete result");
+        let deleted_line_starts = doc
+            .core
+            .get_cell_paragraph_ref(0, 0, 2, 2, 5)
+            .expect("deleted target paragraph")
+            .line_segs
+            .iter()
+            .map(|seg| seg.text_start)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            delete["cellFlowChanged"], true,
+            "{label}: delete must remove the fifth line; expanded={expanded_line_starts:?}, deleted={deleted_line_starts:?}"
+        );
+        let transient_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "delete-transient", &transient_cuts);
+
+        let begin: Value = serde_json::from_str(
+            &doc.begin_deferred_pagination(1)
+                .expect("begin delete pagination"),
+        )
+        .expect("begin delete json");
+        assert_eq!(begin["status"], "pending", "{label}: delete begin");
+        assert_eq!(
+            issue2214_target_cuts(&doc),
+            transient_cuts,
+            "{label}: delete begin must not publish shadow pages"
+        );
+
+        let mut step_calls = 0usize;
+        loop {
+            let step: Value = serde_json::from_str(
+                &doc.step_deferred_pagination(1)
+                    .expect("step delete pagination"),
+            )
+            .expect("step delete json");
+            step_calls += 1;
+            match step["status"].as_str() {
+                Some("pending") => assert_eq!(
+                    issue2214_target_cuts(&doc),
+                    transient_cuts,
+                    "{label}: delete step {step_calls} published incomplete cuts"
+                ),
+                Some("complete") => break,
+                other => panic!("{label}: unexpected delete step {other:?}: {step}"),
+            }
+        }
+        assert_eq!(step_calls, 115, "{label}: delete fragment steps");
+        let committed_cuts = issue2214_target_cuts(&doc);
+        issue2214_assert_cut_continuity(label, "delete-committed", &committed_cuts);
+
+        let mut oracle = HwpDocument::from_bytes(&bytes).expect("load delete oracle");
+        oracle
+            .insert_text_in_cell_native(0, 0, 2, 2, 5, 130, &"1".repeat(boundary_inserts - 1))
+            .expect("full-pagination delete oracle state");
+        assert_eq!(
+            committed_cuts,
+            issue2214_target_cuts(&oracle),
+            "{label}: resumable delete must match full pagination"
+        );
+        assert_ne!(
+            committed_cuts, expanded_cuts,
+            "{label}: deleting the boundary character must change downstream cuts"
+        );
+    }
+}
+
+#[test]
+fn issue2424_new_edit_stales_old_job_and_sync_flush_restarts_latest_revision() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("samples/issue1949_giant_cell_nested_tables_perf.hwp");
+    let bytes = std::fs::read(path).expect("read #2424 fixture");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("load #2424 fixture");
+    let boundary_inserts = issue2214_flow_boundary_insert_count("hwp");
+    for inserted in 0..boundary_inserts {
+        doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 130 + inserted, "1")
+            .expect("deferred sequential insert");
+    }
+
+    let begin: Value = serde_json::from_str(
+        &doc.begin_deferred_pagination(1)
+            .expect("begin first revision"),
+    )
+    .expect("begin json");
+    assert_eq!(begin["status"], "pending");
+    let first_revision = begin["revision"].as_u64().expect("first revision");
+    let first_step: Value = serde_json::from_str(
+        &doc.step_deferred_pagination(1)
+            .expect("step first revision"),
+    )
+    .expect("step json");
+    assert_eq!(first_step["status"], "pending");
+
+    doc.insert_text_in_cell_native_deferred_pagination(0, 0, 2, 2, 5, 130 + boundary_inserts, "1")
+        .expect("new edit supersedes first revision");
+    let stale: Value = serde_json::from_str(
+        &doc.step_deferred_pagination(1)
+            .expect("reject stale first revision"),
+    )
+    .expect("stale json");
+    assert_eq!(stale["status"], "stale");
+    assert_eq!(stale["revision"].as_u64(), Some(first_revision));
+
+    let replacement: Value = serde_json::from_str(
+        &doc.begin_deferred_pagination(1)
+            .expect("begin replacement revision"),
+    )
+    .expect("replacement json");
+    assert_eq!(replacement["status"], "pending");
+    assert!(
+        replacement["revision"]
+            .as_u64()
+            .expect("replacement revision")
+            > first_revision,
+        "latest edit must own a newer job revision"
+    );
+    assert!(doc.cancel_deferred_pagination());
+    assert!(!doc.cancel_deferred_pagination());
+
+    let flushed: Value = serde_json::from_str(
+        &doc.flush_deferred_pagination()
+            .expect("sync barrier restarts latest revision"),
+    )
+    .expect("flush json");
+    assert_eq!(flushed["status"], "complete");
+    assert_eq!(flushed["pageCount"], 115);
+    issue2214_assert_cut_continuity("hwp", "replacement-flushed", &issue2214_target_cuts(&doc));
+}
+
+#[test]
+fn update_style_dirties_docinfo_for_hwp5_save() {
+    use crate::model::style::Style;
+    let mut doc = HwpDocument::create_empty();
+    if doc.document.doc_info.styles.is_empty() {
+        doc.document.doc_info.styles.push(Style::default());
+    }
+    doc.document.doc_info.styles.push(Style {
+        local_name: "OLD".to_string(),
+        ..Default::default()
+    });
+    let sid = (doc.document.doc_info.styles.len() - 1) as u32;
+    // parsed 문서처럼 DocInfo 원본 스트림을 채운다(clean 상태): 무효화가 없으면 저장이 원본 반환.
+    doc.document.doc_info.raw_stream = Some(vec![0xAB; 64]);
+    doc.document.doc_info.raw_stream_dirty = false;
+
+    assert!(doc.update_style(sid, r#"{"name":"NEW"}"#));
+
+    assert!(
+        doc.document.doc_info.raw_stream_dirty,
+        "update_style 후 raw_stream_dirty=true 여야 이름 변경이 .hwp 저장에 반영된다"
+    );
+    let bytes = crate::serializer::doc_info::serialize_doc_info(
+        &doc.document.doc_info,
+        &doc.document.doc_properties,
+    );
+    assert_ne!(
+        bytes,
+        vec![0xAB; 64],
+        "serialize_doc_info 가 여전히 원본 스트림을 반환"
+    );
+}
+
+#[test]
+fn delete_style_invalidates_docinfo_and_sections() {
+    use crate::model::style::Style;
+    let mut doc = HwpDocument::create_empty();
+    if doc.document.doc_info.styles.is_empty() {
+        doc.document.doc_info.styles.push(Style::default());
+    }
+    doc.document.doc_info.styles.push(Style::default());
+    let sid = (doc.document.doc_info.styles.len() - 1) as u32;
+    doc.document.sections[0].paragraphs[0].style_id = sid as u8;
+    doc.document.doc_info.raw_stream = Some(vec![0xAB; 64]);
+    doc.document.doc_info.raw_stream_dirty = false;
+    doc.document.sections[0].raw_stream = Some(vec![0xCD; 64]);
+
+    assert!(doc.delete_style(sid));
+
+    assert!(
+        doc.document.doc_info.raw_stream_dirty,
+        "delete_style 후 DocInfo raw_stream_dirty=true 여야 한다"
+    );
+    assert!(
+        doc.document.sections[0].raw_stream.is_none(),
+        "문단 style_id 재배정이 반영되도록 섹션 raw_stream 이 무효화돼야 한다"
+    );
+}
+
+/// [#2557] 스타일 이름에 역슬래시/개행/탭이 있어도 방출 JSON 이 파싱 가능해야 한다.
+///
+/// 종전엔 큰따옴표만 이스케이프해 깨진 JSON 이 나왔고, TS 측은 가드 없이
+/// JSON.parse 하므로(wasm-bridge.ts:1957, :2025) 예외가 났다. getStyleAt 은 커서
+/// 이동마다 호출되어 해당 문서에서 키 입력마다 편집기가 멈춘다.
+#[test]
+fn style_json_survives_backslash_and_control_chars() {
+    let mut doc = HwpDocument::create_empty();
+    {
+        let styles = &mut doc.core.document.doc_info.styles;
+        if styles.is_empty() {
+            styles.push(crate::model::style::Style::default());
+        }
+        styles[0].local_name = "a\\b\nc\td\"e".to_string();
+        styles[0].english_name = "x\\y\nz".to_string();
+    }
+
+    let list = doc.get_style_list();
+    let parsed: Value = serde_json::from_str(&list)
+        .expect("스타일 이름에 역슬래시/개행이 있어도 유효한 JSON 이어야 함");
+    assert_eq!(
+        parsed[0]["name"].as_str().unwrap(),
+        "a\\b\nc\td\"e",
+        "이스케이프 왕복 후 원래 이름이 복원돼야 함"
+    );
+
+    let at = doc.get_style_at(0, 0);
+    serde_json::from_str::<Value>(&at)
+        .expect("getStyleAt 도 유효한 JSON 이어야 함(커서 이동마다 호출됨)");
+}
+
+#[test]
+fn local_body_replace_exposes_stable_edit_before_full_pagination() {
+    use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+
+    fn contains_text(node: &RenderNode, needle: &str) -> bool {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.text.contains(needle) {
+                return true;
+            }
+        }
+        node.children
+            .iter()
+            .any(|child| contains_text(child, needle))
+    }
+
+    let mut doc = HwpDocument::create_empty();
+    doc.insert_text_native(0, 0, 0, "나")
+        .expect("seed non-empty body paragraph");
+    doc.build_page_render_tree(0).expect("warm page tree");
+
+    let raw = doc
+        .replace_body_text_local_native(0, 0, 1, 0, "가")
+        .expect("stable local insert");
+    let result: Value = serde_json::from_str(&raw).expect("local result json");
+
+    assert_eq!(result["charOffset"].as_u64(), Some(2));
+    assert_eq!(result["documentPaginationPending"].as_bool(), Some(true));
+    assert_eq!(result["flowChanged"].as_bool(), Some(false));
+    assert_eq!(
+        doc.get_text_range_native(0, 0, 0, 2)
+            .expect("immediate text"),
+        "나가"
+    );
+
+    let transient_tree = doc.build_page_render_tree(0).expect("transient page tree");
+    assert!(
+        contains_text(&transient_tree.root, "가"),
+        "warm page tree must expose the local edit before full pagination"
+    );
+
+    let deleted_raw = doc
+        .replace_body_text_local_native(0, 0, 1, 1, "")
+        .expect("stable local delete");
+    let deleted: Value = serde_json::from_str(&deleted_raw).expect("delete result json");
+    assert_eq!(deleted["charOffset"].as_u64(), Some(1));
+    assert_eq!(deleted["documentPaginationPending"].as_bool(), Some(true));
+    assert_eq!(deleted["flowChanged"].as_bool(), Some(false));
+    assert_eq!(
+        doc.get_text_range_native(0, 0, 0, 1).expect("deleted text"),
+        "나"
+    );
+}
+
+#[test]
+fn local_body_replace_applies_ime_replacement_as_one_final_state() {
+    let mut doc = HwpDocument::create_empty();
+    doc.replace_body_text_local_native(0, 0, 0, 0, "ㅎ")
+        .expect("initial composition");
+    let raw = doc
+        .replace_body_text_local_native(0, 0, 0, 1, "하")
+        .expect("composition replacement");
+    let result: Value = serde_json::from_str(&raw).expect("replace result json");
+
+    assert_eq!(result["charOffset"].as_u64(), Some(1));
+    assert_eq!(
+        doc.get_text_range_native(0, 0, 0, 1)
+            .expect("final composition"),
+        "하"
+    );
+}
+
+#[test]
+fn local_body_replace_paginates_immediately_at_flow_boundary() {
+    let mut doc = HwpDocument::create_empty();
+    let mut boundary = None;
+
+    for offset in 0..512 {
+        let raw = doc
+            .replace_body_text_local_native(0, 0, offset, 0, "가")
+            .expect("sequential local insert");
+        let result: Value = serde_json::from_str(&raw).expect("flow result json");
+        if result["flowChanged"].as_bool() == Some(true) {
+            boundary = Some(result);
+            break;
+        }
+    }
+
+    let result = boundary.expect("a body line-flow boundary within 512 characters");
+    assert_eq!(result["documentPaginationPending"].as_bool(), Some(false));
+    assert_eq!(result["flowChanged"].as_bool(), Some(true));
+    assert_eq!(
+        doc.page_count(),
+        doc.pagination
+            .iter()
+            .map(|section| section.pages.len())
+            .sum::<usize>() as u32
+    );
+}
+
+// ─── Alt(local resize) 조절 셀이 Ctrl(칸 전체 delta) 조절을 따라오는지 ─────────
+//
+// Alt+방향키(localResize + render 힌트)로 조절한
+// 행은 `local_resize_cell_widths` 에 절대값 override 를 갖는다. 이후 Ctrl+방향키
+// (plain widthDelta)가 칸 전체를 조절하면 cell.width 는 움직이는데 override 는
+// 그대로 남아 — Alt 만진 행만 옛 경계에 얼어붙고 나머지 칸이 움직인다("따로 논다").
+// 계약: plain delta 가 override 를 가진 셀에 적용되면 override 도 같은 양만큼
+// 이동해야 한다 (높이 동일).
+
+#[test]
+fn local_resize_override_follows_plain_width_delta() {
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc.create_table_native(0, 0, 0, 3, 3).expect("표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    // 대상 셀: row1 col1 (cellIdx 는 행 우선)
+    let (target_idx, base_width) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let (idx, cell) = table
+            .cells
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.row == 1 && c.col == 1)
+            .expect("row1col1");
+        (idx, cell.width)
+    };
+
+    // 1) Alt 상당: localResize + renderWidth override 등록
+    let render_w = base_width + 900;
+    doc.resize_table_cells_native(
+        0,
+        table_para_idx,
+        0,
+        &format!(
+            r#"[{{"cellIdx":{target_idx},"widthDelta":900,"localResize":true,"renderWidth":{render_w}}}]"#
+        ),
+    )
+    .expect("local resize");
+    {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let (_, w) = table
+            .local_resize_cell_widths
+            .iter()
+            .find(|(idx, _)| *idx == target_idx)
+            .expect("override 등록");
+        assert_eq!(*w, render_w);
+    }
+
+    // 2) Ctrl 상당: 같은 칸(col1) 전체에 plain widthDelta +600
+    let col_updates = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        table
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.col == 1 && c.col_span == 1)
+            .map(|(idx, _)| format!(r#"{{"cellIdx":{idx},"widthDelta":600}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    doc.resize_table_cells_native(0, table_para_idx, 0, &format!("[{col_updates}]"))
+        .expect("칸 전체 resize");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let (_, w) = table
+        .local_resize_cell_widths
+        .iter()
+        .find(|(idx, _)| *idx == target_idx)
+        .expect("override 유지");
+    assert_eq!(
+        *w,
+        render_w + 600,
+        "plain widthDelta 가 override 를 가진 셀에 적용되면 override 도 같은 양만큼 \
+         이동해야 한다 — 아니면 Alt 조절 행만 옛 경계에 얼어붙는다"
+    );
+}
+
+#[test]
+fn local_resize_override_follows_plain_height_delta() {
+    // 폭 테스트(local_resize_override_follows_plain_width_delta)의 높이 대칭.
+    let mut doc = HwpDocument::create_empty();
+    let table_result = doc.create_table_native(0, 0, 0, 3, 3).expect("표 생성");
+    let table_para_idx = issue_1481_json_usize(&table_result, "paraIdx");
+
+    let (target_idx, base_height) = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        let (idx, cell) = table
+            .cells
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.row == 1 && c.col == 1)
+            .expect("row1col1");
+        (idx, cell.height)
+    };
+
+    let render_h = base_height + 900;
+    doc.resize_table_cells_native(
+        0,
+        table_para_idx,
+        0,
+        &format!(
+            r#"[{{"cellIdx":{target_idx},"heightDelta":900,"localResize":true,"renderHeight":{render_h}}}]"#
+        ),
+    )
+    .expect("local resize");
+
+    let row_updates = {
+        let table = issue_1481_table(&doc, table_para_idx);
+        table
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.row == 1 && c.row_span == 1)
+            .map(|(idx, _)| format!(r#"{{"cellIdx":{idx},"heightDelta":600}}"#))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    doc.resize_table_cells_native(0, table_para_idx, 0, &format!("[{row_updates}]"))
+        .expect("줄 전체 resize");
+
+    let table = issue_1481_table(&doc, table_para_idx);
+    let (_, h) = table
+        .local_resize_cell_heights
+        .iter()
+        .find(|(idx, _)| *idx == target_idx)
+        .expect("override 유지");
+    assert_eq!(
+        *h,
+        render_h + 600,
+        "높이 override 도 plain delta 를 따라와야 한다 (폭과 대칭)"
+    );
+}
+
+// ─── 표 나누기 / 표 붙이기 (한컴 table(dividing).htm / table(attach).htm) ────
+//
+// 나누기: 커서 행부터 새 표로 분리. 첫 행에서는 불가. 뒤 표는 앞 표 속성 상속.
+// 붙이기: 다음 표를 현재 표 뒤에 이어 붙임. 사이에 내용 문단이 있으면 거부.
+//         칸 수가 달라도 붙는다 (한컴 명세).
+
+fn table_control_paras(doc: &HwpDocument) -> Vec<usize> {
+    use crate::model::control::Control;
+    doc.document.sections[0]
+        .paragraphs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.controls.iter().any(|c| matches!(c, Control::Table(_))))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[test]
+fn split_table_divides_rows_and_inherits_attrs() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    let (orig_width, orig_border) = {
+        let t = issue_1481_table(&doc, para_idx);
+        (t.common.width, t.border_fill_id)
+    };
+
+    doc.split_table_native(0, para_idx, 0, 2)
+        .expect("표 나누기");
+
+    let tables = table_control_paras(&doc);
+    assert_eq!(tables.len(), 2, "나누면 표가 두 개여야 한다");
+
+    let front = issue_1481_table(&doc, tables[0]);
+    assert_eq!(front.row_count, 2, "앞 표는 커서 행 이전까지");
+    assert_eq!(front.cells.len(), 6);
+    assert!(front.cells.iter().all(|c| c.row < 2));
+
+    let back = issue_1481_table(&doc, tables[1]);
+    assert_eq!(back.row_count, 2, "뒤 표는 커서 행부터");
+    assert_eq!(back.cells.len(), 6);
+    assert!(
+        back.cells.iter().all(|c| c.row < 2),
+        "뒤 표 셀 row 는 0 부터 재배열되어야 한다"
+    );
+    assert_eq!(back.common.width, orig_width, "뒤 표는 앞 표 폭 상속");
+    assert_eq!(back.border_fill_id, orig_border, "뒤 표는 앞 표 속성 상속");
+}
+
+#[test]
+fn split_table_at_first_row_is_rejected() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 3, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    assert!(
+        doc.split_table_native(0, para_idx, 0, 0).is_err(),
+        "첫 행에서는 표 나누기가 거부되어야 한다 (한컴 동일)"
+    );
+}
+
+#[test]
+fn split_then_merge_round_trips_rows() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 5, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    doc.split_table_native(0, para_idx, 0, 3).expect("나누기");
+    let tables = table_control_paras(&doc);
+    assert_eq!(tables.len(), 2);
+
+    doc.merge_table_with_next_native(0, tables[0], 0)
+        .expect("붙이기");
+
+    let tables = table_control_paras(&doc);
+    assert_eq!(tables.len(), 1, "붙이면 표가 하나여야 한다");
+    let t = issue_1481_table(&doc, tables[0]);
+    assert_eq!(t.row_count, 5, "행 수 원복");
+    assert_eq!(t.cells.len(), 15);
+    // 이어붙인 행들의 row 재배열 검증
+    for r in 0..5u16 {
+        assert_eq!(
+            t.cells.iter().filter(|c| c.row == r).count(),
+            3,
+            "행 {r} 셀 수"
+        );
+    }
+}
+
+#[test]
+fn merge_rejects_when_paragraph_between_has_content() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+
+    let tables = table_control_paras(&doc);
+    let between = tables[0] + 1;
+    assert!(between < tables[1], "나눈 사이에 문단이 있어야 한다");
+    doc.document.sections[0].paragraphs[between]
+        .text
+        .push_str("사이 내용");
+
+    assert!(
+        doc.merge_table_with_next_native(0, tables[0], 0).is_err(),
+        "표 사이에 내용이 있으면 붙이기가 거부되어야 한다 (한컴 동일)"
+    );
+}
+
+#[test]
+fn split_table_recomputes_corrupted_row_sizes() {
+    // 파싱이 불완전한 문서는 row_sizes 가 row_count 와 어긋날 수 있다. 그 상태로
+    // 나누면 산술 분할(drain/truncate)은 어긋남을 양쪽 표로 전파해 직렬화를
+    // 깨뜨린다 — 나누기는 양쪽 row_sizes 를 실제 셀에서 재계산해야 한다.
+    use crate::model::control::Control;
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    for c in &mut doc.document.sections[0].paragraphs[para_idx].controls {
+        if let Control::Table(t) = c {
+            t.row_sizes = vec![1]; // 손상 재현: 4행인데 항목 1개
+        }
+    }
+
+    doc.split_table_native(0, para_idx, 0, 2)
+        .expect("표 나누기");
+
+    for &p in &table_control_paras(&doc) {
+        let t = issue_1481_table(&doc, p);
+        assert_eq!(
+            t.row_sizes.len(),
+            t.row_count as usize,
+            "row_sizes 길이는 row_count 와 일치해야 한다"
+        );
+        for r in 0..t.row_count {
+            assert_eq!(
+                t.row_sizes[r as usize] as usize,
+                t.cells.iter().filter(|c| c.row == r).count(),
+                "행 {r} 의 row_sizes 는 실제 셀 수여야 한다"
+            );
+        }
+    }
+}
+
+#[test]
+fn merge_failure_leaves_back_table_intact() {
+    // 검증이 뒤 표 제거 이후에 이뤄지면, 실패한 붙이기가 뒤 표를 문서에서
+    // 지워 버린다 — 모든 검증은 문서 변형 전에 끝나야 한다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+    assert_eq!(table_control_paras(&doc).len(), 2);
+
+    assert!(
+        doc.merge_table_with_next_native(0, para_idx, 7).is_err(),
+        "잘못된 control_idx 는 거부되어야 한다"
+    );
+    assert_eq!(
+        table_control_paras(&doc).len(),
+        2,
+        "실패한 붙이기가 뒤 표를 지우면 안 된다"
+    );
+    let back = issue_1481_table(&doc, table_control_paras(&doc)[1]);
+    assert_eq!(back.row_count, 2, "뒤 표 내용 보존");
+}
+
+#[test]
+fn merge_rejects_corrupted_back_row_overflow_before_mutation() {
+    // 손상 문서의 뒤 표에 row=u16::MAX 셀이 있으면 `cell.row += front_rows` 가
+    // debug panic / release wraparound 를 일으킨다. row_count 합 검증만으로는
+    // 못 걸러내므로, 셀·zone 실측 최대 행 기준으로 변형 전에 거부해야 한다.
+    use crate::model::control::Control;
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+    let tables = table_control_paras(&doc);
+    assert_eq!(tables.len(), 2);
+
+    for c in &mut doc.document.sections[0].paragraphs[tables[1]].controls {
+        if let Control::Table(t) = c {
+            t.cells[0].row = u16::MAX; // 손상 재현
+        }
+    }
+
+    assert!(
+        doc.merge_table_with_next_native(0, tables[0], 0).is_err(),
+        "행 오버플로를 일으킬 손상 표는 거부되어야 한다"
+    );
+    assert_eq!(
+        table_control_paras(&doc).len(),
+        2,
+        "거부된 붙이기가 뒤 표를 지우면 안 된다"
+    );
+}
+
+#[test]
+fn split_connects_new_paragraph_vpos_to_flow() {
+    // [Task #2299 계약] 새로 삽입한 문단(사이 빈 문단·뒤 표 host)의 LineSeg 가
+    // placeholder vpos(0)로 남으면, 직렬화 시 가짜 단/쪽 경계로 기록되고 이후
+    // 편집의 vpos 재계산이 이를 저장 경계로 오인해 고착시킨다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    doc.split_table_native(0, para_idx, 0, 2)
+        .expect("표 나누기");
+
+    let paras = &doc.document.sections[0].paragraphs;
+    for (label, idx) in [("사이 문단", para_idx + 1), ("뒤 표 host", para_idx + 2)] {
+        let vpos = paras[idx].line_segs.first().map(|l| l.vertical_pos);
+        assert!(
+            vpos.is_some_and(|v| v > 0),
+            "{label}(문단 {idx})의 vertical_pos 는 흐름에 연결되어야 한다 (실제 {vpos:?})"
+        );
+    }
+}
+
+#[test]
+fn split_updates_dimensions_without_raw_ctrl_data() {
+    // HWPX 파서는 표의 raw_ctrl_data 를 비워 두므로, 크기 갱신이 raw 존재에
+    // 의존하면 나뉜 두 표가 모두 원본 전체 크기(common.height)로 남는다.
+    use crate::model::control::Control;
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    let orig_height = issue_1481_table(&doc, para_idx).common.height;
+    for c in &mut doc.document.sections[0].paragraphs[para_idx].controls {
+        if let Control::Table(t) = c {
+            t.raw_ctrl_data = Vec::new(); // HWPX 파스 문서 재현
+        }
+    }
+
+    doc.split_table_native(0, para_idx, 0, 2)
+        .expect("표 나누기");
+
+    let tables = table_control_paras(&doc);
+    let front = issue_1481_table(&doc, tables[0]);
+    let back = issue_1481_table(&doc, tables[1]);
+    assert!(
+        front.common.height < orig_height && back.common.height < orig_height,
+        "raw_ctrl_data 가 없어도 나뉜 표의 common.height 는 재계산되어야 한다 \
+         (원본 {orig_height}, 앞 {}, 뒤 {})",
+        front.common.height,
+        back.common.height
+    );
+}
+
+#[test]
+fn split_assigns_unique_nonzero_instance_ids() {
+    // instance_id 는 저장소 계약상 고유 비-0 이어야 한다 (create_table_native 의
+    // "비-0 필수", html_table_import 의 "고유한 비-0 값"). 0 으로 두면 두 번
+    // 나눴을 때 0 짜리 표 두 개가 생겨 동일-ID 충돌이 재현된다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 6, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    doc.split_table_native(0, para_idx, 0, 4)
+        .expect("1차 나누기");
+    doc.split_table_native(0, para_idx, 0, 2)
+        .expect("2차 나누기");
+
+    fn stored_instance_id(t: &crate::model::table::Table) -> u32 {
+        use crate::model::shape::common_obj_offsets;
+        if t.raw_ctrl_data.len() >= common_obj_offsets::INSTANCE_ID.end {
+            u32::from_le_bytes(
+                t.raw_ctrl_data[common_obj_offsets::INSTANCE_ID]
+                    .try_into()
+                    .unwrap(),
+            )
+        } else {
+            t.common.instance_id
+        }
+    }
+    let ids: Vec<u32> = table_control_paras(&doc)
+        .iter()
+        .map(|&p| stored_instance_id(issue_1481_table(&doc, p)))
+        .collect();
+    assert_eq!(ids.len(), 3);
+    for id in &ids {
+        assert_ne!(*id, 0, "instance_id 는 비-0 이어야 한다: {ids:?}");
+    }
+    let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), 3, "instance_id 는 서로 달라야 한다: {ids:?}");
+}
+
+#[test]
+fn split_row_index_conversion_rejects_u16_overflow() {
+    // WASM 경계의 u32 → u16 캐스팅이 묵시적 절단이면 65537 이 1 로 바뀌어
+    // 요청 밖 행에서 표가 나뉜다 — 명시적 오류여야 한다.
+    assert!(super::row_index_from_u32(65537).is_err());
+    assert!(super::row_index_from_u32(u32::MAX).is_err());
+    assert_eq!(super::row_index_from_u32(3).unwrap(), 3u16);
+    assert_eq!(super::row_index_from_u32(65535).unwrap(), u16::MAX);
+}
+
+#[test]
+fn split_table_rejects_when_vertical_merge_crosses_cut() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    // row1~row2 를 세로 병합 (col0) — 분할선(2)을 가로지르게 만든다.
+    doc.merge_table_cells_native(0, para_idx, 0, 1, 0, 2, 0)
+        .expect("세로 병합");
+
+    assert!(
+        doc.split_table_native(0, para_idx, 0, 2).is_err(),
+        "세로 병합 셀이 걸친 위치에서는 나누기가 거부되어야 한다 (한컴 동일)"
+    );
+    // 걸치지 않는 위치(1)는 허용
+    doc.split_table_native(0, para_idx, 0, 3)
+        .expect("병합 아래 경계에서는 나뉘어야 한다");
+}
+
+#[test]
+fn split_preserves_local_resize_on_both_sides() {
+    // Alt 로 조절한 행별 폭(local resize)이 나누기에서 소실되면 안 된다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 3).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    // 앞쪽(row1 col1, idx4)·뒤쪽(row3 col2, idx11) 셀에 localResize 등록
+    let (w4, w11) = {
+        let t = issue_1481_table(&doc, para_idx);
+        (t.cells[4].width + 600, t.cells[11].width + 900)
+    };
+    doc.resize_table_cells_native(
+        0,
+        para_idx,
+        0,
+        &format!(
+            r#"[{{"cellIdx":4,"widthDelta":600,"localResize":true,"renderWidth":{w4}}},{{"cellIdx":11,"widthDelta":900,"localResize":true,"renderWidth":{w11}}}]"#
+        ),
+    )
+    .expect("local resize");
+
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+    let tables = table_control_paras(&doc);
+
+    let front = issue_1481_table(&doc, tables[0]);
+    assert_eq!(
+        front.local_resize_cell_widths,
+        vec![(4usize, w4)],
+        "앞 표는 자기 범위 항목을 그대로 보존해야 한다"
+    );
+    let back = issue_1481_table(&doc, tables[1]);
+    assert_eq!(
+        back.local_resize_cell_widths,
+        vec![(11usize - 6, w11)],
+        "뒤 표 항목은 앞 셀 수(6)만큼 당겨 재매핑되어야 한다"
+    );
+
+    // 붙이면 원래 배치로 돌아와야 한다
+    doc.merge_table_with_next_native(0, tables[0], 0)
+        .expect("붙이기");
+    let tables = table_control_paras(&doc);
+    let merged = issue_1481_table(&doc, tables[0]);
+    let mut widths = merged.local_resize_cell_widths.clone();
+    widths.sort();
+    assert_eq!(widths, vec![(4usize, w4), (11usize, w11)], "붙이기 후 원복");
+}
+
+#[test]
+fn split_table_survives_hwp_save_reload() {
+    // 나눈 문서를 HWP 로 저장해 다시 열어도 표 두 개가 그대로여야 한다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 5, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+
+    let bytes = doc.export_hwp_native().expect("HWP 저장");
+    let reloaded = HwpDocument::from_bytes(&bytes).expect("재파싱");
+
+    let tables = table_control_paras(&reloaded);
+    assert_eq!(tables.len(), 2, "저장-재열기 후에도 표 두 개");
+    let front = issue_1481_table(&reloaded, tables[0]);
+    let back = issue_1481_table(&reloaded, tables[1]);
+    assert_eq!((front.row_count, back.row_count), (2, 3));
+    assert_eq!(front.cells.len(), 4);
+    assert_eq!(back.cells.len(), 6);
+}
+
+#[test]
+fn split_then_column_resize_still_works() {
+    // 나눈 뒤에도 칸 전체 리사이즈(Ctrl 경로)가 각 표에 독립적으로 적용돼야 한다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, para_idx, 0, 2).expect("나누기");
+    let tables = table_control_paras(&doc);
+
+    let before = issue_1481_table(&doc, tables[1]).cells[0].width;
+    // 뒤 표 col0 전체 +300
+    let updates: Vec<String> = issue_1481_table(&doc, tables[1])
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.col == 0)
+        .map(|(i, _)| format!(r#"{{"cellIdx":{i},"widthDelta":300}}"#))
+        .collect();
+    doc.resize_table_cells_native(0, tables[1], 0, &format!("[{}]", updates.join(",")))
+        .expect("리사이즈");
+
+    let back = issue_1481_table(&doc, tables[1]);
+    assert_eq!(back.cells[0].width, before + 300, "뒤 표 리사이즈 반영");
+    let front = issue_1481_table(&doc, tables[0]);
+    assert_eq!(
+        front.cells[0].width, before,
+        "앞 표는 영향 없음 (따로 놀지도, 같이 끌려가지도 않게)"
+    );
+}
+
+// ─── 표 나누기/붙이기 확장 케이스 매트릭스 ──────────────────────────
+
+#[test]
+fn split_at_last_row_leaves_one_row_back() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 3)
+        .expect("마지막 행 나누기");
+    let t = table_control_paras(&doc);
+    assert_eq!(issue_1481_table(&doc, t[0]).row_count, 3);
+    assert_eq!(issue_1481_table(&doc, t[1]).row_count, 1, "뒤 표 1행");
+}
+
+#[test]
+fn split_two_row_table_minimal() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 2, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 1).expect("2행 표 나누기");
+    let t = table_control_paras(&doc);
+    assert_eq!(issue_1481_table(&doc, t[0]).row_count, 1);
+    assert_eq!(issue_1481_table(&doc, t[1]).row_count, 1);
+}
+
+#[test]
+fn split_single_row_table_always_rejected() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 1, 3).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    assert!(doc.split_table_native(0, p, 0, 0).is_err());
+    assert!(
+        doc.split_table_native(0, p, 0, 1).is_err(),
+        "범위 초과도 거부"
+    );
+}
+
+#[test]
+fn split_preserves_cell_text_on_both_sides() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 3, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    {
+        use crate::model::control::Control;
+        let para = &mut doc.document.sections[0].paragraphs[p];
+        if let Some(Control::Table(t)) = para.controls.get_mut(0) {
+            t.cells[0].paragraphs[0].text = "앞머리".to_string();
+            t.cells[5].paragraphs[0].text = "뒤꼬리".to_string();
+        }
+    }
+    doc.split_table_native(0, p, 0, 1).expect("나누기");
+    let t = table_control_paras(&doc);
+    assert_eq!(
+        issue_1481_table(&doc, t[0]).cells[0].paragraphs[0].text,
+        "앞머리"
+    );
+    let back = issue_1481_table(&doc, t[1]);
+    let tail = back
+        .cells
+        .iter()
+        .find(|c| c.paragraphs[0].text == "뒤꼬리")
+        .expect("뒤 표에 텍스트 보존");
+    assert_eq!(tail.row, 1, "원래 row2 가 뒤 표 row1 로 재배열");
+}
+
+#[test]
+fn split_allows_horizontal_merge_and_preserves_span() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 3, 3).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    // row2 에서 가로 병합 (분할과 무관한 축)
+    doc.merge_table_cells_native(0, p, 0, 2, 0, 2, 1)
+        .expect("가로 병합");
+    doc.split_table_native(0, p, 0, 2)
+        .expect("가로 병합은 나누기 허용");
+    let t = table_control_paras(&doc);
+    let back = issue_1481_table(&doc, t[1]);
+    assert!(back.cells.iter().any(|c| c.col_span == 2), "colSpan 보존");
+}
+
+#[test]
+fn split_allowed_when_vertical_merge_ends_at_cut() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.merge_table_cells_native(0, p, 0, 0, 0, 1, 0)
+        .expect("row0~1 세로 병합");
+    // 병합이 row1 에서 끝나므로 경계(2)는 가로지르지 않는다
+    doc.split_table_native(0, p, 0, 2)
+        .expect("경계 정확히 아래는 허용");
+}
+
+#[test]
+fn split_twice_makes_three_tables() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 6, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 4).expect("1차");
+    let t = table_control_paras(&doc);
+    doc.split_table_native(0, t[0], 0, 2)
+        .expect("2차 (앞 표 재분할)");
+    let t = table_control_paras(&doc);
+    assert_eq!(t.len(), 3);
+    let rows: Vec<u16> = t
+        .iter()
+        .map(|p| issue_1481_table(&doc, *p).row_count)
+        .collect();
+    assert_eq!(rows, vec![2, 2, 2]);
+}
+
+#[test]
+fn split_survives_snapshot_undo_roundtrip() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    let snap = doc.save_snapshot();
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    assert_eq!(table_control_paras(&doc).len(), 2);
+    doc.restore_snapshot(snap).expect("스냅샷 복원");
+    assert_eq!(
+        table_control_paras(&doc).len(),
+        1,
+        "undo(스냅샷 복원) 후 원복"
+    );
+    assert_eq!(issue_1481_table(&doc, p).row_count, 4);
+}
+
+#[test]
+fn split_inherits_repeat_header_and_keeps_caption_front_only() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 3, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    {
+        use crate::model::control::Control;
+        use crate::model::shape::Caption;
+        let para = &mut doc.document.sections[0].paragraphs[p];
+        if let Some(Control::Table(t)) = para.controls.get_mut(0) {
+            t.repeat_header = true;
+            t.caption = Some(Caption::default());
+        }
+    }
+    doc.split_table_native(0, p, 0, 1).expect("나누기");
+    let t = table_control_paras(&doc);
+    let front = issue_1481_table(&doc, t[0]);
+    let back = issue_1481_table(&doc, t[1]);
+    assert!(
+        front.repeat_header && back.repeat_header,
+        "제목행 반복 속성 상속"
+    );
+    assert!(front.caption.is_some(), "캡션은 앞 표 유지");
+    assert!(back.caption.is_none(), "뒤 표는 캡션 없음");
+}
+
+#[test]
+fn split_row_sizes_partitioned() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 5, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    let orig = issue_1481_table(&doc, p).row_sizes.clone();
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    let front = issue_1481_table(&doc, t[0]);
+    let back = issue_1481_table(&doc, t[1]);
+    if !orig.is_empty() {
+        assert_eq!(front.row_sizes.len(), 2);
+        assert_eq!(back.row_sizes.len(), 3);
+    }
+}
+
+#[test]
+fn split_invalid_targets_rejected() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 3, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    assert!(
+        doc.split_table_native(0, p + 99, 0, 1).is_err(),
+        "없는 문단"
+    );
+    assert!(doc.split_table_native(0, p, 7, 1).is_err(), "없는 컨트롤");
+    assert!(doc.split_table_native(3, p, 0, 1).is_err(), "없는 구역");
+}
+
+#[test]
+fn split_survives_hwpx_save_reload() {
+    // create_empty 문서는 HWPX ID 맵 미등록으로 원래 export 불가(기존 한계) —
+    // 실물 빈 문서를 기반으로 검증한다.
+    let root = env!("CARGO_MANIFEST_DIR");
+    let bytes =
+        std::fs::read(format!("{root}/samples/253E164F57A1BC6934-empty.hwp")).expect("샘플");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let baseline = table_control_paras(&doc).len(); // 샘플 자체 표 수
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표 생성");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let out = doc.export_hwpx_native().expect("HWPX 저장");
+    let reloaded = HwpDocument::from_bytes(&out).expect("재파싱");
+    let tables = table_control_paras(&reloaded);
+    let shapes: Vec<(u16, u16, usize)> = tables
+        .iter()
+        .map(|p| {
+            let t = issue_1481_table(&reloaded, *p);
+            (t.row_count, t.col_count, t.cells.len())
+        })
+        .collect();
+    assert_eq!(
+        tables.len(),
+        baseline + 2,
+        "HWPX 왕복: 샘플 원본 표 + 나눈 두 표 전부 생존 — 실제: {shapes:?}"
+    );
+    assert_eq!(
+        shapes.iter().filter(|s| **s == (2, 2, 4)).count(),
+        2,
+        "나눈 2×2 두 표가 보존되어야 한다: {shapes:?}"
+    );
+}
+
+#[test]
+fn merge_different_col_counts_keeps_rows_intact() {
+    // 한컴 명세: 칸 수 달라도 붙는다. 각 행은 자기 칸 배치를 유지한다.
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 2, 2).expect("2열 표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    // 2열 표를 나눈 뒤, 뒤 표에 열 추가해 3열로 만들고 다시 붙인다
+    doc.split_table_native(0, p, 0, 1).expect("나누기");
+    let t = table_control_paras(&doc);
+    doc.insert_table_column_native(0, t[1], 0, 1, true)
+        .expect("열 추가");
+    assert_eq!(issue_1481_table(&doc, t[1]).col_count, 3);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("칸 수 다른 붙이기");
+    let t = table_control_paras(&doc);
+    let m = issue_1481_table(&doc, t[0]);
+    assert_eq!(m.col_count, 3, "col_count 는 큰 쪽");
+    assert_eq!(
+        m.cells.iter().filter(|c| c.row == 0).count(),
+        2,
+        "앞 행은 2칸 유지"
+    );
+    assert_eq!(
+        m.cells.iter().filter(|c| c.row == 1).count(),
+        3,
+        "뒤 행은 3칸 유지"
+    );
+}
+
+#[test]
+fn merge_three_tables_sequentially() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 6, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 4).expect("1차 나누기");
+    let t = table_control_paras(&doc);
+    doc.split_table_native(0, t[0], 0, 2).expect("2차 나누기");
+    // 3개 → 앞에서 두 번 붙여 1개
+    let t = table_control_paras(&doc);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("1차 붙이기");
+    let t = table_control_paras(&doc);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("2차 붙이기");
+    let t = table_control_paras(&doc);
+    assert_eq!(t.len(), 1);
+    assert_eq!(issue_1481_table(&doc, t[0]).row_count, 6, "6행 원복");
+}
+
+#[test]
+fn merge_rejected_at_document_end_without_next_table() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 2, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    assert!(
+        doc.merge_table_with_next_native(0, p, 0).is_err(),
+        "다음 표 없음 → 거부"
+    );
+}
+
+#[test]
+fn merge_allows_whitespace_only_paragraph_between() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    // 사이 문단에 표(컨트롤)를 넣으면... 그 자체가 다음 표가 되므로,
+    // 대신 텍스트 아닌 컨트롤 존재 케이스: 사이 문단에 빈 문자열 + 컨트롤 흉내로
+    // 텍스트를 넣는 기존 케이스와 구분해 공백만 있는 문단은 허용되는지 확인.
+    let between = t[0] + 1;
+    doc.document.sections[0].paragraphs[between].text = "   ".to_string();
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("공백뿐인 문단은 빈 문단으로 취급 (한컴: 빈칸 허용)");
+}
+
+#[test]
+fn merge_keeps_front_caption() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    {
+        use crate::model::control::Control;
+        use crate::model::shape::Caption;
+        let para = &mut doc.document.sections[0].paragraphs[p];
+        if let Some(Control::Table(t)) = para.controls.get_mut(0) {
+            t.caption = Some(Caption::default());
+        }
+    }
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("붙이기");
+    let t = table_control_paras(&doc);
+    assert!(
+        issue_1481_table(&doc, t[0]).caption.is_some(),
+        "앞 캡션 유지"
+    );
+}
+
+#[test]
+fn merge_then_split_again_roundtrip() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 5, 3).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("붙이기");
+    let t = table_control_paras(&doc);
+    doc.split_table_native(0, t[0], 0, 2).expect("재나누기");
+    let t = table_control_paras(&doc);
+    assert_eq!(t.len(), 2);
+    assert_eq!(issue_1481_table(&doc, t[1]).row_count, 3);
+}
+
+#[test]
+fn merge_survives_hwp_save_reload() {
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    doc.merge_table_with_next_native(0, t[0], 0)
+        .expect("붙이기");
+    let bytes = doc.export_hwp_native().expect("저장");
+    let reloaded = HwpDocument::from_bytes(&bytes).expect("재파싱");
+    let t = table_control_paras(&reloaded);
+    assert_eq!(t.len(), 1);
+    assert_eq!(issue_1481_table(&reloaded, t[0]).row_count, 4);
+}
+
+#[test]
+fn merge_rejects_when_nontable_control_between() {
+    use crate::model::control::{Control, Hyperlink};
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    let p = issue_1481_json_usize(&created, "paraIdx");
+    doc.split_table_native(0, p, 0, 2).expect("나누기");
+    let t = table_control_paras(&doc);
+    let between = t[0] + 1;
+    doc.document.sections[0].paragraphs[between]
+        .controls
+        .push(Control::Hyperlink(Hyperlink {
+            url: "https://example.com".into(),
+            text: "링크".into(),
+        }));
+    assert!(
+        doc.merge_table_with_next_native(0, t[0], 0).is_err(),
+        "사이 문단에 컨트롤이 있으면 거부"
+    );
+}
+
+#[test]
+fn create_empty_table_hwpx_export_known_limitation() {
+    // 기존 한계 고정: create_empty 문서는 HWPX ID 맵(charPr/paraPr/style 0)
+    // 미등록으로 표 유무와 무관하게 export 가 거부된다. split 탓이 아님을
+    // 대조 실험으로 봉인해 둔다 (해소되면 이 테스트를 뒤집을 것).
+    let mut doc = HwpDocument::create_empty();
+    doc.create_table_native(0, 0, 0, 4, 2).expect("표");
+    assert!(doc.export_hwpx_native().is_err());
+}
+
+/// 코퍼스 전수 스윕: samples 의 모든 HWP 문서 × 모든 최상위 표 × 분할점
+/// {1, 중간, 마지막} 에서 나누기→불변식 검증→붙이기→원본 대조.
+///
+/// 무겁기 때문에 기본 제외 — 실행: `cargo test ... corpus_split_join_sweep -- --ignored`
+#[test]
+#[ignore]
+fn corpus_split_join_sweep_all_samples() {
+    use crate::model::control::Control;
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut files: Vec<_> = std::fs::read_dir(format!("{root}/samples"))
+        .expect("samples 디렉터리")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("hwp"))
+        .collect();
+    files.sort();
+
+    #[derive(Clone, PartialEq, Debug)]
+    struct TableSig {
+        rows: u16,
+        cols: u16,
+        cells: Vec<(u16, u16, u16, u16, String)>, // (row, col, rspan, cspan, 첫문단 텍스트)
+    }
+    fn sig(t: &crate::model::table::Table) -> TableSig {
+        TableSig {
+            rows: t.row_count,
+            cols: t.col_count,
+            cells: t
+                .cells
+                .iter()
+                .map(|c| {
+                    (
+                        c.row,
+                        c.col,
+                        c.row_span,
+                        c.col_span,
+                        c.paragraphs
+                            .first()
+                            .map(|p| p.text.clone())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    let (mut docs, mut tables, mut splits_ok, mut rejected, mut merged_ok) =
+        (0u32, 0u32, 0u32, 0u32, 0u32);
+    let mut failures: Vec<String> = Vec::new();
+
+    for path in files {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        // 암호 문서 등 파싱 불가는 건너뜀
+        let Ok(probe) = HwpDocument::from_bytes(&bytes) else {
+            continue;
+        };
+        docs += 1;
+
+        // 최상위 표 위치 수집 (섹션 0 한정 — 파일당 비용 통제)
+        let table_locs: Vec<(usize, usize, u16)> = probe.document.sections[0]
+            .paragraphs
+            .iter()
+            .enumerate()
+            .flat_map(|(pi, para)| {
+                para.controls.iter().enumerate().filter_map(move |(ci, c)| {
+                    if let Control::Table(t) = c {
+                        Some((pi, ci, t.row_count))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (pi, ci, rows) in table_locs {
+            if rows < 2 {
+                continue;
+            }
+            tables += 1;
+            let cuts: Vec<u16> = {
+                let mut c = vec![1, rows / 2, rows - 1];
+                c.dedup();
+                c.retain(|x| *x >= 1 && *x < rows);
+                c
+            };
+            for cut in cuts {
+                let mut doc = HwpDocument::from_bytes(&bytes).expect("재파싱");
+                let orig = sig(
+                    match doc.document.sections[0].paragraphs[pi].controls.get(ci) {
+                        Some(Control::Table(t)) => t,
+                        _ => continue,
+                    },
+                );
+                match doc.split_table_native(0, pi, ci, cut) {
+                    Err(e) => {
+                        // 허용된 거부 사유만 인정
+                        let msg = format!("{e:?}");
+                        if msg.contains("세로로 합쳐진") || msg.contains("첫 번째 줄") {
+                            rejected += 1;
+                        } else {
+                            failures.push(format!("{name} 표(p{pi}) cut{cut}: 예상 밖 거부 {msg}"));
+                        }
+                        continue;
+                    }
+                    Ok(_) => splits_ok += 1,
+                }
+                // 불변식: 나눈 두 표의 시그니처 합 = 원본
+                let front = sig(
+                    match doc.document.sections[0].paragraphs[pi].controls.get(ci) {
+                        Some(Control::Table(t)) => t,
+                        _ => {
+                            failures.push(format!("{name} p{pi} cut{cut}: 앞 표 소실"));
+                            continue;
+                        }
+                    },
+                );
+                if front.rows != cut {
+                    failures.push(format!(
+                        "{name} p{pi} cut{cut}: 앞 행수 {}≠{cut}",
+                        front.rows
+                    ));
+                }
+                // 붙여서 원본과 대조
+                if let Err(e) = doc.merge_table_with_next_native(0, pi, ci) {
+                    failures.push(format!("{name} p{pi} cut{cut}: 붙이기 실패 {e:?}"));
+                    continue;
+                }
+                let merged = sig(
+                    match doc.document.sections[0].paragraphs[pi].controls.get(ci) {
+                        Some(Control::Table(t)) => t,
+                        _ => {
+                            failures.push(format!("{name} p{pi} cut{cut}: 병합 표 소실"));
+                            continue;
+                        }
+                    },
+                );
+                if merged != orig {
+                    failures.push(format!(
+                        "{name} p{pi} cut{cut}: 라운드트립 불일치 (rows {}→{}, cells {}→{})",
+                        orig.rows,
+                        merged.rows,
+                        orig.cells.len(),
+                        merged.cells.len()
+                    ));
+                } else {
+                    merged_ok += 1;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "[corpus sweep] 문서 {docs} · 표 {tables} · 나누기 성공 {splits_ok} · 정당 거부 {rejected} · 라운드트립 일치 {merged_ok} · 실패 {}",
+        failures.len()
+    );
+    for f in failures.iter().take(20) {
+        eprintln!("  FAIL {f}");
+    }
+    assert!(failures.is_empty(), "{}건 실패 (위 로그)", failures.len());
+}
+
+#[test]
+fn split_after_local_resize_keeps_render_grid() {
+    // Alt(행별 폭, local resize)로 조절한 표를 나누면, base grid 재계산이
+    // override 행을 제외하지 않을 경우 뒤 표의 common.width 가 override 폭만큼
+    // 부풀어 전 행이 넓게 렌더된다 (override 행은 residual 몰아주기로 두 배).
+    // 한컴 의미론: Alt 는 표 폭 유지, 나누기도 폭 불변 — 렌더 폭이 나누기
+    // 전후로 같아야 한다.
+    use crate::model::control::Control;
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/samples/21868765_별표2_보건소_분장사무.hwp"
+    ))
+    .expect("샘플");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    doc.paginate();
+    let para_idx = doc.document.sections[0]
+        .paragraphs
+        .iter()
+        .enumerate()
+        .find(|(_, p)| p.controls.iter().any(|c| matches!(c, Control::Table(_))))
+        .map(|(i, _)| i)
+        .expect("표 문단");
+
+    let bb = |d: &HwpDocument, p: usize| -> Vec<(u16, u16, f64)> {
+        let json = d
+            .get_table_cell_bboxes_by_path_native(
+                0,
+                p,
+                r#"[{"controlIndex":0,"cellIndex":0,"cellParaIndex":0}]"#,
+            )
+            .expect("bbox");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["row"].as_u64().unwrap() as u16,
+                    c["col"].as_u64().unwrap() as u16,
+                    c["w"].as_f64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let at = |v: &Vec<(u16, u16, f64)>, r: u16, c: u16| {
+        v.iter()
+            .find(|x| x.0 == r && x.1 == c)
+            .map(|x| x.2)
+            .unwrap()
+    };
+
+    // Alt+→ ×3 상당: (12,2) +900, 같은 줄 (12,0)/(12,1) 이 -450 씩 흡수
+    let (i0, w0, i1, w1, i2, w2) = {
+        let t = issue_1481_table(&doc, para_idx);
+        let f = |r: u16, c: u16| {
+            t.cells
+                .iter()
+                .position(|x| x.row == r && x.col == c && x.row_span == 1)
+                .expect("셀")
+        };
+        let (a, b, c) = (f(12, 0), f(12, 1), f(12, 2));
+        (
+            a,
+            t.cells[a].width,
+            b,
+            t.cells[b].width,
+            c,
+            t.cells[c].width,
+        )
+    };
+    let payload = format!(
+        r#"[{{"cellIdx":{i2},"widthDelta":900,"localResize":true,"renderWidth":{}}},{{"cellIdx":{i0},"widthDelta":-450,"localResize":true,"renderWidth":{}}},{{"cellIdx":{i1},"widthDelta":-450,"localResize":true,"renderWidth":{}}}]"#,
+        w2 + 900,
+        w0 - 450,
+        w1 - 450,
+    );
+    doc.resize_table_cells_native(0, para_idx, 0, &payload)
+        .expect("alt resize");
+
+    let pre = bb(&doc, para_idx);
+    let (pre_plain_c2, pre_override_c2) = (at(&pre, 11, 2), at(&pre, 12, 2));
+
+    // HWP에는 Studio의 local-resize 런타임 힌트가 저장되지 않는다. 저장 후
+    // 다시 연 상태와 같이 힌트를 비워도, 셀 폭에서 추론한 outlier 행은 base
+    // grid와 표 전체 폭 재계산에서 똑같이 제외해야 한다.
+    for control in &mut doc.document.sections[0].paragraphs[para_idx].controls {
+        if let Control::Table(table) = control {
+            table.local_resize_rows.clear();
+            table.local_resize_cols.clear();
+            table.local_resize_cell_widths.clear();
+            table.local_resize_cell_heights.clear();
+        }
+    }
+
+    doc.split_table_native(0, para_idx, 0, 10).expect("나누기");
+
+    let tables: Vec<usize> = doc.document.sections[0]
+        .paragraphs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.controls.iter().any(|c| matches!(c, Control::Table(_))))
+        .map(|(i, _)| i)
+        .collect();
+    let back = bb(&doc, tables[1]);
+
+    // 원래 row 11/12/13 → 뒤 표 row 1/2/3
+    assert!(
+        (at(&back, 1, 2) - pre_plain_c2).abs() < 0.5,
+        "나누기 후 일반 행 폭이 변하면 안 된다: {} → {}",
+        pre_plain_c2,
+        at(&back, 1, 2)
+    );
+    assert!(
+        (at(&back, 3, 2) - pre_plain_c2).abs() < 0.5,
+        "나누기 후 일반 행 폭이 변하면 안 된다: {} → {}",
+        pre_plain_c2,
+        at(&back, 3, 2)
+    );
+    assert!(
+        (at(&back, 2, 2) - pre_override_c2).abs() < 0.5,
+        "나누기 후 Alt 행 폭이 변하면 안 된다: {} → {}",
+        pre_override_c2,
+        at(&back, 2, 2)
+    );
+}
+
+#[test]
+fn split_rejects_corrupted_cell_row_span_overflow_before_mutation() {
+    // `row + row_span`을 u16으로 더하면 debug에서는 panic, release에서는
+    // wrap한다. 손상 입력은 나누기 전 명시적 오류로 막고 원본 표를 남겨야 한다.
+    use crate::model::control::Control;
+    let mut doc = HwpDocument::create_empty();
+    let created = doc.create_table_native(0, 0, 0, 2, 2).expect("표 생성");
+    let para_idx = issue_1481_json_usize(&created, "paraIdx");
+
+    for control in &mut doc.document.sections[0].paragraphs[para_idx].controls {
+        if let Control::Table(table) = control {
+            table.row_count = u16::MAX;
+            let cell = table.cells.first_mut().expect("셀");
+            cell.row = u16::MAX - 2;
+            cell.row_span = 3;
+        }
+    }
+
+    assert!(
+        doc.split_table_native(0, para_idx, 0, u16::MAX - 1)
+            .is_err(),
+        "손상된 row/span은 panic 대신 오류여야 한다"
+    );
+    assert_eq!(
+        table_control_paras(&doc),
+        vec![para_idx],
+        "실패는 표를 추가하지 않는다"
+    );
+    let table = issue_1481_table(&doc, para_idx);
+    assert_eq!(table.row_count, u16::MAX, "실패는 기존 표를 바꾸지 않는다");
+    assert_eq!(table.cells[0].row, u16::MAX - 2);
+    assert_eq!(table.cells[0].row_span, 3);
+}
+
+/// [#4149 조사] Enter→Delete 왕복(내용 무변경 복원)이 셀 문단의 저장 line_segs 를
+/// 보존하는지 계측한다. 두 원천을 분리한다:
+///
+///   A) 무편집 divergence — 로드 직후 저장 segs vs `reflow_cell_paragraph` 재계산.
+///      다르면 그 문단은 "한 번이라도 건드리는 순간" 한컴 원본 줄바꿈 증거를 잃는
+///      잠재 모집단이다.
+///   B) 왕복 실측 — split→merge(내용 복원) 전후 저장 segs 대조. 불변식
+///      "무변경 편집 왕복은 레이아웃 보존" 위반의 직접 증거.
+///
+/// 구조상 왕복 결과는 reflow 결과와 같아야 하므로 B의 변경 집합은 A의 divergence
+/// 집합과 일치할 것으로 기대한다 — 일치하면 원인은 왕복 경로가 아니라 "reflow 가
+/// 원본 줄바꿈과 다르다"로 좁혀진다. 요약은 --nocapture 로 출력.
+#[test]
+fn issue4149_cell_lineseg_roundtrip_survey() {
+    let path = "samples/issue1949_giant_cell_nested_tables_perf.hwp";
+    let bytes = std::fs::read(path).expect("issue1949 샘플 읽기");
+
+    // (ppi, ci, cell, para) — 최외곽 표, 다줄(>=2 segs), UTF-16 4자 이상
+    fn survey(doc: &HwpDocument) -> Vec<(usize, usize, usize, usize)> {
+        let mut out = Vec::new();
+        for (ppi, para) in doc.document.sections[0].paragraphs.iter().enumerate() {
+            for (ci, ctrl) in para.controls.iter().enumerate() {
+                if let Control::Table(t) = ctrl {
+                    for (cell_idx, cell) in t.cells.iter().enumerate() {
+                        for (cp, p) in cell.paragraphs.iter().enumerate() {
+                            if p.line_segs.len() >= 2 && p.text.encode_utf16().count() >= 4 {
+                                out.push((ppi, ci, cell_idx, cp));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+    fn cell_para<'a>(doc: &'a HwpDocument, t: (usize, usize, usize, usize)) -> &'a Paragraph {
+        match &doc.document.sections[0].paragraphs[t.0].controls[t.1] {
+            Control::Table(tbl) => &tbl.cells[t.2].paragraphs[t.3],
+            _ => panic!("표가 아님"),
+        }
+    }
+    // 줄바꿈 증거(text_start 수열)와 기하(vpos/width)를 분리해 본다
+    fn breaks(p: &Paragraph) -> Vec<u32> {
+        p.line_segs.iter().map(|s| s.text_start).collect()
+    }
+    fn geom(p: &Paragraph) -> Vec<(i32, i32, i32)> {
+        p.line_segs
+            .iter()
+            .map(|s| (s.vertical_pos, s.segment_width, s.line_height))
+            .collect()
+    }
+
+    // ── A) 무편집: 저장 segs vs reflow 재계산 ─────────────────────────────
+    let mut doc_a = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let targets = survey(&doc_a);
+    assert!(!targets.is_empty(), "다줄 셀 문단이 없으면 계측 무의미");
+    let (mut a_same, mut a_breaks, mut a_geom_only) = (0usize, 0usize, 0usize);
+    let mut a_break_examples = Vec::new();
+    let mut a_divergent = std::collections::HashSet::new();
+    for &t in &targets {
+        let before = (breaks(cell_para(&doc_a, t)), geom(cell_para(&doc_a, t)));
+        doc_a.reflow_cell_paragraph(0, t.0, t.1, t.2, t.3);
+        let after = (breaks(cell_para(&doc_a, t)), geom(cell_para(&doc_a, t)));
+        if before.0 != after.0 {
+            a_breaks += 1;
+            a_divergent.insert(t);
+            if a_break_examples.len() < 3 {
+                a_break_examples.push((t, before.0.clone(), after.0.clone()));
+            }
+        } else if before.1 != after.1 {
+            a_geom_only += 1;
+            a_divergent.insert(t);
+        } else {
+            a_same += 1;
+        }
+    }
+    println!(
+        "[#4149-A] 무편집 다줄 셀 문단 {}개: 보존 {} / 줄바꿈 divergence {} / 기하만 {}",
+        targets.len(),
+        a_same,
+        a_breaks,
+        a_geom_only
+    );
+    for (t, b, a) in &a_break_examples {
+        println!(
+            "[#4149-A] 예시 ppi{} ci{} cell{} para{}: 저장 {:?} → 재계산 {:?}",
+            t.0, t.1, t.2, t.3, b, a
+        );
+    }
+
+    // ── B) 왕복: split(중간)→merge 전후 저장 segs ────────────────────────
+    let mut doc_b = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let roundtrip_targets: Vec<_> = targets.iter().copied().take(12).collect();
+    let (mut b_same, mut b_breaks, mut b_geom_only) = (0usize, 0usize, 0usize);
+    let mut b_matches_a = true;
+    for &t in &roundtrip_targets {
+        let p = cell_para(&doc_b, t);
+        let text_before = p.text.clone();
+        let (bk_before, gm_before) = (breaks(p), geom(p));
+        let mid = (text_before.encode_utf16().count() / 2).max(1);
+        doc_b
+            .split_paragraph_in_cell_native(0, t.0, t.1, t.2, t.3, mid, None)
+            .expect("split");
+        doc_b
+            .merge_paragraph_in_cell_native(0, t.0, t.1, t.2, t.3 + 1)
+            .expect("merge");
+        let p = cell_para(&doc_b, t);
+        assert_eq!(
+            p.text, text_before,
+            "왕복 후 텍스트 복원은 전제 (ppi{} cell{})",
+            t.0, t.2
+        );
+        let changed = if bk_before != breaks(p) {
+            b_breaks += 1;
+            true
+        } else if gm_before != geom(p) {
+            b_geom_only += 1;
+            true
+        } else {
+            b_same += 1;
+            false
+        };
+        if changed != a_divergent.contains(&t) {
+            b_matches_a = false;
+            println!(
+                "[#4149-B] 예외: ppi{} ci{} cell{} para{} — 왕복 변경={} vs A divergence={}",
+                t.0,
+                t.1,
+                t.2,
+                t.3,
+                changed,
+                a_divergent.contains(&t)
+            );
+        }
+    }
+    println!(
+        "[#4149-B] Enter→Delete 왕복 {}개: 보존 {} / 줄바꿈 변경 {} / 기하만 변경 {}",
+        roundtrip_targets.len(),
+        b_same,
+        b_breaks,
+        b_geom_only
+    );
+    println!(
+        "[#4149-B] 왕복 변경 집합 == A divergence 집합: {} — true 면 왕복 자체는 reflow 를 \
+         충실히 따르고, 원인은 reflow vs 한컴 원본 줄바꿈 차이로 좁혀진다",
+        b_matches_a
+    );
+}
+
+/// [조사] 거대 셀 문서 타이핑 지연의 진짜 병목 분해 — getCursorRectInCell 60ms 의
+/// 내부 귀속. 브라우저 트레이스(조합 업데이트마다 getCursorRectInCell 56~60ms)의
+/// wasm 안쪽을 페이즈별로 실측한다:
+///   1) find_pages_for_cell_position (페이지 좁히기)
+///   2) build_page_tree (uncached — LayoutEngine::build_render_tree 포함)
+///   3) get_cursor_rect_in_cell_native 전체
+///   4) 거대 표가 없는 쪽의 build_page_tree (차등 — 표 레이아웃 귀속 증거)
+#[test]
+fn issue4149_adjacent_giant_cell_cursor_rect_latency_decomposition() {
+    use std::time::Instant;
+    let bytes =
+        std::fs::read("samples/issue1949_giant_cell_nested_tables_perf.hwp").expect("샘플 읽기");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let pages = doc.page_count();
+    println!("[cursor-rect] 총 {pages}쪽");
+
+    // 캐럿 좌표: 브라우저 실측과 동일 (ppi0 ci2 cell2 para6 off5)
+    let t = Instant::now();
+    let cand = doc
+        .find_pages_for_cell_position(0, 0, 2, 2, Some((6, 5)))
+        .expect("페이지 좁히기");
+    println!(
+        "[cursor-rect] 1) find_pages_for_cell_position={:?} → {:?}",
+        t.elapsed(),
+        cand
+    );
+
+    let target_page = cand[0];
+    for i in 0..3 {
+        let t = Instant::now();
+        let _ = doc.build_page_tree(target_page).expect("페이지 트리");
+        println!(
+            "[cursor-rect] 2) build_page_tree(p{target_page}) #{i}={:?}",
+            t.elapsed()
+        );
+    }
+    // find_page(구성 조회)만 분리 — 나머지가 LayoutEngine::build_render_tree 귀속
+    for i in 0..2 {
+        let t = Instant::now();
+        let _ = doc.find_page(target_page).expect("find_page");
+        println!(
+            "[cursor-rect] 2b) find_page(p{target_page}) #{i}={:?}",
+            t.elapsed()
+        );
+    }
+    // 차등: 마지막 쪽 (다른 내용 구성)
+    let last = pages - 1;
+    let t = Instant::now();
+    let _ = doc.build_page_tree(last).expect("페이지 트리");
+    println!(
+        "[cursor-rect] 4) build_page_tree(p{last})={:?}",
+        t.elapsed()
+    );
+
+    for i in 0..3 {
+        let t = Instant::now();
+        let _ = doc
+            .get_cursor_rect_in_cell_native(0, 0, 2, 2, 6, 5)
+            .expect("커서 rect");
+        println!(
+            "[cursor-rect] 3) get_cursor_rect_in_cell_native #{i}={:?}",
+            t.elapsed()
+        );
+    }
+}
+
+/// [조사] 프로파일링용 핫루프 — macOS `sample` 로 build_render_tree 내부 귀속.
+/// `--ignored` 로만 실행.
+#[test]
+#[ignore]
+fn issue4149_adjacent_cursor_rect_profile_loop() {
+    let bytes =
+        std::fs::read("samples/issue1949_giant_cell_nested_tables_perf.hwp").expect("샘플 읽기");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let _ = doc.page_count();
+    let _ = doc.find_pages_for_cell_position(0, 0, 2, 2, Some((6, 5)));
+    eprintln!("[profile-loop] 시작 pid={}", std::process::id());
+    for _ in 0..600 {
+        let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 6, 5);
+    }
+    eprintln!("[profile-loop] 끝");
+}
+
+/// [조사] deferred 편집 직후 첫 캐럿 질의 ~20ms 의 귀속 — find_pages vs 나머지.
+#[test]
+fn issue4149_deferred_edit_first_cursor_query_decomposition() {
+    use std::time::Instant;
+    let bytes =
+        std::fs::read("samples/issue1949_giant_cell_nested_tables_perf.hwp").expect("샘플 읽기");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let _ = doc.page_count();
+    // 웜업
+    let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 6, 5);
+    let t = Instant::now();
+    let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 6, 5);
+    println!("[deferred-q] 웜 질의={:?}", t.elapsed());
+
+    // cp29: 다줄 텍스트 문단 (조사 실측 [0,46,84,...]) — 실타이핑 대표 사례.
+    // cp6(공백 스페이서)은 삽입이 spacer 클래스를 바꿔 정당 evict 되는 반례다.
+    doc.insert_text_in_cell_deferred_pagination(0, 0, 2, 2, 29, 5, "X")
+        .expect("deferred insert");
+    let t = Instant::now();
+    let pages = doc
+        .find_pages_for_cell_position(0, 0, 2, 2, Some((29, 6)))
+        .expect("pages");
+    println!(
+        "[deferred-q] 편집 직후 find_pages={:?} → {:?}",
+        t.elapsed(),
+        pages
+    );
+    let t = Instant::now();
+    let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 29, 6);
+    println!("[deferred-q] 편집 직후 rect(질의1)={:?}", t.elapsed());
+    let t = Instant::now();
+    let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 29, 6);
+    println!("[deferred-q] rect(질의2)={:?}", t.elapsed());
+}
+
+/// [조사] deferred 편집 후 cell_units 재계산 11ms 의 내부 귀속 — sample 용 핫루프.
+#[test]
+#[ignore]
+fn issue4149_deferred_units_rebuild_profile_loop() {
+    let bytes =
+        std::fs::read("samples/issue1949_giant_cell_nested_tables_perf.hwp").expect("샘플 읽기");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let _ = doc.page_count();
+    let _ = doc.get_cursor_rect_in_cell_native(0, 0, 2, 2, 6, 5);
+    eprintln!("[units-loop] 시작 pid={}", std::process::id());
+    for i in 0..400 {
+        let ch = if i % 2 == 0 { "X" } else { "" };
+        if ch.is_empty() {
+            let _ = doc.delete_text_in_cell_deferred_pagination(0, 0, 2, 2, 6, 5, 1);
+        } else {
+            let _ = doc.insert_text_in_cell_deferred_pagination(0, 0, 2, 2, 6, 5, ch);
+        }
+        let _ = doc.find_pages_for_cell_position(0, 0, 2, 2, Some((6, 5)));
+    }
+    eprintln!("[units-loop] 끝");
+}
+
+/// [#4167] units 지문의 실문서 계약: 텍스트 문단 제자리 타이핑은 지문 불변(캐시
+/// 보존 → find_pages µs 급), 공백 스페이서 문단에 글자 삽입은 클래스 전이로 지문
+/// 변경(정당 evict). cp6 은 공백 5자 스페이서, cp29 는 다줄 텍스트 문단이다.
+#[test]
+fn issue4167_units_fingerprint_doc_contract() {
+    use crate::renderer::layout::LayoutEngine;
+    let bytes =
+        std::fs::read("samples/issue1949_giant_cell_nested_tables_perf.hwp").expect("샘플 읽기");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("파싱");
+    let _ = doc.page_count();
+    let para = |doc: &HwpDocument, cp: usize| -> Paragraph {
+        match &doc.document.sections[0].paragraphs[0].controls[2] {
+            Control::Table(t) => t.cells[2].paragraphs[cp].clone(),
+            _ => panic!("표가 아님"),
+        }
+    };
+
+    // 텍스트 문단: 삽입 전후 지문 불변 (원본 tag 잔여 비트는 마스킹됨)
+    let text_before = para(&doc, 29);
+    doc.insert_text_in_cell_deferred_pagination(0, 0, 2, 2, 29, 5, "X")
+        .expect("insert");
+    let text_after = para(&doc, 29);
+    assert_eq!(
+        LayoutEngine::cell_paragraph_units_fingerprint(&text_before),
+        LayoutEngine::cell_paragraph_units_fingerprint(&text_after),
+        "텍스트 문단 제자리 삽입은 units 지문 불변이어야 한다 (#4167 스킵 전제)"
+    );
+
+    // 스페이서 문단: 삽입이 trim-empty 클래스를 바꿔 지문 변경
+    let spacer_before = para(&doc, 6);
+    assert!(
+        spacer_before.text.trim().is_empty(),
+        "cp6 은 공백 스페이서 전제"
+    );
+    doc.insert_text_in_cell_deferred_pagination(0, 0, 2, 2, 6, 5, "X")
+        .expect("insert");
+    let spacer_after = para(&doc, 6);
+    assert_ne!(
+        LayoutEngine::cell_paragraph_units_fingerprint(&spacer_before),
+        LayoutEngine::cell_paragraph_units_fingerprint(&spacer_after),
+        "스페이서 → 텍스트 전이는 지문이 변해 evict 되어야 한다"
+    );
+}
+
+/// [#4576] 핫패치 무효화 계약 — 원본 IR 이 그대로여도 파생본을 못 믿게 된 상황을
+/// 표현할 수 있어야 한다.
+///
+/// 렌더러 코드가 교체되면 `pagination`·`composed`·측정 캐시에 남은 값은 패치 이전
+/// 코드의 산출물이다. 원본 IR 은 한 글자도 안 바뀌었으므로 `dirty_sections` 도
+/// `section_revisions` 도 오르지 않고, 그래서 억지로 `paginate()` 를 불러도 깨끗한
+/// 구역을 건너뛴다 — 새 코드가 낸 숫자를 옛 코드가 잡은 페이지 박스에 그리는 혼합물이
+/// 남는다.
+///
+/// 이 테스트는 "패치 이전 코드가 만든 파생본"을 원본을 건드리지 않고 흉내 낸다:
+/// 메모된 조합·페이지네이션·측정 결과만 지금 코드가 같은 원본에서 절대 만들지 않을
+/// 값으로 바꾼다. 그 상태에서 `paginate()` 는 아무것도 되돌리지 못해야 하고(게이트가
+/// 살아 있다는 확인), `rebuild_derived_state()` 는 셋 다 원본에서 다시 만들어야 한다.
+#[test]
+fn issue_4576_rebuild_derived_state_recomputes_composition_and_pagination() {
+    let mut doc = HwpDocument::create_empty();
+    // 여러 쪽·여러 줄이 나오도록 본문을 채운다 (한 문단이 여러 페이지에 걸친다).
+    let body = "가나다라마바사아자차카타파하".repeat(400);
+    doc.insert_text_native(0, 0, 0, &body).expect("본문 삽입");
+
+    let baseline_pages = doc.page_count();
+    assert!(
+        baseline_pages >= 2,
+        "여러 쪽 문서를 전제로 한다 (실측 {baseline_pages}쪽)"
+    );
+    let baseline_tree = doc
+        .build_page_tree(0)
+        .expect("기준 페이지 트리")
+        .root
+        .to_json();
+    let baseline_height = doc.measured_sections[0].paragraphs[0].total_height;
+    let baseline_lines = doc.composed[0][0].lines.len();
+
+    // --- 패치 이전 코드의 파생본을 흉내 낸다 (원본 IR 은 손대지 않는다) ---
+    doc.composed[0][0].lines[0].runs[0].text = "옛 조합 규칙".to_string();
+    doc.pagination[0].pages.pop().expect("마지막 쪽 제거");
+    doc.measured_sections[0].paragraphs[0].total_height = 1.0;
+
+    doc.invalidate_page_tree_cache();
+    assert_ne!(
+        doc.build_page_tree(0)
+            .expect("오염된 페이지 트리")
+            .root
+            .to_json(),
+        baseline_tree,
+        "조합 오염이 페이지 트리에 실제로 보여야 테스트가 의미를 갖는다"
+    );
+    assert_eq!(
+        doc.page_count(),
+        baseline_pages - 1,
+        "페이지네이션 오염이 쪽 수에 보여야 한다"
+    );
+
+    // 문서가 안 바뀌었으므로 강제 재조판은 아무것도 되돌리지 못한다 (#4576 의 전제).
+    doc.paginate();
+    assert_eq!(
+        doc.page_count(),
+        baseline_pages - 1,
+        "깨끗한 구역을 건너뛰므로 paginate() 만으로는 페이지네이션이 복구되지 않는다"
+    );
+    assert_eq!(
+        doc.composed[0][0].lines[0].runs[0].text, "옛 조합 규칙",
+        "paginate() 는 조합을 다시 만들지 않는다"
+    );
+    assert_eq!(
+        doc.measured_sections[0].paragraphs[0].total_height, 1.0,
+        "paginate() 는 깨끗한 구역의 측정 캐시를 다시 만들지 않는다"
+    );
+
+    // --- 무효화 계약: 원본에서 파생 상태를 전부 다시 만든다 ---
+    doc.core.rebuild_derived_state();
+
+    assert_eq!(
+        doc.page_count(),
+        baseline_pages,
+        "페이지네이션이 원본에서 다시 만들어져야 한다"
+    );
+    assert_ne!(
+        doc.composed[0][0].lines[0].runs[0].text, "옛 조합 규칙",
+        "조합이 원본에서 다시 만들어져야 한다"
+    );
+    assert_eq!(
+        doc.composed[0][0].lines.len(),
+        baseline_lines,
+        "조합 결과의 줄 수가 원본 기준으로 돌아와야 한다"
+    );
+    assert_eq!(
+        doc.measured_sections[0].paragraphs[0].total_height, baseline_height,
+        "측정 캐시가 원본에서 다시 만들어져야 한다"
+    );
+    assert_eq!(
+        doc.build_page_tree(0)
+            .expect("복구 후 페이지 트리")
+            .root
+            .to_json(),
+        baseline_tree,
+        "페이지 트리가 기준선과 같아야 한다 (옛 코드 잔재 없음)"
+    );
 }

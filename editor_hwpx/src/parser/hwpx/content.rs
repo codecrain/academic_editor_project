@@ -6,8 +6,6 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 
-use crate::model::document::DocumentMetadata;
-
 use super::HwpxError;
 
 /// 패키지 내 파일 항목
@@ -27,8 +25,6 @@ pub struct PackageItem {
 /// content.hpf 파싱 결과
 #[derive(Debug, Default)]
 pub struct PackageInfo {
-    /// HWPX 공개 문서 메타데이터.
-    pub metadata: DocumentMetadata,
     /// 섹션 XML 파일 경로 목록 (순서 보존)
     pub section_files: Vec<String>,
     /// 섹션별 바탕쪽 XML 파일 경로 목록.
@@ -48,10 +44,7 @@ pub struct PackageInfo {
 /// content.hpf XML을 파싱하여 섹션/BinData 목록을 추출한다.
 pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
     let mut reader = Reader::from_str(xml);
-    let mut info = PackageInfo {
-        metadata: parse_metadata(xml)?,
-        ..Default::default()
-    };
+    let mut info = PackageInfo::default();
     let mut buf = Vec::new();
 
     // 임시 저장: 모든 item을 수집 후 섹션은 spine 순서로 정렬
@@ -136,7 +129,12 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
     for (id, href, media_type, is_embedded) in &all_items {
         let is_image = media_type.starts_with("image/");
         let is_bin_data_path = href.starts_with("BinData/") || href.contains("/BinData/");
-        if is_image || is_bin_data_path {
+        // [#1891] 외부 참조(isEmbeded="0")는 media-type 과 무관하게 BinData 항목이다.
+        // 원본이 "image/" 같은 퇴화 값을 갖거나 직렬화기가 octet-stream 으로 쓰는 등
+        // media-type 만으로는 판별할 수 없고, 누락 시 이후 항목의 인덱스(=bin_data_id)
+        // 가 밀려 그림 참조 전체가 어긋난다.
+        let is_external_link = !*is_embedded && media_type != "application/xml";
+        if is_image || is_bin_data_path || is_external_link {
             info.bin_data_items.push(PackageItem {
                 href: href.clone(),
                 media_type: media_type.clone(),
@@ -147,111 +145,6 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
     }
 
     Ok(info)
-}
-
-fn parse_metadata(xml: &str) -> Result<DocumentMetadata, HwpxError> {
-    let mut reader = Reader::from_str(xml);
-    let mut metadata = DocumentMetadata::default();
-    let mut active_field: Option<&'static str> = None;
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => {
-                let qualified_name = e.name();
-                let local_name = local_tag_name(qualified_name.as_ref());
-                active_field = match local_name {
-                    b"title" => Some("title"),
-                    b"subject" => Some("subject"),
-                    b"creator" | b"author" => Some("author"),
-                    b"keywords" => Some("keywords"),
-                    b"description" => Some("description"),
-                    b"meta" => e
-                        .attributes()
-                        .flatten()
-                        .find(|attr| attr.key.as_ref() == b"name")
-                        .and_then(|attr| metadata_field_name(&attr_value(&attr))),
-                    _ => None,
-                };
-            }
-            Ok(Event::Text(ref value)) => {
-                if let Some(field) = active_field {
-                    let decoded = value
-                        .decode()
-                        .map_err(|e| HwpxError::XmlError(format!("content.hpf metadata: {e}")))?;
-                    let unescaped = quick_xml::escape::unescape(&decoded)
-                        .map_err(|e| HwpxError::XmlError(format!("content.hpf metadata: {e}")))?;
-                    append_metadata_value(&mut metadata, field, &unescaped);
-                }
-            }
-            Ok(Event::CData(ref value)) => {
-                if let Some(field) = active_field {
-                    let decoded = value
-                        .decode()
-                        .map_err(|e| HwpxError::XmlError(format!("content.hpf metadata: {e}")))?;
-                    append_metadata_value(&mut metadata, field, &decoded);
-                }
-            }
-            Ok(Event::GeneralRef(ref value)) => {
-                if let Some(field) = active_field {
-                    let resolved = if let Some(character) = value
-                        .resolve_char_ref()
-                        .map_err(|e| HwpxError::XmlError(format!("content.hpf metadata: {e}")))?
-                    {
-                        character.to_string()
-                    } else {
-                        match value
-                            .decode()
-                            .map_err(|e| HwpxError::XmlError(format!("content.hpf metadata: {e}")))?
-                            .as_ref()
-                        {
-                            "amp" => "&".to_string(),
-                            "lt" => "<".to_string(),
-                            "gt" => ">".to_string(),
-                            "quot" => "\"".to_string(),
-                            "apos" => "'".to_string(),
-                            name => {
-                                return Err(HwpxError::XmlError(format!(
-                                    "content.hpf metadata: unsupported entity &{name};"
-                                )))
-                            }
-                        }
-                    };
-                    append_metadata_value(&mut metadata, field, &resolved);
-                }
-            }
-            Ok(Event::End(_)) => active_field = None,
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(HwpxError::XmlError(format!("content.hpf metadata: {e}"))),
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    Ok(metadata)
-}
-
-fn metadata_field_name(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "title" => Some("title"),
-        "subject" => Some("subject"),
-        "creator" | "author" => Some("author"),
-        "keyword" | "keywords" => Some("keywords"),
-        "description" => Some("description"),
-        _ => None,
-    }
-}
-
-fn append_metadata_value(metadata: &mut DocumentMetadata, field: &str, value: &str) {
-    let target = match field {
-        "title" => &mut metadata.title,
-        "subject" => &mut metadata.subject,
-        "author" => &mut metadata.author,
-        "keywords" => &mut metadata.keywords,
-        "description" => &mut metadata.description,
-        _ => return,
-    };
-    target.push_str(value);
 }
 
 fn collect_master_page_items(all_items: &[(String, String, String, bool)]) -> Vec<PackageItem> {
@@ -367,29 +260,6 @@ mod tests {
         // [Task #873] isEmbeded="1" → is_embedded = true
         assert!(info.bin_data_items[0].is_embedded);
         assert!(info.bin_data_items[1].is_embedded);
-    }
-
-    #[test]
-    fn test_parse_content_hpf_metadata() {
-        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
-<opf:package xmlns:opf="http://www.idpf.org/2007/opf/">
-  <opf:metadata>
-    <opf:title>2026년 철도 안전 &amp; 운영계획</opf:title>
-    <opf:meta name="subject">공공기관 복합 보고서</opf:meta>
-    <opf:meta name="creator">서울교통공사 데이터혁신처</opf:meta>
-    <opf:meta name="keyword">철도, 안전, 예산</opf:meta>
-    <opf:meta name="description">감사 대응용 &lt;확정본&gt;</opf:meta>
-  </opf:metadata>
-  <opf:manifest/>
-  <opf:spine/>
-</opf:package>"#;
-
-        let info = parse_content_hpf(xml).unwrap();
-        assert_eq!(info.metadata.title, "2026년 철도 안전 & 운영계획");
-        assert_eq!(info.metadata.subject, "공공기관 복합 보고서");
-        assert_eq!(info.metadata.author, "서울교통공사 데이터혁신처");
-        assert_eq!(info.metadata.keywords, "철도, 안전, 예산");
-        assert_eq!(info.metadata.description, "감사 대응용 <확정본>");
     }
 
     #[test]

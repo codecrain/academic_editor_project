@@ -691,10 +691,10 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     optional: ['title', 'subject', 'author', 'keywords', 'description'],
     anyOf: [['title', 'subject', 'author', 'keywords', 'description']],
     readiness: 'available',
-    execution: 'structural-adapter',
-    nativeMethods: ['setDocumentMetadata', 'getDocumentMetadata'],
+    execution: 'preserve-package-adapter',
+    nativeMethods: [],
     notes: [
-      'Requires the repository source-built RHWP runtime and metadata equality after reopen.',
+      'Writes Contents/content.hpf directly and verifies the package metadata after reopen.',
     ],
     fields: {
       title: 'Document title.',

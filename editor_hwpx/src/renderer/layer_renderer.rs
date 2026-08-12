@@ -3,9 +3,17 @@ use crate::model::ColorRef;
 use crate::paint::{
     GlyphOutlinePayloadKind, GlyphRunOrientation, GlyphRunReplayEligibility,
     LayerGlyphOutlinePaint, LayerGlyphRunPaint, LayerNode, LayerNodeKind, PageLayerTree, PaintOp,
-    TextVariantKind, TextVariantQuality,
+    ResourceArena, TextDirection, TextVariantKind, TextVariantQuality, WritingMode,
+    MAX_PORTABLE_FONT_BLOB_BYTES, MAX_PORTABLE_GLYPHS_PER_RUN,
 };
+use crate::renderer::static_svg::static_svg_fragment_has_path_layer;
+use image::{ImageReader, Limits};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Cursor;
+
+const MAX_CANVASKIT_BITMAP_RESOURCE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CANVASKIT_BITMAP_DIMENSION: u32 = 8192;
+const MAX_CANVASKIT_BITMAP_PIXELS: u64 = 32 * 1024 * 1024;
 
 pub type LayerRenderResult<T> = Result<T, HwpError>;
 
@@ -89,6 +97,8 @@ pub trait LayerRasterRenderer {
 pub enum VariantSelectionBackend {
     NativeSkia,
     CanvasKit,
+    /// JSON LayerTree replayed by the browser CanvasKit implementation.
+    CanvasKitBrowser,
     Canvas2D,
     Svg,
 }
@@ -98,6 +108,7 @@ impl VariantSelectionBackend {
         match self {
             Self::NativeSkia => "nativeSkia",
             Self::CanvasKit => "canvasKit",
+            Self::CanvasKitBrowser => "canvasKitBrowser",
             Self::Canvas2D => "canvas2d",
             Self::Svg => "svg",
         }
@@ -126,9 +137,31 @@ impl VariantSelectedReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum VariantRejectReason {
     BackendDoesNotSupportVariant,
+    EmptyGlyphRun,
+    GlyphRunTooLarge,
+    GlyphPositionCountMismatch,
+    GlyphAdvanceCountMismatch,
     FontNotPortable,
     ExternalFontNotVerified,
+    FontFaceMissing,
+    FontBlobMissing,
+    FontBlobNotPortable,
+    FontBlobBytesMissing,
+    FontBlobDataRefMismatch,
+    FontBlobDigestMismatch,
+    FontBlobTooLarge,
+    FaceIndexUnsupported,
+    VariationUnsupported,
+    SyntheticStyleAuthorityPending,
+    BidiDirectionAuthorityPending,
+    BidiLevelAuthorityPending,
+    WritingModeAuthorityPending,
     GlyphIdOutOfRange,
+    PlacementNotFinite,
+    PositionNotFinite,
+    AdvanceNotFinite,
+    FontInstanceInvalid,
+    StrictVisualIneligible,
     MissingGlyph,
     ClusterMismatch,
     UnsupportedPaintEffect,
@@ -144,6 +177,10 @@ pub enum VariantRejectReason {
     UnsupportedColorGlyph,
     UnsupportedBitmapGlyph,
     UnsupportedSvgGlyph,
+    MissingGlyphPayloadResource,
+    MixedPerGlyphAuthorityPending,
+    GlyphTransformAuthorityPending,
+    VerticalGlyphOrientationAuthorityPending,
     PositionAdjustedNotAllowed,
     PositionAdjustedResidualTooLarge,
 }
@@ -152,9 +189,31 @@ impl VariantRejectReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BackendDoesNotSupportVariant => "backendDoesNotSupportVariant",
+            Self::EmptyGlyphRun => "emptyGlyphRun",
+            Self::GlyphRunTooLarge => "glyphRunTooLarge",
+            Self::GlyphPositionCountMismatch => "glyphPositionCountMismatch",
+            Self::GlyphAdvanceCountMismatch => "glyphAdvanceCountMismatch",
             Self::FontNotPortable => "fontNotPortable",
             Self::ExternalFontNotVerified => "externalFontNotVerified",
+            Self::FontFaceMissing => "fontFaceMissing",
+            Self::FontBlobMissing => "fontBlobMissing",
+            Self::FontBlobNotPortable => "fontBlobNotPortable",
+            Self::FontBlobBytesMissing => "fontBlobBytesMissing",
+            Self::FontBlobDataRefMismatch => "fontBlobDataRefMismatch",
+            Self::FontBlobDigestMismatch => "fontBlobDigestMismatch",
+            Self::FontBlobTooLarge => "fontBlobTooLarge",
+            Self::FaceIndexUnsupported => "faceIndexUnsupported",
+            Self::VariationUnsupported => "variationUnsupported",
+            Self::SyntheticStyleAuthorityPending => "syntheticStyleAuthorityPending",
+            Self::BidiDirectionAuthorityPending => "bidiDirectionAuthorityPending",
+            Self::BidiLevelAuthorityPending => "bidiLevelAuthorityPending",
+            Self::WritingModeAuthorityPending => "writingModeAuthorityPending",
             Self::GlyphIdOutOfRange => "glyphIdOutOfRange",
+            Self::PlacementNotFinite => "placementNotFinite",
+            Self::PositionNotFinite => "positionNotFinite",
+            Self::AdvanceNotFinite => "advanceNotFinite",
+            Self::FontInstanceInvalid => "fontInstanceInvalid",
+            Self::StrictVisualIneligible => "strictVisualIneligible",
             Self::MissingGlyph => "missingGlyph",
             Self::ClusterMismatch => "clusterMismatch",
             Self::UnsupportedPaintEffect => "unsupportedPaintEffect",
@@ -170,6 +229,12 @@ impl VariantRejectReason {
             Self::UnsupportedColorGlyph => "unsupportedColorGlyph",
             Self::UnsupportedBitmapGlyph => "unsupportedBitmapGlyph",
             Self::UnsupportedSvgGlyph => "unsupportedSvgGlyph",
+            Self::MissingGlyphPayloadResource => "missingGlyphPayloadResource",
+            Self::MixedPerGlyphAuthorityPending => "mixedPerGlyphAuthorityPending",
+            Self::GlyphTransformAuthorityPending => "glyphTransformAuthorityPending",
+            Self::VerticalGlyphOrientationAuthorityPending => {
+                "verticalGlyphOrientationAuthorityPending"
+            }
             Self::PositionAdjustedNotAllowed => "positionAdjustedNotAllowed",
             Self::PositionAdjustedResidualTooLarge => "positionAdjustedResidualTooLarge",
         }
@@ -248,7 +313,7 @@ pub fn analyze_text_variant_selection(
     collect_text_variant_groups(&tree.root, &mut groups, &mut next_order);
     groups
         .into_iter()
-        .map(|(equivalence_group, group)| group.finish(equivalence_group, options))
+        .map(|(equivalence_group, group)| group.finish(equivalence_group, options, &tree.resources))
         .collect()
 }
 
@@ -263,12 +328,13 @@ impl TextVariantGroupState {
         self,
         equivalence_group: String,
         options: TextVariantSelectionOptions,
+        resources: &ResourceArena,
     ) -> TextVariantSelectionReport {
         let mut evaluated = self
             .variants
             .into_values()
             .map(|candidate| {
-                let reasons = candidate.reject_reasons(options);
+                let reasons = candidate.reject_reasons(options, resources);
                 EvaluatedTextVariantCandidate { candidate, reasons }
             })
             .collect::<Vec<_>>();
@@ -387,7 +453,11 @@ impl TextVariantCandidate {
         self.glyph_outlines.push(outline.clone());
     }
 
-    fn reject_reasons(&self, options: TextVariantSelectionOptions) -> Vec<VariantRejectReason> {
+    fn reject_reasons(
+        &self,
+        options: TextVariantSelectionOptions,
+        resources: &ResourceArena,
+    ) -> Vec<VariantRejectReason> {
         let mut reasons = BTreeSet::<VariantRejectReason>::new();
         self.collect_structure_reasons(&mut reasons);
         match self.variant_kind {
@@ -397,12 +467,14 @@ impl TextVariantCandidate {
             TextVariantKind::GlyphRun => {
                 if !matches!(
                     options.backend,
-                    VariantSelectionBackend::CanvasKit | VariantSelectionBackend::NativeSkia
+                    VariantSelectionBackend::CanvasKit
+                        | VariantSelectionBackend::CanvasKitBrowser
+                        | VariantSelectionBackend::NativeSkia
                 ) {
                     reasons.insert(VariantRejectReason::BackendDoesNotSupportVariant);
                 }
                 for run in &self.glyph_runs {
-                    collect_glyph_run_reject_reasons(run, options, &mut reasons);
+                    collect_glyph_run_reject_reasons(run, options, resources, &mut reasons);
                 }
             }
             TextVariantKind::GlyphOutline => {
@@ -410,7 +482,7 @@ impl TextVariantCandidate {
                     reasons.insert(VariantRejectReason::BackendDoesNotSupportVariant);
                 }
                 for outline in &self.glyph_outlines {
-                    collect_glyph_outline_reject_reasons(outline, options, &mut reasons);
+                    collect_glyph_outline_reject_reasons(outline, options, resources, &mut reasons);
                 }
             }
         }
@@ -503,27 +575,192 @@ fn collect_text_variant_groups(
 fn collect_glyph_run_reject_reasons(
     run: &LayerGlyphRunPaint,
     options: TextVariantSelectionOptions,
+    resources: &ResourceArena,
     reasons: &mut BTreeSet<VariantRejectReason>,
 ) {
+    if run.glyph_ids.is_empty() {
+        reasons.insert(VariantRejectReason::EmptyGlyphRun);
+    }
+    if run.glyph_ids.len() > MAX_PORTABLE_GLYPHS_PER_RUN
+        || run.positions.len() > MAX_PORTABLE_GLYPHS_PER_RUN
+        || run
+            .advances
+            .as_ref()
+            .is_some_and(|advances| advances.len() > MAX_PORTABLE_GLYPHS_PER_RUN)
+        || run.clusters.len() > MAX_PORTABLE_GLYPHS_PER_RUN
+    {
+        reasons.insert(VariantRejectReason::GlyphRunTooLarge);
+        return;
+    }
+    if run.glyph_ids.len() != run.positions.len() {
+        reasons.insert(VariantRejectReason::GlyphPositionCountMismatch);
+    }
+    if run
+        .advances
+        .as_ref()
+        .is_some_and(|advances| advances.len() != run.glyph_ids.len())
+    {
+        reasons.insert(VariantRejectReason::GlyphAdvanceCountMismatch);
+    }
     if !run.paint_style.is_fill_only_glyph_replay() {
         reasons.insert(VariantRejectReason::UnsupportedPaintEffect);
     }
-    if !matches!(run.orientation, GlyphRunOrientation::Horizontal) {
-        reasons.insert(VariantRejectReason::UnsupportedPaintEffect);
+    if run.shape_key.font_instance.synthetic_bold || run.shape_key.font_instance.synthetic_italic {
+        reasons.insert(VariantRejectReason::SyntheticStyleAuthorityPending);
+    }
+    if !matches!(run.direction, TextDirection::Ltr)
+        || !matches!(run.shape_key.direction, TextDirection::Ltr)
+    {
+        reasons.insert(VariantRejectReason::BidiDirectionAuthorityPending);
+    }
+    if run.bidi_level != Some(0) {
+        reasons.insert(VariantRejectReason::BidiLevelAuthorityPending);
+    }
+    if !matches!(run.writing_mode, WritingMode::HorizontalTb)
+        || !matches!(run.shape_key.writing_mode, WritingMode::HorizontalTb)
+    {
+        reasons.insert(VariantRejectReason::WritingModeAuthorityPending);
+    }
+    if run.glyph_transforms.is_some() {
+        reasons.insert(VariantRejectReason::GlyphTransformAuthorityPending);
+    }
+    match run.orientation {
+        GlyphRunOrientation::Horizontal => {}
+        GlyphRunOrientation::MixedPerGlyph => {
+            reasons.insert(VariantRejectReason::MixedPerGlyphAuthorityPending);
+        }
+        GlyphRunOrientation::VerticalUpright | GlyphRunOrientation::VerticalSideways => {
+            reasons.insert(VariantRejectReason::VerticalGlyphOrientationAuthorityPending);
+        }
+    }
+    if matches!(
+        options.backend,
+        VariantSelectionBackend::CanvasKit
+            | VariantSelectionBackend::CanvasKitBrowser
+            | VariantSelectionBackend::NativeSkia
+    ) {
+        if !run.shape_key.font_instance.variations.is_empty() {
+            reasons.insert(VariantRejectReason::VariationUnsupported);
+        }
+        if matches!(
+            run.diagnostics.replay_eligibility,
+            GlyphRunReplayEligibility::Portable
+        ) {
+            collect_glyph_run_font_resource_reject_reasons(run, options, resources, reasons);
+        }
     }
     collect_text_variant_diagnostics_reject_reasons(&run.diagnostics, options, reasons);
     if run
         .glyph_ids
         .iter()
-        .any(|glyph_id| *glyph_id > options.max_canvas_glyph_id)
+        .any(|glyph_id| *glyph_id == 0 || *glyph_id > options.max_canvas_glyph_id)
     {
         reasons.insert(VariantRejectReason::GlyphIdOutOfRange);
     }
+    let placement = run.placement.run_to_page;
+    if ![
+        placement.a,
+        placement.b,
+        placement.c,
+        placement.d,
+        placement.e,
+        placement.f,
+        run.placement.baseline_y,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        reasons.insert(VariantRejectReason::PlacementNotFinite);
+    }
+    if run
+        .positions
+        .iter()
+        .any(|position| !position.x.is_finite() || !position.y.is_finite())
+    {
+        reasons.insert(VariantRejectReason::PositionNotFinite);
+    }
+    if run.advances.as_ref().is_some_and(|advances| {
+        advances
+            .iter()
+            .any(|advance| !advance.dx.is_finite() || !advance.dy.is_finite())
+    }) {
+        reasons.insert(VariantRejectReason::AdvanceNotFinite);
+    }
+    let font_size = run.shape_key.font_instance.size_px;
+    if !font_size.is_finite() || font_size <= 0.0 || font_size > 4096.0 {
+        reasons.insert(VariantRejectReason::FontInstanceInvalid);
+    }
+}
+
+fn collect_glyph_run_font_resource_reject_reasons(
+    run: &LayerGlyphRunPaint,
+    options: TextVariantSelectionOptions,
+    resources: &ResourceArena,
+    reasons: &mut BTreeSet<VariantRejectReason>,
+) {
+    let font_resources = resources.font_resources();
+    let Some(face) = font_resources
+        .faces
+        .iter()
+        .find(|face| face.id == run.shape_key.font_instance.face_key)
+    else {
+        reasons.insert(VariantRejectReason::FontFaceMissing);
+        return;
+    };
+
+    let Some(blob) = font_resources
+        .blobs
+        .iter()
+        .find(|blob| blob.id == face.blob_key)
+    else {
+        reasons.insert(VariantRejectReason::FontBlobMissing);
+        return;
+    };
+
+    let crate::paint::FontPortability::PortableBlob { digest, data_ref } = &blob.portability else {
+        reasons.insert(VariantRejectReason::FontBlobNotPortable);
+        return;
+    };
+
+    if blob.data_ref.as_ref() != Some(data_ref) {
+        reasons.insert(VariantRejectReason::FontBlobDataRefMismatch);
+    }
+
+    match resources.font_blob_bytes_for_ref(data_ref) {
+        Some(bytes) => {
+            if bytes.len() > MAX_PORTABLE_FONT_BLOB_BYTES {
+                reasons.insert(VariantRejectReason::FontBlobTooLarge);
+                return;
+            }
+            let actual_digest = crate::paint::resource_digest_hex(bytes);
+            if !font_digest_matches_resource_digest(digest, &actual_digest)
+                || !blob.digest.as_ref().is_none_or(|digest| {
+                    font_digest_matches_resource_digest(digest, &actual_digest)
+                })
+            {
+                reasons.insert(VariantRejectReason::FontBlobDigestMismatch);
+            }
+            if (face.face_index != 0
+                && options.backend != VariantSelectionBackend::CanvasKitBrowser)
+                || ttf_parser::Face::parse(bytes, face.face_index).is_err()
+            {
+                reasons.insert(VariantRejectReason::FaceIndexUnsupported);
+            }
+        }
+        None => {
+            reasons.insert(VariantRejectReason::FontBlobBytesMissing);
+        }
+    }
+}
+
+fn font_digest_matches_resource_digest(digest: &crate::paint::FontDigest, actual: &str) -> bool {
+    digest.algorithm == crate::paint::RESOURCE_KEY_ALGORITHM && digest.value == actual
 }
 
 fn collect_glyph_outline_reject_reasons(
     outline: &LayerGlyphOutlinePaint,
     options: TextVariantSelectionOptions,
+    resources: &ResourceArena,
     reasons: &mut BTreeSet<VariantRejectReason>,
 ) {
     if !outline.has_exclusive_payload_family() {
@@ -566,16 +803,42 @@ fn collect_glyph_outline_reject_reasons(
             }
         },
         GlyphOutlinePayloadKind::BitmapGlyph => match outline.bitmap_glyph.as_ref() {
-            Some(bitmap_glyph)
-                if bitmap_glyph.has_strict_visual_contract() && options.allow_bitmap_glyph => {}
-            _ => {
+            Some(bitmap_glyph) if !bitmap_glyph.has_strict_visual_contract() => {
+                reasons.insert(VariantRejectReason::UnsupportedBitmapGlyph);
+            }
+            Some(_) if !options.allow_bitmap_glyph => {
+                reasons.insert(VariantRejectReason::UnsupportedBitmapGlyph);
+            }
+            Some(bitmap_glyph) => match resources.image_bytes(bitmap_glyph.image_ref) {
+                None => {
+                    reasons.insert(VariantRejectReason::MissingGlyphPayloadResource);
+                }
+                Some(bytes) if !canvaskit_bitmap_resource_is_decodable(bytes) => {
+                    reasons.insert(VariantRejectReason::UnsupportedBitmapGlyph);
+                }
+                Some(_) => {}
+            },
+            None => {
                 reasons.insert(VariantRejectReason::UnsupportedBitmapGlyph);
             }
         },
         GlyphOutlinePayloadKind::SvgGlyph => match outline.svg_glyph.as_ref() {
-            Some(svg_glyph)
-                if svg_glyph.has_static_sanitized_contract() && options.allow_svg_glyph => {}
-            _ => {
+            Some(svg_glyph) if !svg_glyph.has_static_sanitized_contract() => {
+                reasons.insert(VariantRejectReason::UnsupportedSvgGlyph);
+            }
+            Some(_) if !options.allow_svg_glyph => {
+                reasons.insert(VariantRejectReason::UnsupportedSvgGlyph);
+            }
+            Some(svg_glyph) => match resources.svg_fragment(svg_glyph.svg_ref) {
+                None => {
+                    reasons.insert(VariantRejectReason::MissingGlyphPayloadResource);
+                }
+                Some(fragment) if !static_svg_fragment_has_path_layer(fragment) => {
+                    reasons.insert(VariantRejectReason::UnsupportedSvgGlyph);
+                }
+                Some(_) => {}
+            },
+            None => {
                 reasons.insert(VariantRejectReason::UnsupportedSvgGlyph);
             }
         },
@@ -583,11 +846,34 @@ fn collect_glyph_outline_reject_reasons(
     collect_text_variant_diagnostics_reject_reasons(&outline.diagnostics, options, reasons);
 }
 
+fn canvaskit_bitmap_resource_is_decodable(bytes: &[u8]) -> bool {
+    if bytes.is_empty() || bytes.len() > MAX_CANVASKIT_BITMAP_RESOURCE_BYTES {
+        return false;
+    }
+    let Ok(format) = image::guess_format(bytes) else {
+        return false;
+    };
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_CANVASKIT_BITMAP_DIMENSION);
+    limits.max_image_height = Some(MAX_CANVASKIT_BITMAP_DIMENSION);
+    limits.max_alloc = Some(MAX_CANVASKIT_BITMAP_PIXELS * 4);
+    reader.limits(limits);
+    let Ok(image) = reader.decode() else {
+        return false;
+    };
+    let pixels = u64::from(image.width()) * u64::from(image.height());
+    pixels > 0 && pixels <= MAX_CANVASKIT_BITMAP_PIXELS
+}
+
 fn collect_text_variant_diagnostics_reject_reasons(
     diagnostics: &crate::paint::GlyphRunDiagnostics,
     options: TextVariantSelectionOptions,
     reasons: &mut BTreeSet<VariantRejectReason>,
 ) {
+    if !diagnostics.strict_visual_eligible {
+        reasons.insert(VariantRejectReason::StrictVisualIneligible);
+    }
     match diagnostics.replay_eligibility {
         GlyphRunReplayEligibility::Portable => {}
         GlyphRunReplayEligibility::ConditionalExternalFont => {
@@ -630,30 +916,36 @@ fn collect_text_variant_diagnostics_reject_reasons(
 mod tests {
     use super::*;
     use crate::paint::{
+        font_blob_resource_key, resource_digest_hex, BinaryResourceKind, BinaryResourceRef,
         BitmapGlyphFiltering, BitmapGlyphPayload, BitmapGlyphScalingPolicy, ColorGlyphFormat,
         ColorGradientStop, ColorLayersPayload, ColorLinearGradient, ColorPaintGraphNode,
         ColorPaintGraphNodeKind, ColorPaintGraphPayload, ColorPaintLinearGradientPathNode,
         ColorPaintRadialGradientPathNode, ColorPaintSolidPathNode, ColorPaintSweepGradientPathNode,
-        ColorRadialGradient, ColorSweepGradient, FontColorGlyphRef, FontFaceKey,
-        FontFallbackPolicyId, FontInstanceKey, GlyphCluster, GlyphOutlineFillRule,
+        ColorRadialGradient, ColorSweepGradient, FontBlobKey, FontBlobResource, FontColorGlyphRef,
+        FontDigest, FontFaceKey, FontFaceResource, FontFallbackPolicyId, FontInstanceKey,
+        FontPortability, FontResourceSource, GlyphCluster, GlyphOutlineFillRule,
         GlyphOutlinePaintOrder, GlyphOutlinePayloadKind, GlyphOutlineStrokeCap,
         GlyphOutlineStrokeJoin, GlyphOutlineStrokeStyle, GlyphRange, GlyphRunDiagnostics,
-        GlyphRunOrientation, ImageResourceId, LayerAffineTransform, LayerGlyphOutlinePath,
-        LayerNode, LayerPoint, LayerVector, PaintTextStyle, PaintVariantMeta, ResolvedColor,
-        ScriptTag, ShapeKey, ShapingEngineId, SvgGlyphPayload, SvgResourceId, TextDirection,
-        TextRunPlacement, TextSourceId, TextSourceRange, TextSourceSpan, WritingMode,
+        GlyphRunOrientation, GlyphTransform, ImageResourceId, LayerAffineTransform,
+        LayerGlyphOutlinePath, LayerNode, LayerPoint, LayerVector, PaintTextStyle,
+        PaintVariantMeta, ResolvedColor, ResourceArena, ScriptTag, ShapeKey, ShapingEngineId,
+        SvgGlyphPayload, SvgResourceId, TextDirection, TextRunPlacement, TextSourceId,
+        TextSourceRange, TextSourceSpan, VariationAxisValue, WritingMode,
     };
     use crate::renderer::render_tree::{BoundingBox, FieldMarkerType, TextRunNode};
     use crate::renderer::{PathCommand, TextStyle};
+
+    const FIXTURE_PNG: &[u8] = include_bytes!("../../assets/logo/logo-32.png");
+    const FIXTURE_TTC: &[u8] = include_bytes!("../../tests/fixtures/fonts/RHWPExactFaceSmoke.ttc");
 
     fn bbox() -> BoundingBox {
         BoundingBox::new(0.0, 0.0, 24.0, 24.0)
     }
 
     fn text_op() -> PaintOp {
-        PaintOp::TextRun {
-            bbox: bbox(),
-            run: TextRunNode {
+        PaintOp::text_run(
+            bbox(),
+            TextRunNode {
                 text: "A".to_string(),
                 style: TextStyle {
                     font_family: "Test".to_string(),
@@ -675,8 +967,9 @@ mod tests {
                 border_fill_id: 0,
                 baseline: 12.0,
                 field_marker: FieldMarkerType::None,
+                display_text: None,
             },
-        }
+        )
     }
 
     fn variant(kind: TextVariantKind, id: &str) -> PaintVariantMeta {
@@ -786,7 +1079,7 @@ mod tests {
                     flags: Vec::new(),
                 }],
                 direction: TextDirection::Ltr,
-                bidi_level: None,
+                bidi_level: Some(0),
                 writing_mode: WritingMode::HorizontalTb,
                 orientation: GlyphRunOrientation::Horizontal,
                 glyph_transforms: None,
@@ -1032,14 +1325,90 @@ mod tests {
         PageLayerTree::new(100.0, 100.0, LayerNode::leaf(bbox(), None, ops))
     }
 
+    fn add_portable_font_resources(resources: &mut ResourceArena) {
+        add_portable_font_bytes(resources, FIXTURE_TTC, 0);
+    }
+
+    fn add_portable_font_bytes(resources: &mut ResourceArena, font_bytes: &[u8], face_index: u32) {
+        resources.intern_font_blob_bytes(&font_bytes);
+        let blob_key = FontBlobKey("blob-0".to_string());
+        let face_key = FontFaceKey("face-0".to_string());
+        let digest_value = resource_digest_hex(font_bytes);
+        let digest = FontDigest {
+            algorithm: crate::paint::RESOURCE_KEY_ALGORITHM.to_string(),
+            value: digest_value.clone(),
+        };
+        let data_ref = BinaryResourceRef {
+            kind: BinaryResourceKind::FontBlob,
+            id: font_blob_resource_key(font_bytes.len(), &digest_value),
+        };
+        resources.font_resources_mut().blobs.push(FontBlobResource {
+            id: blob_key.clone(),
+            digest: Some(digest.clone()),
+            source: FontResourceSource::Embedded,
+            data_ref: Some(data_ref.clone()),
+            portability: FontPortability::PortableBlob { digest, data_ref },
+        });
+        resources.font_resources_mut().faces.push(FontFaceResource {
+            id: face_key,
+            blob_key,
+            face_index,
+            postscript_name: None,
+            family_names: Vec::new(),
+            style_names: Vec::new(),
+            weight_class: None,
+            width_class: None,
+            italic: None,
+        });
+    }
+
     fn first_report(
         ops: Vec<PaintOp>,
         options: TextVariantSelectionOptions,
     ) -> TextVariantSelectionReport {
-        analyze_text_variant_selection(&tree(ops), options)
+        let mut tree = tree(ops);
+        add_portable_font_resources(&mut tree.resources);
+        analyze_text_variant_selection(&tree, options)
             .into_iter()
             .next()
             .unwrap()
+    }
+
+    fn first_report_with_resource_setup(
+        ops: Vec<PaintOp>,
+        options: TextVariantSelectionOptions,
+        setup: impl FnOnce(&mut ResourceArena),
+    ) -> TextVariantSelectionReport {
+        let mut tree = tree(ops);
+        setup(&mut tree.resources);
+        analyze_text_variant_selection(&tree, options)
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    fn report_for_mutated_glyph_run(
+        mutate: impl FnOnce(&mut LayerGlyphRunPaint),
+    ) -> TextVariantSelectionReport {
+        let mut glyph_run = glyph_run(diagnostics(), 42);
+        let PaintOp::GlyphRun { run, .. } = &mut glyph_run else {
+            unreachable!("glyph_run helper must return a GlyphRun")
+        };
+        mutate(run);
+        first_report(
+            vec![text_op(), glyph_run],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+        )
+    }
+
+    fn native_skia_options() -> TextVariantSelectionOptions {
+        TextVariantSelectionOptions {
+            backend: VariantSelectionBackend::NativeSkia,
+            ..TextVariantSelectionOptions::canvaskit()
+        }
     }
 
     #[test]
@@ -1058,6 +1427,43 @@ mod tests {
     }
 
     #[test]
+    fn canvaskit_browser_selects_the_outline_replayed_by_the_json_runtime() {
+        let report = first_report(
+            vec![text_op(), glyph_run(diagnostics(), 42), glyph_outline(None)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                prefer_strict_outline: true,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+        );
+
+        assert_eq!(
+            report.selected_variant_kind,
+            Some(TextVariantKind::GlyphOutline)
+        );
+        assert_eq!(report.selected_variant_id.as_deref(), Some("glyphOutline"));
+        assert!(report.rejected_variants.is_empty());
+    }
+
+    #[test]
+    fn canvaskit_browser_selects_strict_glyph_run_without_an_outline() {
+        let report = first_report(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+        );
+
+        assert_eq!(
+            report.selected_variant_kind,
+            Some(TextVariantKind::GlyphRun)
+        );
+        assert_eq!(report.selected_variant_id.as_deref(), Some("glyphRun"));
+        assert!(!report.fallback_required);
+    }
+
+    #[test]
     fn canvaskit_rejects_large_glyph_ids_and_falls_back() {
         let report = first_report(
             vec![text_op(), glyph_run(diagnostics(), u16::MAX as u32 + 1)],
@@ -1069,6 +1475,507 @@ mod tests {
             report.rejected_variants[0].reasons,
             vec![VariantRejectReason::GlyphIdOutOfRange]
         );
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_malformed_glyph_run_geometry() {
+        let cases = [
+            report_for_mutated_glyph_run(|run| {
+                run.glyph_ids.clear();
+                run.positions.clear();
+            }),
+            report_for_mutated_glyph_run(|run| run.positions.clear()),
+            report_for_mutated_glyph_run(|run| {
+                run.advances = Some(Vec::new());
+            }),
+            report_for_mutated_glyph_run(|run| run.placement.run_to_page.e = f64::NAN),
+            report_for_mutated_glyph_run(|run| run.positions[0].x = f64::INFINITY),
+            report_for_mutated_glyph_run(|run| {
+                run.advances = Some(vec![LayerVector {
+                    dx: f64::NAN,
+                    dy: 0.0,
+                }]);
+            }),
+            report_for_mutated_glyph_run(|run| run.shape_key.font_instance.size_px = 0.0),
+        ];
+        let expected = [
+            VariantRejectReason::EmptyGlyphRun,
+            VariantRejectReason::GlyphPositionCountMismatch,
+            VariantRejectReason::GlyphAdvanceCountMismatch,
+            VariantRejectReason::PlacementNotFinite,
+            VariantRejectReason::PositionNotFinite,
+            VariantRejectReason::AdvanceNotFinite,
+            VariantRejectReason::FontInstanceInvalid,
+        ];
+
+        for (report, expected_reason) in cases.into_iter().zip(expected) {
+            assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+            assert!(report.fallback_required);
+            assert!(report.rejected_variants[0]
+                .reasons
+                .contains(&expected_reason));
+        }
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_missing_glyph_zero() {
+        let report = first_report(
+            vec![text_op(), glyph_run(diagnostics(), 0)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::GlyphIdOutOfRange));
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_ineligible_or_oversized_glyph_runs() {
+        let strict_ineligible = report_for_mutated_glyph_run(|run| {
+            run.diagnostics.strict_visual_eligible = false;
+        });
+        assert_eq!(
+            strict_ineligible.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(strict_ineligible.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::StrictVisualIneligible));
+
+        let oversized = report_for_mutated_glyph_run(|run| {
+            run.glyph_ids.resize(MAX_PORTABLE_GLYPHS_PER_RUN + 1, 1);
+            run.positions.resize(
+                MAX_PORTABLE_GLYPHS_PER_RUN + 1,
+                crate::paint::LayerPoint { x: 0.0, y: 0.0 },
+            );
+        });
+        assert_eq!(
+            oversized.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(oversized.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::GlyphRunTooLarge));
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_strict_glyph_run_authority_outside_p42_subset() {
+        let cases = [
+            (
+                report_for_mutated_glyph_run(|run| {
+                    run.shape_key.font_instance.synthetic_bold = true;
+                }),
+                VariantRejectReason::SyntheticStyleAuthorityPending,
+            ),
+            (
+                report_for_mutated_glyph_run(|run| {
+                    run.direction = TextDirection::Rtl;
+                }),
+                VariantRejectReason::BidiDirectionAuthorityPending,
+            ),
+            (
+                report_for_mutated_glyph_run(|run| {
+                    run.shape_key.direction = TextDirection::Auto;
+                }),
+                VariantRejectReason::BidiDirectionAuthorityPending,
+            ),
+            (
+                report_for_mutated_glyph_run(|run| run.bidi_level = Some(1)),
+                VariantRejectReason::BidiLevelAuthorityPending,
+            ),
+            (
+                report_for_mutated_glyph_run(|run| {
+                    run.writing_mode = WritingMode::VerticalRl;
+                }),
+                VariantRejectReason::WritingModeAuthorityPending,
+            ),
+            (
+                report_for_mutated_glyph_run(|run| {
+                    run.shape_key.writing_mode = WritingMode::VerticalLr;
+                }),
+                VariantRejectReason::WritingModeAuthorityPending,
+            ),
+        ];
+
+        for (report, expected_reason) in cases {
+            assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+            assert!(report.fallback_required);
+            assert!(report.rejected_variants[0]
+                .reasons
+                .contains(&expected_reason));
+        }
+    }
+
+    #[test]
+    fn canvaskit_browser_requires_a_parseable_default_face() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+            |resources| add_portable_font_bytes(resources, &[0, 1, 2, 3], 0),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::FaceIndexUnsupported));
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_an_oversized_font_blob_before_replay() {
+        let oversized_font = vec![0; MAX_PORTABLE_FONT_BLOB_BYTES + 1];
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+            |resources| add_portable_font_bytes(resources, &oversized_font, 0),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::FontBlobTooLarge));
+    }
+
+    #[test]
+    fn canvaskit_keeps_default_face_without_variation_as_font_proof_control() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            add_portable_font_resources,
+        );
+
+        assert_eq!(report.selected_variant_id.as_deref(), Some("glyphRun"));
+        assert!(!report.fallback_required);
+        assert!(report.rejected_variants.is_empty());
+    }
+
+    #[test]
+    fn canvaskit_rejects_portable_glyph_run_without_font_face_proof() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |_| {},
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontFaceMissing]
+        );
+        assert_eq!(
+            VariantRejectReason::FontFaceMissing.as_str(),
+            "fontFaceMissing"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_font_face_without_blob_proof() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| {
+                resources.font_resources_mut().faces.push(FontFaceResource {
+                    id: FontFaceKey("face-0".to_string()),
+                    blob_key: FontBlobKey("blob-0".to_string()),
+                    face_index: 0,
+                    postscript_name: None,
+                    family_names: Vec::new(),
+                    style_names: Vec::new(),
+                    weight_class: None,
+                    width_class: None,
+                    italic: None,
+                });
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontBlobMissing]
+        );
+        assert_eq!(
+            VariantRejectReason::FontBlobMissing.as_str(),
+            "fontBlobMissing"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_font_blob_without_resource_bytes() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| {
+                let digest_value = resource_digest_hex([0_u8, 1, 2, 3]);
+                let digest = FontDigest {
+                    algorithm: crate::paint::RESOURCE_KEY_ALGORITHM.to_string(),
+                    value: digest_value.clone(),
+                };
+                let data_ref = BinaryResourceRef {
+                    kind: BinaryResourceKind::FontBlob,
+                    id: font_blob_resource_key(4, &digest_value),
+                };
+                resources.font_resources_mut().blobs.push(FontBlobResource {
+                    id: FontBlobKey("blob-0".to_string()),
+                    digest: Some(digest.clone()),
+                    source: FontResourceSource::Embedded,
+                    data_ref: Some(data_ref.clone()),
+                    portability: FontPortability::PortableBlob { digest, data_ref },
+                });
+                resources.font_resources_mut().faces.push(FontFaceResource {
+                    id: FontFaceKey("face-0".to_string()),
+                    blob_key: FontBlobKey("blob-0".to_string()),
+                    face_index: 0,
+                    postscript_name: None,
+                    family_names: Vec::new(),
+                    style_names: Vec::new(),
+                    weight_class: None,
+                    width_class: None,
+                    italic: None,
+                });
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontBlobBytesMissing]
+        );
+        assert_eq!(
+            VariantRejectReason::FontBlobBytesMissing.as_str(),
+            "fontBlobBytesMissing"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_non_portable_font_blob_proof() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| {
+                let digest = FontDigest {
+                    algorithm: crate::paint::RESOURCE_KEY_ALGORITHM.to_string(),
+                    value: resource_digest_hex([0_u8, 1, 2, 3]),
+                };
+                resources.font_resources_mut().blobs.push(FontBlobResource {
+                    id: FontBlobKey("blob-0".to_string()),
+                    digest: Some(digest.clone()),
+                    source: FontResourceSource::SystemResolved,
+                    data_ref: None,
+                    portability: FontPortability::ResolvedButNotEmbedded {
+                        digest: Some(digest),
+                    },
+                });
+                resources.font_resources_mut().faces.push(FontFaceResource {
+                    id: FontFaceKey("face-0".to_string()),
+                    blob_key: FontBlobKey("blob-0".to_string()),
+                    face_index: 0,
+                    postscript_name: None,
+                    family_names: Vec::new(),
+                    style_names: Vec::new(),
+                    weight_class: None,
+                    width_class: None,
+                    italic: None,
+                });
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontBlobNotPortable]
+        );
+        assert_eq!(
+            VariantRejectReason::FontBlobNotPortable.as_str(),
+            "fontBlobNotPortable"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_font_blob_digest_mismatch() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| {
+                add_portable_font_resources(resources);
+                resources.font_resources_mut().blobs[0].digest = Some(FontDigest {
+                    algorithm: crate::paint::RESOURCE_KEY_ALGORITHM.to_string(),
+                    value: resource_digest_hex([9_u8, 9, 9, 9]),
+                });
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontBlobDigestMismatch]
+        );
+        assert_eq!(
+            VariantRejectReason::FontBlobDigestMismatch.as_str(),
+            "fontBlobDigestMismatch"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_font_blob_data_ref_mismatch() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| {
+                add_portable_font_resources(resources);
+                resources.font_resources_mut().blobs[0].data_ref = None;
+            },
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::FontBlobDataRefMismatch]
+        );
+        assert_eq!(
+            VariantRejectReason::FontBlobDataRefMismatch.as_str(),
+            "fontBlobDataRefMismatch"
+        );
+    }
+
+    #[test]
+    fn canvaskit_rejects_variation_instances_until_exact_construction_is_proven() {
+        let mut op = glyph_run(diagnostics(), 42);
+        if let PaintOp::GlyphRun { run, .. } = &mut op {
+            run.shape_key.font_instance.variations = vec![VariationAxisValue {
+                tag: "wght".to_string(),
+                value: 700.0,
+            }];
+        }
+        let report = first_report(
+            vec![text_op(), op],
+            TextVariantSelectionOptions::canvaskit(),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::VariationUnsupported));
+        assert_eq!(
+            VariantRejectReason::VariationUnsupported.as_str(),
+            "variationUnsupported"
+        );
+    }
+
+    #[test]
+    fn non_browser_canvaskit_rejects_non_default_collection_face() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions::canvaskit(),
+            |resources| add_portable_font_bytes(resources, FIXTURE_TTC, 1),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::FaceIndexUnsupported));
+        assert_eq!(
+            VariantRejectReason::FaceIndexUnsupported.as_str(),
+            "faceIndexUnsupported"
+        );
+    }
+
+    #[test]
+    fn canvaskit_browser_accepts_a_proven_collection_face() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+            |resources| add_portable_font_bytes(resources, FIXTURE_TTC, 1),
+        );
+
+        assert_eq!(
+            report.selected_variant_kind,
+            Some(TextVariantKind::GlyphRun)
+        );
+        assert!(!report.fallback_required);
+        assert!(report.rejected_variants.is_empty());
+    }
+
+    #[test]
+    fn canvaskit_browser_rejects_an_out_of_range_collection_face() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            TextVariantSelectionOptions {
+                backend: VariantSelectionBackend::CanvasKitBrowser,
+                ..TextVariantSelectionOptions::canvaskit()
+            },
+            |resources| add_portable_font_bytes(resources, FIXTURE_TTC, 2),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::FaceIndexUnsupported));
+    }
+
+    #[test]
+    fn native_skia_keeps_default_face_without_variation_as_font_proof_control() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            native_skia_options(),
+            add_portable_font_resources,
+        );
+
+        assert_eq!(report.selected_variant_id.as_deref(), Some("glyphRun"));
+        assert!(!report.fallback_required);
+        assert!(report.rejected_variants.is_empty());
+    }
+
+    #[test]
+    fn native_skia_rejects_variation_instances_until_exact_construction_is_proven() {
+        let mut op = glyph_run(diagnostics(), 42);
+        if let PaintOp::GlyphRun { run, .. } = &mut op {
+            run.shape_key.font_instance.variations = vec![VariationAxisValue {
+                tag: "wght".to_string(),
+                value: 700.0,
+            }];
+        }
+        let report = first_report(vec![text_op(), op], native_skia_options());
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::VariationUnsupported));
+    }
+
+    #[test]
+    fn native_skia_rejects_non_default_collection_face_until_exact_construction_is_proven() {
+        let report = first_report_with_resource_setup(
+            vec![text_op(), glyph_run(diagnostics(), 42)],
+            native_skia_options(),
+            |resources| add_portable_font_bytes(resources, FIXTURE_TTC, 1),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::FaceIndexUnsupported));
     }
 
     #[test]
@@ -1085,6 +1992,94 @@ mod tests {
         assert!(report.rejected_variants[0]
             .reasons
             .contains(&VariantRejectReason::UnsupportedPaintEffect));
+    }
+
+    #[test]
+    fn mixed_per_glyph_runs_keep_text_fallback_until_orientation_authority_exists() {
+        let mut op = glyph_run(diagnostics(), 42);
+        if let PaintOp::GlyphRun { run, .. } = &mut op {
+            run.orientation = GlyphRunOrientation::MixedPerGlyph;
+            run.glyph_transforms = Some(vec![GlyphTransform {
+                xx: 1.0,
+                xy: 0.0,
+                yx: 0.0,
+                yy: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            }]);
+        }
+        let report = first_report(
+            vec![text_op(), op],
+            TextVariantSelectionOptions::canvaskit(),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::MixedPerGlyphAuthorityPending));
+        assert!(!report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedPaintEffect));
+        assert_eq!(
+            VariantRejectReason::MixedPerGlyphAuthorityPending.as_str(),
+            "mixedPerGlyphAuthorityPending"
+        );
+    }
+
+    #[test]
+    fn glyph_transform_runs_keep_text_fallback_until_transform_authority_exists() {
+        let mut op = glyph_run(diagnostics(), 42);
+        if let PaintOp::GlyphRun { run, .. } = &mut op {
+            run.glyph_transforms = Some(vec![GlyphTransform {
+                xx: 1.0,
+                xy: 0.0,
+                yx: 0.0,
+                yy: 1.0,
+                tx: 0.0,
+                ty: 0.0,
+            }]);
+        }
+        let report = first_report(
+            vec![text_op(), op],
+            TextVariantSelectionOptions::canvaskit(),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert_eq!(
+            report.rejected_variants[0].reasons,
+            vec![VariantRejectReason::GlyphTransformAuthorityPending]
+        );
+        assert_eq!(
+            VariantRejectReason::GlyphTransformAuthorityPending.as_str(),
+            "glyphTransformAuthorityPending"
+        );
+    }
+
+    #[test]
+    fn vertical_glyph_runs_keep_text_fallback_until_orientation_authority_exists() {
+        let mut op = glyph_run(diagnostics(), 42);
+        if let PaintOp::GlyphRun { run, .. } = &mut op {
+            run.orientation = GlyphRunOrientation::VerticalUpright;
+        }
+        let report = first_report(
+            vec![text_op(), op],
+            TextVariantSelectionOptions::canvaskit(),
+        );
+
+        assert_eq!(report.selected_variant_kind, Some(TextVariantKind::TextRun));
+        assert!(report.fallback_required);
+        assert!(report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::VerticalGlyphOrientationAuthorityPending));
+        assert!(!report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedPaintEffect));
+        assert_eq!(
+            VariantRejectReason::VerticalGlyphOrientationAuthorityPending.as_str(),
+            "verticalGlyphOrientationAuthorityPending"
+        );
     }
 
     #[test]
@@ -1273,6 +2268,165 @@ mod tests {
         let svg_report = first_report(
             vec![text_op(), svg_glyph_outline()],
             TextVariantSelectionOptions::canvaskit_strict_outline(),
+        );
+        assert_eq!(
+            svg_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(svg_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedSvgGlyph));
+    }
+
+    #[test]
+    fn advanced_bitmap_and_svg_glyph_payloads_reject_missing_resources_when_allowed() {
+        let bitmap_report = first_report(
+            vec![text_op(), bitmap_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_bitmap_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+        );
+        assert_eq!(
+            bitmap_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(bitmap_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::MissingGlyphPayloadResource));
+
+        let svg_report = first_report(
+            vec![text_op(), svg_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_svg_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+        );
+        assert_eq!(
+            svg_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(svg_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::MissingGlyphPayloadResource));
+    }
+
+    #[test]
+    fn advanced_bitmap_and_svg_glyph_payloads_select_only_with_resources() {
+        let bitmap_report = first_report_with_resource_setup(
+            vec![text_op(), bitmap_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_bitmap_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+            |resources| {
+                assert_eq!(
+                    resources.intern_image_bytes(FIXTURE_PNG),
+                    ImageResourceId(0)
+                );
+            },
+        );
+        assert_eq!(
+            bitmap_report.selected_variant_kind,
+            Some(TextVariantKind::GlyphOutline)
+        );
+        assert!(bitmap_report.rejected_variants.is_empty());
+
+        let svg_report = first_report_with_resource_setup(
+            vec![text_op(), svg_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_svg_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+            |resources| {
+                assert_eq!(
+                    resources.intern_svg_fragment("<path d=\"M0 0H10V10Z\"/>"),
+                    SvgResourceId(0)
+                );
+            },
+        );
+        assert_eq!(
+            svg_report.selected_variant_kind,
+            Some(TextVariantKind::GlyphOutline)
+        );
+        assert!(svg_report.rejected_variants.is_empty());
+    }
+
+    #[test]
+    fn canvaskit_resource_glyphs_reject_corrupt_payload_bytes() {
+        let bitmap_report = first_report_with_resource_setup(
+            vec![text_op(), bitmap_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_bitmap_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+            |resources| {
+                resources.intern_image_bytes(b"not-an-image");
+            },
+        );
+        assert_eq!(
+            bitmap_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(bitmap_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedBitmapGlyph));
+
+        let svg_report = first_report_with_resource_setup(
+            vec![text_op(), svg_glyph_outline()],
+            TextVariantSelectionOptions {
+                allow_svg_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+            |resources| {
+                resources.intern_svg_fragment("<path d=\"not-a-path\"/>");
+            },
+        );
+        assert_eq!(
+            svg_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(svg_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedSvgGlyph));
+    }
+
+    #[test]
+    fn invalid_advanced_glyph_payloads_fallback_even_when_family_is_allowed() {
+        let mut backend_default_bitmap = bitmap_glyph_outline();
+        if let PaintOp::GlyphOutline { outline, .. } = &mut backend_default_bitmap {
+            outline.bitmap_glyph.as_mut().unwrap().scaling_policy =
+                BitmapGlyphScalingPolicy::BackendDefault;
+        }
+        let bitmap_report = first_report(
+            vec![text_op(), backend_default_bitmap],
+            TextVariantSelectionOptions {
+                allow_bitmap_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
+        );
+        assert_eq!(
+            bitmap_report.selected_variant_kind,
+            Some(TextVariantKind::TextRun)
+        );
+        assert!(bitmap_report.rejected_variants[0]
+            .reasons
+            .contains(&VariantRejectReason::UnsupportedBitmapGlyph));
+
+        let mut unsafe_svg = svg_glyph_outline();
+        if let PaintOp::GlyphOutline { outline, .. } = &mut unsafe_svg {
+            outline
+                .svg_glyph
+                .as_mut()
+                .unwrap()
+                .external_resources_allowed = true;
+        }
+        let svg_report = first_report(
+            vec![text_op(), unsafe_svg],
+            TextVariantSelectionOptions {
+                allow_svg_glyph: true,
+                ..TextVariantSelectionOptions::canvaskit_strict_outline()
+            },
         );
         assert_eq!(
             svg_report.selected_variant_kind,

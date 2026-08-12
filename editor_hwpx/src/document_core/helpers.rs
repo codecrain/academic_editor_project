@@ -4,20 +4,16 @@
 
 use crate::error::HwpError;
 use crate::model::control::Control;
-use crate::model::paragraph::Paragraph;
+use crate::model::paragraph::{ParaMeta, Paragraph};
 use crate::model::path::PathSegment;
 use crate::model::style::BorderLineType;
 
+pub(crate) fn is_treat_as_char_object_control(ctrl: &Control) -> bool {
+    ctrl.is_treat_as_char_object()
+}
+
 fn is_logical_inline_control(ctrl: &Control) -> bool {
-    matches!(
-        ctrl,
-        Control::Shape(_)
-            | Control::Table(_)
-            | Control::Picture(_)
-            | Control::Equation(_)
-            | Control::Footnote(_)
-            | Control::Endnote(_)
-    )
+    ctrl.is_logical_inline()
 }
 
 /// 문단의 탐색 가능한 텍스트 길이를 반환한다.
@@ -144,21 +140,11 @@ pub(crate) fn find_control_text_positions(para: &Paragraph) -> Vec<usize> {
 /// `find_control_text_positions()` 는 HWP/HWPX record stream 의 raw text position 을 보존한다.
 /// 반면 커서 이동은 `SectionDef`, `ColumnDef` 같은 구조 컨트롤을 건너뛰고,
 /// Shape/Table/Picture/Equation/Footnote/Endnote 같은 인라인 개체만 한 글자 폭으로 센다.
+///
+/// 알고리즘 본체는 [`Paragraph::logical_control_positions`] 로 이동했으며, 본 함수는
+/// 기존 호출 경로를 유지하기 위한 thin wrapper 다.
 pub(crate) fn find_logical_control_positions(para: &Paragraph) -> Vec<usize> {
-    let text_positions = find_control_text_positions(para);
-    let text_len = para.text.chars().count();
-    let mut inline_seen = 0usize;
-    let mut positions = Vec::with_capacity(para.controls.len());
-
-    for (ci, ctrl) in para.controls.iter().enumerate() {
-        let text_pos = text_positions.get(ci).copied().unwrap_or(text_len);
-        positions.push(text_pos + inline_seen);
-        if is_logical_inline_control(ctrl) {
-            inline_seen += 1;
-        }
-    }
-
-    positions
+    para.logical_control_positions()
 }
 
 /// ShapeObject에서 TextBox를 추출하는 헬퍼
@@ -189,6 +175,37 @@ pub(crate) fn get_textbox_from_shape_mut(
         _ => return None,
     };
     drawing.text_box.as_mut()
+}
+
+/// ShapeObject에서 캡션을 추출하는 헬퍼 (#4321).
+///
+/// 캡션이 실제로 어느 필드에 남는지는 변형마다 다르다 — `.drawing()`(`DrawingObjAttr.caption`)
+/// 을 보면 되는 것과, 자기 struct의 `caption` 필드를 직접 봐야 하는 것으로 갈린다:
+///
+/// - `Line`/`Rectangle`/`Ellipse`/`Arc`/`Polygon`/`Curve`: `.drawing()` 이 `Some` 이고 파서가
+///   캡션을 거기 그대로 둔다 (`src/parser/control/shape.rs` 일반 도형 분기 — `xxx.drawing =
+///   drawing;` 뒤에 별도 이동이 없다. HWPX(`src/parser/hwpx/section.rs::parse_shape_object`)도
+///   `<hp:caption>` 을 같은 `DrawingObjAttr.caption` 자리에 직접 채운다).
+/// - `Group`/`Picture`: `.drawing()` 이 `None` 이다. 파서가 캡션을 자기 struct의 `caption`
+///   필드로 옮겨(HWP5: `group.caption = drawing.caption;`) 또는 처음부터 거기로(HWPX:
+///   `parse_container`/`parse_picture`) 채운다.
+/// - `Chart`/`Ole`: **`.drawing()` 이 `Some` 이지만 캡션은 거기 없다.** HWP5 파서
+///   (`src/parser/control/shape.rs:213,222`)가 `chart.caption = chart.drawing.caption.take();`
+///   / `ole.caption = ole.drawing.caption.take();` 로 캡션을 파싱 직후 `drawing.caption` 밖으로
+///   `.take()` 해 자기 struct 최상위 필드로 옮긴다 — `.drawing()` 만 보면 항상 `None` 이라
+///   미스캔이었다. (HWPX 의 `parse_hp_chart_element`/`parse_hp_ole_element` 는 `<hp:caption>`
+///   자체를 파싱하지 않아 — 아예 어느 필드에도 값이 없다 — 이건 별개의 파서 결함 #4319 다.)
+pub(crate) fn get_caption_from_shape(
+    shape: &crate::model::shape::ShapeObject,
+) -> Option<&crate::model::shape::Caption> {
+    use crate::model::shape::ShapeObject;
+    match shape {
+        ShapeObject::Group(g) => g.caption.as_ref(),
+        ShapeObject::Picture(p) => p.caption.as_ref(),
+        ShapeObject::Chart(c) => c.caption.as_ref(),
+        ShapeObject::Ole(o) => o.caption.as_ref(),
+        _ => shape.drawing().and_then(|d| d.caption.as_ref()),
+    }
 }
 
 /// 문단 목록에서 DocumentPath를 따라 중첩 표에 대한 가변 참조를 얻는다.
@@ -502,6 +519,8 @@ pub(crate) fn parse_para_shape_mods(json: &str) -> crate::model::style::ParaShap
             "center" => Alignment::Center,
             "justify" => Alignment::Justify,
             "distribute" => Alignment::Distribute,
+            // 나눔 정렬 — 한글 `ParagraphShapeAlignDivision`(AlignType 5).
+            "split" | "division" => Alignment::Split,
             _ => Alignment::Justify,
         });
     }
@@ -579,8 +598,11 @@ pub(crate) fn parse_para_shape_mods(json: &str) -> crate::model::style::ParaShap
     if let Some(v) = json_i32(json, "koreanBreakUnit") {
         mods.korean_break_unit = Some(v as u8);
     }
-    if let Some(arr) = parse_json_i16_array(json, "borderSpacing", 4) {
-        mods.border_spacing = Some([arr[0], arr[1], arr[2], arr[3]]);
+    if let Some(v) = json_bool(json, "borderConnect") {
+        mods.border_connect = Some(v);
+    }
+    if let Some(v) = json_bool(json, "borderIgnoreMargin") {
+        mods.border_ignore_margin = Some(v);
     }
 
     mods
@@ -802,12 +824,43 @@ pub(crate) fn json_usize(json: &str, key: &str) -> Result<usize, HwpError> {
 }
 
 /// JSON 문자열 이스케이프
+/// JSON 문자열 본문으로 이스케이프한다 (바깥 따옴표는 호출부 몫).
+///
+/// RFC 8259 는 U+0000..=U+001F 를 모두 이스케이프하도록 요구한다. HWP 본문에는 필드
+/// 마커(`\u{0015}`~`\u{0017}`) 같은 제어문자가 그대로 들어 있어, 자주 쓰는 넷만 처리하면
+/// 파서가 거부하는 JSON 이 나간다 (Task #3216).
 pub(crate) fn json_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// 바이트를 JSON 문자열 리터럴(따옴표 포함)로 버퍼에 바로 base64 인코딩한다.
+///
+/// base64 표준 알파벳은 `A-Za-z0-9+/=` 뿐이라 [`json_escape`] 가 바꿀 문자가 하나도
+/// 없다. 그림 바이트는 수 MB 라서 이스케이프 스캔과 중간 String 할당이 레이어 JSON
+/// 직렬화 비용의 대부분을 차지했다 (Task #3315: 3.7MB 그림 1장 36.4ms 중 29.5ms).
+pub(crate) fn write_json_base64(buf: &mut String, bytes: &[u8]) {
+    use base64::Engine;
+
+    buf.push('"');
+    base64::engine::general_purpose::STANDARD.encode_string(bytes, buf);
+    buf.push('"');
 }
 
 /// JSON 성공 응답 생성: {"ok":true}
@@ -818,6 +871,35 @@ pub(crate) fn json_ok() -> String {
 /// JSON 성공 응답 생성: {"ok":true,...fields}
 pub(crate) fn json_ok_with(fields: &str) -> String {
     format!("{{\"ok\":true,{}}}", fields)
+}
+
+/// 병합 결과 JSON 에 덧붙일 `,"removedParaMeta":{...}` 조각 (Task #2342).
+///
+/// undo 가 `split_at` 뒤 되돌릴 값이며 스튜디오는 내용을 해석하지 않고 그대로
+/// 분할 호출에 되돌려준다.
+pub(crate) fn removed_para_meta_field(meta: &ParaMeta) -> String {
+    format!(
+        ",\"removedParaMeta\":{}",
+        serde_json::to_string(meta).unwrap()
+    )
+}
+
+/// 병합 결과 JSON 에서 `removedParaMeta` 를 꺼낸다 — 병합 undo 왕복 테스트용.
+#[cfg(test)]
+pub(crate) fn removed_para_meta_of(merge_result: &str) -> ParaMeta {
+    let value: serde_json::Value =
+        serde_json::from_str(merge_result).expect("병합 결과가 JSON 이어야 함");
+    serde_json::from_value(value["removedParaMeta"].clone())
+        .expect("병합 결과에 removedParaMeta 가 있어야 함")
+}
+
+/// 분할 호출이 받은 `removedParaMeta` JSON 을 되돌릴 메타로 해석한다 (Task #2342).
+pub(crate) fn parse_removed_para_meta(json: Option<String>) -> Result<Option<ParaMeta>, HwpError> {
+    json.map(|raw| {
+        serde_json::from_str(&raw)
+            .map_err(|error| HwpError::RenderError(format!("문단 메타 파싱 실패: {}", error)))
+    })
+    .transpose()
 }
 
 /// HWP BGR 색상 (0x00BBGGRR)을 CSS hex (#RRGGBB)로 변환
@@ -1015,17 +1097,23 @@ pub(crate) fn css_color_to_hwp_bgr(css: &str) -> Option<u32> {
         } else {
             None
         }
-    } else if css.starts_with("rgb(") || css.starts_with("rgb (") {
-        // rgb(r, g, b) 형식
-        let inner = css
-            .trim_start_matches("rgb")
-            .trim_start_matches('(')
-            .trim_end_matches(')');
+    } else if css.starts_with("rgb") {
+        // rgb(r, g, b) / rgba(r, g, b, a) 형식 — 브라우저는 알파 포함 색을
+        // rgba()로 직렬화하므로 함께 처리한다.
+        let open = css.find('(')?;
+        let inner = css[open + 1..].trim_end_matches(')');
         let parts: Vec<&str> = inner.split(',').collect();
         if parts.len() >= 3 {
             let r: u32 = parts[0].trim().parse().ok()?;
             let g: u32 = parts[1].trim().parse().ok()?;
             let b: u32 = parts[2].trim().parse().ok()?;
+            // rgba()의 alpha=0(완전 투명)은 색 없음으로 처리
+            if let Some(a_str) = parts.get(3) {
+                let a: f64 = a_str.trim().parse().ok()?;
+                if a <= 0.0 {
+                    return None;
+                }
+            }
             Some(r | (g << 8) | (b << 16))
         } else {
             None
@@ -1245,7 +1333,32 @@ pub(crate) fn parse_css_border_shorthand(val: &str) -> (f64, u32, u8) {
         return (0.0, 0, 0);
     }
 
-    let parts: Vec<&str> = val.split_whitespace().collect();
+    // rgb()/rgba() 안에 공백이 있으면(예: "rgb(255, 0, 0)") 단순 split_whitespace가
+    // 색상 토큰을 여러 조각으로 쪼개버리므로, 괄호 내부의 공백은 보존한 채로 분리한다.
+    let mut parts: Vec<String> = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in val.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if !cur.is_empty() {
+                    parts.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(cur);
+    }
     let mut width_pt = 0.0f64;
     let mut color: u32 = 0; // black
     let mut style: u8 = 1; // solid
@@ -1276,6 +1389,19 @@ pub(crate) fn parse_css_border_shorthand(val: &str) -> (f64, u32, u8) {
             }
             "hidden" => {
                 style = 0;
+                continue;
+            }
+            // CSS 표준 border-width 키워드 (브라우저 기준 thin=1px, medium=3px, thick=5px)
+            "thin" => {
+                width_pt = 0.75; // 1px
+                continue;
+            }
+            "medium" => {
+                width_pt = 2.25; // 3px
+                continue;
+            }
+            "thick" => {
+                width_pt = 3.75; // 5px
                 continue;
             }
             _ => {}
@@ -1379,6 +1505,18 @@ pub(crate) fn border_fills_equal(
     if a.attr != b.attr {
         return false;
     }
+    if a.center_line != b.center_line {
+        return false;
+    }
+    if a.diagonal.diagonal_type != b.diagonal.diagonal_type {
+        return false;
+    }
+    if a.diagonal.width != b.diagonal.width {
+        return false;
+    }
+    if a.diagonal.color != b.diagonal.color {
+        return false;
+    }
     for i in 0..4 {
         if a.borders[i].line_type != b.borders[i].line_type {
             return false;
@@ -1406,7 +1544,42 @@ mod tests {
     use super::*;
     use crate::model::document::SectionDef;
     use crate::model::footnote::Footnote;
+    use crate::model::image::Picture;
     use crate::model::page::ColumnDef;
+    use crate::model::shape::TextWrap;
+
+    /// `write_json_base64` 는 "이스케이프를 건너뛰어도 같은 출력"이라는 전제로 스캔을
+    /// 없앤 것이므로, 전제 자체를 옛 경로와의 차분으로 고정한다 (Task #3315).
+    #[test]
+    fn json_base64_matches_escaped_encoding_for_every_byte_value() {
+        use base64::Engine;
+
+        let all_bytes: Vec<u8> = (0..=255u8).collect();
+        let cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            vec![0x00],
+            vec![b'"', b'\\', b'\n', b'\r', b'\t', 0x08, 0x0C],
+            all_bytes.clone(),
+            // 길이 % 3 을 모두 훑어 패딩(`=`) 유무를 전부 통과시킨다.
+            all_bytes[..255].to_vec(),
+            all_bytes[..254].to_vec(),
+            all_bytes[..253].to_vec(),
+        ];
+
+        for bytes in cases {
+            let mut actual = String::new();
+            write_json_base64(&mut actual, &bytes);
+
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let expected = format!("\"{}\"", json_escape(&encoded));
+
+            assert_eq!(actual, expected, "len={}", bytes.len());
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(actual.trim_matches('"'))
+                .expect("base64 왕복");
+            assert_eq!(decoded, bytes);
+        }
+    }
 
     #[test]
     fn navigable_text_len_counts_trailing_footnote_marker() {
@@ -1439,5 +1612,56 @@ mod tests {
         assert_eq!(find_logical_control_positions(&para), vec![0, 0, 0, 3]);
         assert_eq!(logical_paragraph_length(&para), 4);
         assert_eq!(navigable_text_len(&para), 4);
+    }
+
+    #[test]
+    fn logical_positions_do_not_double_count_control_only_fallback() {
+        let mut first_picture = Picture::default();
+        first_picture.common.treat_as_char = true;
+        let mut second_picture = Picture::default();
+        second_picture.common.treat_as_char = true;
+
+        let para = Paragraph {
+            text: String::new(),
+            char_offsets: vec![],
+            controls: vec![
+                Control::SectionDef(Box::<SectionDef>::default()),
+                Control::ColumnDef(ColumnDef::default()),
+                Control::Picture(Box::new(first_picture)),
+                Control::Picture(Box::new(second_picture)),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(find_control_text_positions(&para), vec![0, 0, 0, 1]);
+        assert_eq!(find_logical_control_positions(&para), vec![0, 0, 0, 1]);
+        assert_eq!(logical_paragraph_length(&para), 2);
+        assert_eq!(navigable_text_len(&para), 2);
+    }
+
+    #[test]
+    fn logical_positions_skip_non_tac_picture_controls() {
+        let mut tac_picture = Picture::default();
+        tac_picture.common.treat_as_char = true;
+        let mut topbottom_picture = Picture::default();
+        topbottom_picture.common.treat_as_char = false;
+        topbottom_picture.common.text_wrap = TextWrap::TopAndBottom;
+
+        let para = Paragraph {
+            text: String::new(),
+            char_offsets: vec![],
+            controls: vec![
+                Control::SectionDef(Box::<SectionDef>::default()),
+                Control::ColumnDef(ColumnDef::default()),
+                Control::Picture(Box::new(topbottom_picture)),
+                Control::Picture(Box::new(tac_picture)),
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(find_control_text_positions(&para), vec![0, 0, 0, 1]);
+        assert_eq!(find_logical_control_positions(&para), vec![0, 0, 0, 0]);
+        assert_eq!(logical_paragraph_length(&para), 1);
+        assert_eq!(navigable_text_len(&para), 1);
     }
 }

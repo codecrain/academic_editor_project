@@ -288,6 +288,78 @@ fn test_delete_text_char_shapes_shift() {
 }
 
 #[test]
+fn test_delete_text_preserves_right_char_shape_at_collapsed_boundary() {
+    let mut para = Paragraph {
+        text: "ABCDEFGH".to_string(),
+        char_count: 8,
+        char_offsets: (0..8).collect(),
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 10,
+            },
+            CharShapeRef {
+                start_pos: 2,
+                char_shape_id: 99,
+            },
+            CharShapeRef {
+                start_pos: 5,
+                char_shape_id: 20,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // 가운데의 별도 서식 런("CDE")을 지우면 오른쪽 원문("FGH")의 서식이
+    // 삭제 경계로 이동해 보존되어야 한다.
+    assert_eq!(para.delete_text_at(2, 3), 3);
+    assert_eq!(para.text, "ABFGH");
+    assert_eq!(para.char_shape_id_at(1), Some(10));
+    assert_eq!(para.char_shape_id_at(2), Some(20));
+    assert_eq!(para.char_shape_id_at(4), Some(20));
+    let refs: Vec<_> = para
+        .char_shapes
+        .iter()
+        .map(|shape| (shape.start_pos, shape.char_shape_id))
+        .collect();
+    assert_eq!(refs, vec![(0, 10), (2, 20)]);
+}
+
+#[test]
+fn test_delete_text_to_end_keeps_leftmost_collapsed_char_shape() {
+    let mut para = Paragraph {
+        text: "ABCDEFGH".to_string(),
+        char_count: 8,
+        char_offsets: (0..8).collect(),
+        char_shapes: vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 10,
+            },
+            CharShapeRef {
+                start_pos: 2,
+                char_shape_id: 99,
+            },
+            CharShapeRef {
+                start_pos: 5,
+                char_shape_id: 20,
+            },
+        ],
+        ..Default::default()
+    };
+
+    // 오른쪽 원문이 없는 끝 삭제는 기존처럼 첫 경계를 남긴다.
+    assert_eq!(para.delete_text_at(2, 6), 6);
+    assert_eq!(para.text, "AB");
+    let refs: Vec<_> = para
+        .char_shapes
+        .iter()
+        .map(|shape| (shape.start_pos, shape.char_shape_id))
+        .collect();
+    assert_eq!(refs, vec![(0, 10), (2, 99)]);
+}
+
+#[test]
 fn test_delete_text_line_segs_shift() {
     let mut para = Paragraph {
         text: "HelXXlo\nWorld".to_string(),
@@ -580,6 +652,256 @@ fn test_merge_from_empty() {
     assert_eq!(para1.text, "안녕");
 }
 
+/// 그림 컨트롤 테스트 헬퍼 (treat_as_char=true 인라인)
+fn make_picture_control() -> Control {
+    use crate::model::image::Picture;
+    use crate::model::shape::CommonObjAttr;
+    Control::Picture(Box::new(Picture {
+        common: CommonObjAttr {
+            treat_as_char: true,
+            width: 5000,
+            height: 5000,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))
+}
+
+#[test]
+fn test_merge_from_empty_text_with_control() {
+    // copy_control_native가 만드는 text="" + controls=[Picture] 문단 병합 (#1323)
+    let mut para1 = Paragraph {
+        text: "안녕".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 1,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let pic_para = Paragraph {
+        text: String::new(),
+        char_count: 9, // 확장 제어문자(8) + 문단끝(1)
+        control_mask: 1u32 << 0x000B,
+        controls: vec![make_picture_control()],
+        ctrl_data_records: vec![None],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let merge_pos = para1.merge_from(&pic_para);
+
+    assert_eq!(merge_pos, 2, "병합 지점은 원래 텍스트 길이");
+    assert_eq!(para1.text, "안녕", "텍스트는 불변");
+    assert_eq!(
+        para1.controls.len(),
+        1,
+        "그림 컨트롤이 병합되어야 한다 (#1323)"
+    );
+    assert_eq!(
+        para1.char_count, 11,
+        "char_count = 텍스트(2) + 컨트롤(8) + 문단끝(1)"
+    );
+    assert_ne!(
+        para1.control_mask & (1u32 << 0x000B),
+        0,
+        "control_mask 병합"
+    );
+    assert!(para1.has_para_text);
+}
+
+#[test]
+fn test_merge_from_text_only_control_mask_bits() {
+    // other 문단이 controls는 없고 tab/개행만 가진 경우에도 control_mask의
+    // 텍스트 기반 비트(0x9=tab, 0xA=개행)가 병합 결과에 반영돼야 한다.
+    let mut para1 = Paragraph {
+        text: "안녕".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let tab_para = Paragraph {
+        text: "\t뒤".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        control_mask: 1u32 << 0x0009,
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    para1.merge_from(&tab_para);
+
+    assert_ne!(
+        para1.control_mask & (1u32 << 0x0009),
+        0,
+        "controls가 없는 other의 tab 비트도 control_mask에 반영돼야 한다"
+    );
+}
+
+#[test]
+fn test_merge_from_control_then_right_half() {
+    // 셀 paste 3단 흐름 재현: split_at → merge(컨트롤 문단) → merge(right_half)
+    let mut para = Paragraph {
+        text: "ABCD".to_string(),
+        char_count: 5,
+        char_offsets: vec![0, 1, 2, 3],
+        char_shapes: vec![CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 1,
+        }],
+        line_segs: vec![LineSeg {
+            text_start: 0,
+            ..Default::default()
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let right_half = para.split_at(2);
+
+    let pic_para = Paragraph {
+        text: String::new(),
+        char_count: 9,
+        control_mask: 1u32 << 0x000B,
+        controls: vec![make_picture_control()],
+        ctrl_data_records: vec![None],
+        has_para_text: true,
+        ..Default::default()
+    };
+    para.merge_from(&pic_para);
+    para.merge_from(&right_half);
+
+    assert_eq!(para.text, "ABCD");
+    assert_eq!(para.controls.len(), 1);
+    assert_eq!(
+        para.control_text_positions(),
+        vec![2],
+        "컨트롤은 병합 지점(커서 위치)에 복원되어야 한다"
+    );
+    assert_eq!(
+        para.char_offsets,
+        vec![0, 1, 10, 11],
+        "right_half 텍스트는 컨트롤 갭(8유닛) 뒤로 인코딩"
+    );
+    assert_eq!(
+        para.char_count, 13,
+        "char_count = 텍스트(4) + 컨트롤(8) + 문단끝(1)"
+    );
+}
+
+#[test]
+fn test_merge_from_ctrl_data_alignment() {
+    // ctrl_data_records[i] ↔ controls[i] 인덱스 정렬 유지
+    let mut para1 = Paragraph {
+        text: "A".to_string(),
+        char_count: 10,        // 1 + 8 + 1
+        char_offsets: vec![8], // 선두 갭 8 = 컨트롤 1개
+        controls: vec![make_picture_control()],
+        ctrl_data_records: vec![], // 레코드 없음 (길이 < controls)
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let para2 = Paragraph {
+        text: String::new(),
+        char_count: 9,
+        controls: vec![make_picture_control()],
+        ctrl_data_records: vec![Some(vec![1, 2, 3])],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    para1.merge_from(&para2);
+
+    assert_eq!(para1.controls.len(), 2);
+    assert_eq!(
+        para1.ctrl_data_records,
+        vec![None, Some(vec![1, 2, 3])],
+        "self는 None 패딩, other의 CTRL_DATA는 인덱스 정렬 유지"
+    );
+}
+
+#[test]
+fn test_merge_from_text_with_mid_control() {
+    // 양쪽 모두 중간 갭 컨트롤 보유 → 위치 보존
+    let mut para1 = Paragraph {
+        text: "AB".to_string(),
+        char_count: 11,           // 2 + 8 + 1
+        char_offsets: vec![0, 9], // A(0) [컨트롤 갭 8] B(9)
+        controls: vec![make_picture_control()],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let para2 = Paragraph {
+        text: "CD".to_string(),
+        char_count: 11,
+        char_offsets: vec![0, 9], // C(0) [컨트롤 갭 8] D(9)
+        controls: vec![make_picture_control()],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    para1.merge_from(&para2);
+
+    assert_eq!(para1.text, "ABCD");
+    assert_eq!(para1.controls.len(), 2);
+    assert_eq!(para1.char_offsets, vec![0, 9, 10, 19]);
+    assert_eq!(
+        para1.control_text_positions(),
+        vec![1, 3],
+        "양쪽 중간 컨트롤 위치가 보존되어야 한다"
+    );
+    assert_eq!(para1.char_count, 21, "4 + 16 + 1");
+}
+
+#[test]
+fn test_merge_from_field_ranges_ctrl_offset() {
+    // other의 field_ranges.control_idx가 병합된 controls 인덱스로 보정되는지
+    let mut para1 = Paragraph {
+        text: "AB".to_string(),
+        char_count: 11,
+        char_offsets: vec![0, 9],
+        controls: vec![make_picture_control()],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let para2 = Paragraph {
+        text: "CD".to_string(),
+        char_count: 11,
+        char_offsets: vec![0, 9],
+        controls: vec![make_picture_control()],
+        field_ranges: vec![FieldRange {
+            start_char_idx: 0,
+            end_char_idx: 1,
+            control_idx: 0,
+            ..Default::default()
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    para1.merge_from(&para2);
+
+    assert_eq!(para1.field_ranges.len(), 1);
+    assert_eq!(
+        para1.field_ranges[0].control_idx, 1,
+        "control_idx는 병합 전 self.controls.len()만큼 보정"
+    );
+    assert_eq!(para1.field_ranges[0].start_char_idx, 2);
+    assert_eq!(para1.field_ranges[0].end_char_idx, 3);
+}
+
 #[test]
 fn test_split_and_merge_roundtrip() {
     let mut para = Paragraph {
@@ -605,6 +927,160 @@ fn test_split_and_merge_roundtrip() {
     para.merge_from(&new_para);
     assert_eq!(para.text, "안녕하세요");
     assert_eq!(para.char_offsets, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn test_undo_split_moves_merged_clickhere_field_to_restored_paragraph() {
+    // 문단 병합 뒤 undo가 split_at(병합 지점)을 호출하는 경로를 재현한다.
+    // 두 번째 문단의 Field와 FieldRange는 복원된 새 문단에 함께 남아야 한다.
+    let mut merged = Paragraph {
+        text: "AB".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        has_para_text: true,
+        ..Default::default()
+    };
+    let field_paragraph = Paragraph {
+        text: "CD".to_string(),
+        char_count: 11,
+        // Field 하나가 첫 텍스트 앞의 8 code unit을 점유한다.
+        char_offsets: vec![8, 9],
+        controls: vec![Control::Field(crate::model::control::Field {
+            field_type: crate::model::control::FieldType::ClickHere,
+            ..Default::default()
+        })],
+        ctrl_data_records: vec![Some(vec![0x24, 0x17])],
+        field_ranges: vec![FieldRange {
+            start_char_idx: 0,
+            end_char_idx: 2,
+            control_idx: 0,
+            ..Default::default()
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    let merge_pos = merged.merge_from(&field_paragraph);
+    assert_eq!(merge_pos, 2);
+
+    let restored = merged.split_at(merge_pos);
+
+    assert!(merged.field_ranges.is_empty());
+    assert!(merged.controls.is_empty());
+    assert_eq!(restored.text, "CD");
+    assert!(matches!(restored.controls.as_slice(), [Control::Field(_)]));
+    assert_eq!(restored.ctrl_data_records, vec![Some(vec![0x24, 0x17])]);
+    assert_eq!(
+        restored
+            .field_ranges
+            .iter()
+            .map(|range| (range.start_char_idx, range.end_char_idx, range.control_idx))
+            .collect::<Vec<_>>(),
+        vec![(0, 2, 0)]
+    );
+    assert_ne!(restored.control_mask & (1 << 0x0003), 0);
+    assert_ne!(restored.control_mask & (1 << 0x0004), 0);
+}
+
+#[test]
+fn test_split_moves_field_with_range_without_consuming_visible_offset() {
+    let mut para = Paragraph {
+        text: "AABB".to_string(),
+        char_count: 13,
+        char_offsets: vec![0, 1, 2, 3],
+        controls: vec![Control::Field(crate::model::control::Field {
+            field_type: crate::model::control::FieldType::ClickHere,
+            ..Default::default()
+        })],
+        field_ranges: vec![FieldRange {
+            start_char_idx: 2,
+            end_char_idx: 4,
+            control_idx: 0,
+            ..Default::default()
+        }],
+        has_para_text: true,
+        ..Default::default()
+    };
+
+    // Field는 새 문단으로 이관되지만, split offset 2는 보이는 "AA" 뒤여야 한다.
+    let restored = para.split_at(2);
+
+    assert_eq!(para.text, "AA");
+    assert!(para.controls.is_empty());
+    assert!(para.field_ranges.is_empty());
+    assert_eq!(restored.text, "BB");
+    assert!(matches!(restored.controls.as_slice(), [Control::Field(_)]));
+    assert_eq!(
+        restored
+            .field_ranges
+            .iter()
+            .map(|range| (range.start_char_idx, range.end_char_idx, range.control_idx))
+            .collect::<Vec<_>>(),
+        vec![(0, 2, 0)]
+    );
+}
+
+#[test]
+fn test_merge_undo_restores_second_paragraph_meta() {
+    // 병합 undo 는 split_at 으로 문단을 되살리는데, 새 문단의 메타데이터는 앞 문단에서
+    // 상속되므로 사라진 문단의 원래 값을 재현할 수 없다. capture_meta/apply_meta 로
+    // 되돌린다 (Task #2342).
+    let mut first = Paragraph {
+        text: "AB".to_string(),
+        char_count: 3,
+        char_offsets: vec![0, 1],
+        para_shape_id: 10,
+        style_id: 1,
+        raw_header_extra: vec![0, 0, 0, 0, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA],
+        has_para_text: true,
+        ..Default::default()
+    };
+    let second = Paragraph {
+        text: "C\tD".to_string(),
+        char_count: 4,
+        char_offsets: vec![0, 1, 2],
+        para_shape_id: 20,
+        style_id: 5,
+        column_type: ColumnBreakType::Page,
+        raw_break_type: 0x04,
+        numbering_restart: Some(NumberingRestart::NewStart(7)),
+        raw_header_extra: vec![0, 0, 0, 0, 0, 0, 0xBB, 0xBB, 0xBB, 0xBB],
+        tab_extended: vec![[100, 0, 0x0200, 0, 0, 0, 9]],
+        has_para_text: true,
+        ..Default::default()
+    };
+    let meta = second.capture_meta();
+
+    let merge_pos = first.merge_from(&second);
+    let mut restored = first.split_at(merge_pos);
+
+    // apply_meta 이전: split_at 의 Enter 시맨틱대로 앞 문단 값을 상속한다.
+    assert_eq!(restored.para_shape_id, 10);
+    assert_eq!(restored.style_id, 1);
+
+    restored.apply_meta(meta);
+
+    assert_eq!(restored.text, "C\tD");
+    assert_eq!(restored.para_shape_id, 20);
+    assert_eq!(restored.style_id, 5);
+    assert_eq!(restored.column_type, ColumnBreakType::Page);
+    assert_eq!(restored.raw_break_type, 0x04);
+    assert_eq!(
+        restored.numbering_restart,
+        Some(NumberingRestart::NewStart(7))
+    );
+    assert_eq!(
+        restored.raw_header_extra,
+        vec![0, 0, 0, 0, 0, 0, 0xBB, 0xBB, 0xBB, 0xBB]
+    );
+    assert_eq!(restored.tab_extended, vec![[100, 0, 0x0200, 0, 0, 0, 9]]);
+
+    // 앞 문단은 자기 값을 유지한다.
+    assert_eq!(first.para_shape_id, 10);
+    assert_eq!(
+        first.raw_header_extra,
+        vec![0, 0, 0, 0, 0, 0, 0xAA, 0xAA, 0xAA, 0xAA]
+    );
 }
 
 #[test]
@@ -686,6 +1162,28 @@ fn test_apply_char_shape_range_right_partial() {
     assert_eq!(para.char_shapes[0].start_pos, 0);
     assert_eq!(para.char_shapes[1].char_shape_id, 99);
     assert_eq!(para.char_shapes[1].start_pos, 2);
+}
+
+#[test]
+fn test_apply_char_shape_range_seeds_empty_shape_refs() {
+    // 표 셀처럼 텍스트/오프셋은 있지만 글자 모양 ref가 비어 있는 문단도
+    // 범위 서식을 적용할 수 있어야 한다.
+    let mut para = Paragraph {
+        text: "ABCDE".to_string(),
+        char_offsets: vec![0, 1, 2, 3, 4],
+        char_shapes: vec![],
+        ..Default::default()
+    };
+
+    para.apply_char_shape_range(1, 4, 99);
+
+    assert_eq!(para.char_shapes.len(), 3);
+    assert_eq!(para.char_shapes[0].char_shape_id, 0);
+    assert_eq!(para.char_shapes[0].start_pos, 0);
+    assert_eq!(para.char_shapes[1].char_shape_id, 99);
+    assert_eq!(para.char_shapes[1].start_pos, 1);
+    assert_eq!(para.char_shapes[2].char_shape_id, 0);
+    assert_eq!(para.char_shapes[2].start_pos, 4);
 }
 
 #[test]
@@ -972,4 +1470,66 @@ fn test_utf16_pos_to_char_idx_surrogate_pair_midpoint() {
     assert_eq!(para.utf16_pos_to_char_idx(1), 1);
     assert_eq!(para.utf16_pos_to_char_idx(2), 1);
     assert_eq!(para.utf16_pos_to_char_idx(3), 2); // beyond end
+}
+
+#[test]
+fn shift_for_inline_control_insert_moves_line_starts_too() {
+    // [#4347] 줄 시작(`text_start`)도 char_offsets 와 같은 UTF-16 좌표계다. 함께 밀지 않으면
+    // 저장된 줄 나눔만 8 만큼 어긋난 채 남고, 그 문단을 다시 조판하는 순간 값이 튄다 —
+    // 원인이 삽입이 아닌 곳(그림 배치 토글)에서 찾아진다.
+    let mut para = Paragraph {
+        text: "0123456789".to_string(),
+        char_offsets: (0..10).collect(),
+        char_count: 10,
+        line_segs: vec![
+            LineSeg {
+                text_start: 0,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 4,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    para.shift_for_inline_control_insert(0);
+
+    // 첫 줄은 문단 시작에 고정한다 — 넣은 컨트롤이 그 줄에 든다.
+    assert_eq!(para.line_segs[0].text_start, 0);
+    // 뒤 줄은 char_offsets 와 같은 만큼 밀린다.
+    assert_eq!(para.line_segs[1].text_start, 12);
+    assert_eq!(para.char_offsets[4], 12);
+}
+
+#[test]
+fn shift_for_inline_control_insert_leaves_earlier_lines_alone() {
+    // 삽입 지점 **앞** 줄은 그대로다. 뒤 줄만 밀린다.
+    let mut para = Paragraph {
+        text: "0123456789".to_string(),
+        char_offsets: (0..10).collect(),
+        char_count: 10,
+        line_segs: vec![
+            LineSeg {
+                text_start: 0,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 4,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 8,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    para.shift_for_inline_control_insert(6);
+
+    assert_eq!(para.line_segs[0].text_start, 0);
+    assert_eq!(para.line_segs[1].text_start, 4);
+    assert_eq!(para.line_segs[2].text_start, 16);
 }

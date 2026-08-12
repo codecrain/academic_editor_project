@@ -251,8 +251,6 @@ test('source-built runtime exposes promoted native methods on three byte-identic
   for (const result of readiness) {
     assert.equal(result.ok, true);
     for (const method of [
-      'setDocumentMetadata',
-      'getDocumentMetadata',
       'createHeaderFooter',
       'insertFootnote',
     ]) {

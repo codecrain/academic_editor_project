@@ -325,9 +325,9 @@ mod tests {
     }
 
     fn text_op() -> PaintOp {
-        PaintOp::TextRun {
-            bbox: bbox(),
-            run: TextRunNode {
+        PaintOp::text_run(
+            bbox(),
+            TextRunNode {
                 text: "A".to_string(),
                 style: TextStyle::default(),
                 char_shape_id: None,
@@ -344,8 +344,9 @@ mod tests {
                 border_fill_id: 0,
                 baseline: 10.0,
                 field_marker: FieldMarkerType::None,
+                display_text: None,
             },
-        }
+        )
     }
 
     fn glyph_op(variant: PaintVariantMeta) -> PaintOp {

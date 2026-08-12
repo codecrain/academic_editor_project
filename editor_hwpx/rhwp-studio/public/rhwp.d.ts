@@ -284,6 +284,10 @@ export class HwpDocument {
      */
     exportHwp(): Uint8Array;
     /**
+     * 문서를 HWP5 EncryptVersion 4 비밀번호 문서로 내보낸다.
+     */
+    exportHwpWithPassword(password: string): Uint8Array;
+    /**
      * 어댑터 적용 + HWP 직렬화 + 자기 재로드 검증을 수행하고 결과를 JSON 으로 반환한다 (#178).
      *
      * 반환 JSON:
@@ -304,6 +308,10 @@ export class HwpDocument {
      * Document IR을 HWPX(ZIP+XML)로 직렬화하여 반환한다.
      */
     exportHwpx(): Uint8Array;
+    /**
+     * 문서를 ODF AES-256-CBC/PBKDF2 비밀번호 보호 HWPX로 내보낸다.
+     */
+    exportHwpxWithPassword(password: string): Uint8Array;
     /**
      * 선택 영역을 HTML 문자열로 변환한다 (본문).
      */
@@ -940,6 +948,9 @@ export class HwpDocument {
     insertEquation(section_idx: number, para_idx: number, char_offset: number, script: string, font_size: number, color: number): string;
     /**
      * 머리말/꼬리말 문단에 필드 마커를 삽입한다.
+     *
+     * 반환 JSON: `charOffset`은 삽입 후 커서 좌표, `insertedAt`/`insertedLength`는
+     * history 역연산용 실제 모델 텍스트 범위다.
      */
     insertFieldInHf(section_idx: number, is_header: boolean, apply_to: number, hf_para_idx: number, char_offset: number, field_type: number): string;
     /**
@@ -1254,6 +1265,10 @@ export class HwpDocument {
      */
     setActiveFieldInCell(section_idx: number, parent_para_idx: number, control_idx: number, cell_idx: number, cell_para_idx: number, char_offset: number, is_textbox: boolean): boolean;
     /**
+     * 셀 내 문단의 paraShapeId를 직접 설정한다.
+     */
+    setCellParaShapeId(sec_idx: number, parent_para_idx: number, control_idx: number, cell_idx: number, cell_para_idx: number, para_shape_id: number): string;
+    /**
      * [Task #1151 v4] 표 셀 내 Picture 속성 변경 (by_path). Shape 패턴 정합.
      */
     setCellPicturePropertiesByPath(section_idx: number, parent_para_idx: number, cell_path_json: string, inner_control_idx: number, props_json: string): string;
@@ -1267,6 +1282,14 @@ export class HwpDocument {
      * [Task #1138] 표 셀 내 Shape 속성 변경 (by_path).
      */
     setCellShapePropertiesByPath(section_idx: number, parent_para_idx: number, cell_path_json: string, inner_control_idx: number, props_json: string): string;
+    /**
+     * 글자 서식 ID를 직접 복원한다 (본문 문단).
+     */
+    setCharShapeId(sec_idx: number, para_idx: number, start_offset: number, end_offset: number, char_shape_id: number): string;
+    /**
+     * 글자 서식 ID를 직접 복원한다 (셀 내 문단).
+     */
+    setCharShapeIdInCell(sec_idx: number, parent_para_idx: number, control_idx: number, cell_idx: number, cell_para_idx: number, start_offset: number, end_offset: number, char_shape_id: number): string;
     setClipEnabled(enabled: boolean): void;
     /**
      * 다단 설정 변경
@@ -1348,6 +1371,10 @@ export class HwpDocument {
      * 감추기 설정
      */
     setPageHide(sec: number, para: number, hide_header: boolean, hide_footer: boolean, hide_master: boolean, hide_border: boolean, hide_fill: boolean, hide_page_num: boolean): string;
+    /**
+     * 문단의 paraShapeId를 직접 설정한다.
+     */
+    setParaShapeId(sec_idx: number, para_idx: number, para_shape_id: number): string;
     /**
      * 그림 컨트롤의 속성을 변경한다.
      *
@@ -1592,7 +1619,9 @@ export interface InitOutput {
     readonly hwpdocument_exportControlHtml: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hwpdocument_exportHwp: (a: number) => [number, number, number, number];
     readonly hwpdocument_exportHwpVerify: (a: number) => [number, number, number, number];
+    readonly hwpdocument_exportHwpWithPassword: (a: number, b: number, c: number) => [number, number, number, number];
     readonly hwpdocument_exportHwpx: (a: number) => [number, number, number, number];
+    readonly hwpdocument_exportHwpxWithPassword: (a: number, b: number, c: number) => [number, number, number, number];
     readonly hwpdocument_exportSelectionHtml: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hwpdocument_exportSelectionInCellHtml: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly hwpdocument_findNearestControlBackward: (a: number, b: number, c: number, d: number) => [number, number];
@@ -1774,9 +1803,12 @@ export interface InitOutput {
     readonly hwpdocument_setActiveField: (a: number, b: number, c: number, d: number) => number;
     readonly hwpdocument_setActiveFieldByPath: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly hwpdocument_setActiveFieldInCell: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => number;
+    readonly hwpdocument_setCellParaShapeId: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly hwpdocument_setCellPicturePropertiesByPath: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly hwpdocument_setCellProperties: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly hwpdocument_setCellShapePropertiesByPath: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
+    readonly hwpdocument_setCharShapeId: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly hwpdocument_setCharShapeIdInCell: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly hwpdocument_setClipEnabled: (a: number, b: number) => void;
     readonly hwpdocument_setColumnDef: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hwpdocument_setDpi: (a: number, b: number) => void;
@@ -1793,6 +1825,7 @@ export interface InitOutput {
     readonly hwpdocument_setPageBorderFill: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hwpdocument_setPageDef: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hwpdocument_setPageHide: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
+    readonly hwpdocument_setParaShapeId: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hwpdocument_setPictureProperties: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly hwpdocument_setSectionDef: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly hwpdocument_setSectionDefAll: (a: number, b: number, c: number) => [number, number, number, number];

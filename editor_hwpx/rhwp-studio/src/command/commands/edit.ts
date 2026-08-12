@@ -1,10 +1,11 @@
 import type { CommandDef } from '../types';
 import { FieldEditDialog } from '@/ui/field-edit-dialog';
-import { FindDialog } from '@/ui/find-dialog';
+import { FindDialog, navigateToSearchHit } from '@/ui/find-dialog';
 import { GotoDialog } from '@/ui/goto-dialog';
 import { HistoryDialog } from '@/ui/history-dialog';
 import { CompareDialog } from '@/ui/compare-dialog';
 import { CompareSessionStore } from '@/compare/session';
+import { canExecuteFormatPaste } from '../format-paste-availability';
 
 /** 검색 대화상자 싱글톤 — 열려 있으면 재사용 */
 let findDialogInstance: FindDialog | null = null;
@@ -41,7 +42,7 @@ export const editCommands: CommandDef[] = [
     label: '오려 두기',
     icon: 'icon-cut',
     shortcutLabel: 'Ctrl+X',
-    canExecute: (ctx) => ctx.hasDocument && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
     execute(services) {
       services.getInputHandler()?.performCut();
     },
@@ -61,7 +62,7 @@ export const editCommands: CommandDef[] = [
     label: '붙이기',
     icon: 'icon-paste',
     shortcutLabel: 'Ctrl+V',
-    canExecute: (ctx) => ctx.hasDocument,
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode,
     execute(services) {
       services.getInputHandler()?.performPaste();
     },
@@ -70,16 +71,27 @@ export const editCommands: CommandDef[] = [
     id: 'edit:format-copy',
     label: '모양 복사',
     icon: 'icon-format-copy',
-    shortcutLabel: 'Ctrl+Alt+C',
-    canExecute: () => false, // 미구현
-    execute() { /* TODO */ },
+    shortcutLabel: 'Alt+C',
+    canExecute: (ctx) => ctx.hasDocument,
+    execute(services) {
+      services.getInputHandler()?.performFormatCopy();
+    },
+  },
+  {
+    id: 'edit:format-paste',
+    label: '모양 붙여넣기',
+    icon: 'icon-format-copy',
+    canExecute: canExecuteFormatPaste,
+    execute(services) {
+      services.getInputHandler()?.performFormatPaste();
+    },
   },
   {
     id: 'edit:delete',
     label: '지우기',
     icon: 'icon-delete',
     shortcutLabel: 'Ctrl+E',
-    canExecute: (ctx) => ctx.hasDocument && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && (ctx.hasSelection || ctx.inPictureObjectSelection || ctx.inTableObjectSelection),
     execute(services) {
       services.getInputHandler()?.performDelete();
     },
@@ -141,24 +153,12 @@ export const editCommands: CommandDef[] = [
         const result = services.wasm.searchText(
           FindDialog.lastQuery, pos.sectionIndex, pos.paragraphIndex,
           pos.charOffset, true, FindDialog.lastCaseSensitive,
+          // [#3865] 대화상자와 같은 범위를 본다 — 한쪽만 셀을 다루면 같은 문서에서
+          // Ctrl+F 는 표 안을 찾는데 F3 는 못 찾는 상태가 된다.
+          true,
         );
-        if (result.found) {
-          ih.moveCursorTo({
-            sectionIndex: result.sec!,
-            paragraphIndex: result.para!,
-            charOffset: result.charOffset!,
-          });
-          const cursor = (ih as any).cursor;
-          if (cursor) {
-            cursor.setAnchor();
-            cursor.moveTo({
-              sectionIndex: result.sec!,
-              paragraphIndex: result.para!,
-              charOffset: result.charOffset! + result.length!,
-            });
-          }
-          (ih as any).updateCaret?.();
-        }
+        // 이동 규칙도 대화상자와 공유한다(셀 매치는 셀 좌표로 간다).
+        navigateToSearchHit(ih, result);
       }
     },
   },
@@ -208,7 +208,7 @@ export const editCommands: CommandDef[] = [
     id: 'field:edit',
     label: '누름틀 고치기(E)...',
     shortcutLabel: 'Ctrl+M,K',
-    canExecute: (ctx) => ctx.hasDocument && ctx.inField,
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && ctx.inField,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
@@ -220,16 +220,35 @@ export const editCommands: CommandDef[] = [
       if (!props.ok) return;
 
       const dialog = new FieldEditDialog();
+      const restoreEditorFocus = () => {
+        requestAnimationFrame(() => {
+          (ih as any).updateCaret?.();
+          ih.focus();
+        });
+      };
       dialog.onApply = (newProps) => {
         console.log('[field:edit] apply:', newProps);
-        const result = services.wasm.updateClickHereProps(
-          fi.fieldId, newProps.guide, newProps.memo, newProps.name, newProps.editable,
-        );
-        console.log('[field:edit] updateResult:', result);
-        if (result.ok) {
-          services.eventBus.emit('document-changed');
+        try {
+          // [Task #2377] 누름틀 속성 갱신은 안내문 텍스트를 바꿀 수 있다(문자 수 변경) —
+          // snapshot 으로 라우팅(일반 모드 전용 커맨드). 실패 시 throw 로 엔트리 생성을 막는다.
+          ih.executeOperation({
+            kind: 'snapshot',
+            operationType: 'updateFieldProps',
+            operation: (wasm) => {
+              const result = wasm.updateClickHereProps(
+                fi.fieldId, newProps.guide, newProps.memo, newProps.name, newProps.editable,
+              );
+              if (!result.ok) throw new Error('updateClickHereProps not ok');
+              return ih.getCursorPosition();
+            },
+          });
+          // [Task #2370] 수동 emit 제거 — 라우터의 'full' refresh(afterEdit)가 이미
+          // 'document-mutated'/'document-changed' 를 emit 한다(insert:field 와 동형).
+        } catch (err) {
+          console.warn('[field:edit] 누름틀 고치기 실패:', err);
         }
       };
+      dialog.onClose = restoreEditorFocus;
       dialog.showWith({
         guide: props.guide ?? '',
         memo: props.memo ?? '',
@@ -241,10 +260,10 @@ export const editCommands: CommandDef[] = [
   {
     id: 'field:remove',
     label: '누름틀 지우기(J)',
-    canExecute: (ctx) => ctx.hasDocument && ctx.inField,
+    canExecute: (ctx) => ctx.hasDocument && !ctx.isFormMode && ctx.inField,
     execute(services) {
       const ih = services.getInputHandler();
-      if (ih) (ih as any).removeCurrentField();
+      if (ih) (ih as any).confirmRemoveCurrentField?.();
     },
   },
 ];

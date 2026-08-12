@@ -3,9 +3,12 @@
 //! 렌더 트리를 HTML 문자열로 변환한다.
 //! CSS로 스타일링하여 접근성과 텍스트 선택을 지원한다.
 
+use super::image_resolver::{
+    bmp_bytes_to_png_bytes, detect_image_mime_type, pcx_bytes_to_png_bytes, tiff_bytes_to_png_bytes,
+};
 use super::layout::compute_char_positions;
 use super::render_tree::{PageRenderTree, RenderNode, RenderNodeType};
-use super::svg::{convert_wmf_to_svg, detect_image_mime_type};
+use super::svg::convert_wmf_to_svg;
 use super::{LineStyle, PathCommand, Renderer, ShapeStyle, TextStyle};
 use crate::model::style::UnderlineType;
 use base64::Engine;
@@ -123,7 +126,7 @@ impl HtmlRenderer {
                 return;
             }
             RenderNodeType::TextRun(run) => {
-                self.draw_text(&run.text, node.bbox.x, node.bbox.y, &run.style);
+                self.draw_text(run.display_or_text(), node.bbox.x, node.bbox.y, &run.style);
                 if self.show_paragraph_marks || self.show_control_codes {
                     let font_size = if run.style.font_size > 0.0 {
                         run.style.font_size
@@ -144,13 +147,13 @@ impl HtmlRenderer {
                                 };
                                 let mid_x = (cx + next_x) / 2.0 - mark_font_size * 0.25;
                                 self.output.push_str(&format!(
-                                    "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#4A90D9;\">\u{2228}</span>\n",
+                                    "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#0066FF;\">\u{2228}</span>\n",
                                     mid_x, node.bbox.y, mark_font_size,
                                 ));
                             } else if c == '\t' {
                                 let cx = node.bbox.x + char_positions[i];
                                 self.output.push_str(&format!(
-                                    "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#4A90D9;\">\u{2192}</span>\n",
+                                    "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#0066FF;\">\u{2192}</span>\n",
                                     cx, node.bbox.y, mark_font_size,
                                 ));
                             }
@@ -169,7 +172,7 @@ impl HtmlRenderer {
                             "\u{21B5}"
                         };
                         self.output.push_str(&format!(
-                            "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#4A90D9;\">{}</span>\n",
+                            "<span class=\"para-mark\" style=\"position:absolute;left:{}px;top:{}px;font-size:{}px;color:#0066FF;\">{}</span>\n",
                             mark_x, node.bbox.y, font_size, mark,
                         ));
                     }
@@ -289,27 +292,28 @@ impl Renderer for HtmlRenderer {
             "sans-serif".to_string()
         } else {
             let fallback = super::generic_fallback(&style.font_family);
-            format!("'{}', {}", escape_html(&style.font_family), fallback)
+            // [#3314] 접미사 face 미설치 시 base family 가 generic 보다 먼저 구제.
+            match super::base_family_without_weight_suffix(&style.font_family) {
+                Some(base) => format!(
+                    "'{}', '{}', {}",
+                    escape_html(&style.font_family),
+                    escape_html(&base),
+                    fallback
+                ),
+                None => format!("'{}', {}", escape_html(&style.font_family), fallback),
+            }
         };
 
         // 위첨자/아래첨자: y좌표·font_size 직접 조정 (absolute 위치이므로 vertical-align 불가)
-        let (draw_y, draw_size) = if style.superscript {
-            (y - font_size * 0.3, font_size * 0.7)
-        } else if style.subscript {
-            (y + font_size * 0.15, font_size * 0.7)
-        } else {
-            (y, font_size)
-        };
+        let (draw_size, draw_y) = style.script_draw_metrics(font_size, y);
 
         let mut css = format!(
             "position:absolute;left:{}px;top:{}px;font-family:{};font-size:{}px;color:{};",
             x, draw_y, font_family, draw_size, color,
         );
 
-        if style.is_visually_bold() {
-            css.push_str("font-weight:bold;");
-        } else if style.is_medium_weight() {
-            css.push_str("font-weight:500;");
+        if let Some(weight) = style.css_font_weight() {
+            css.push_str(&format!("font-weight:{};", weight));
         }
         if style.italic {
             css.push_str("font-style:italic;");
@@ -364,8 +368,7 @@ impl Renderer for HtmlRenderer {
         }
 
         // 형광펜 배경 (CharShape.shade_color 기반 — 편집기에서 적용한 형광펜)
-        let shade_rgb = style.shade_color & 0x00FFFFFF;
-        if shade_rgb != 0x00FFFFFF && shade_rgb != 0 {
+        if crate::model::color::char_shade(style.shade_color).is_some() {
             css.push_str(&format!(
                 "background-color:{};",
                 color_to_css(style.shade_color)
@@ -460,6 +463,31 @@ impl Renderer for HtmlRenderer {
             if mime_type == "image/x-wmf" {
                 match convert_wmf_to_svg(data) {
                     Some(svg_bytes) => (std::borrow::Cow::Owned(svg_bytes), "image/svg+xml"),
+                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+                }
+            } else if mime_type == "image/x-emf" {
+                match crate::emf::convert_to_standalone_svg(data) {
+                    Some(svg_bytes) => (std::borrow::Cow::Owned(svg_bytes), "image/svg+xml"),
+                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+                }
+            } else if mime_type == "image/bmp" {
+                match bmp_bytes_to_png_bytes(data) {
+                    Some(png_bytes) => (std::borrow::Cow::Owned(png_bytes), "image/png"),
+                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+                }
+            } else if mime_type == "image/x-pcx" {
+                match pcx_bytes_to_png_bytes(data) {
+                    Some(png_bytes) => (std::borrow::Cow::Owned(png_bytes), "image/png"),
+                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+                }
+            } else if mime_type == "image/tiff" {
+                match tiff_bytes_to_png_bytes(data) {
+                    Some(png_bytes) => (std::borrow::Cow::Owned(png_bytes), "image/png"),
+                    None => (std::borrow::Cow::Borrowed(data), mime_type),
+                }
+            } else if mime_type == "application/postscript" {
+                match crate::renderer::image_resolver::dos_eps_preview_bytes(data) {
+                    Some((mime, bytes)) => (std::borrow::Cow::Owned(bytes), mime),
                     None => (std::borrow::Cow::Borrowed(data), mime_type),
                 }
             } else {

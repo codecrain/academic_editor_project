@@ -124,6 +124,13 @@ pub(crate) fn parse_gso_control(ctrl_data: &[u8], child_records: &[Record]) -> C
         }
     }
 
+    // 빈 묶음: 자식 SHAPE_COMPONENT/CONTAINER 태그가 없어도 component ctrl_id 가
+    // '$con' 이면 컨테이너다 (HWP3 변환 서식류의 children=0 묶음이 사각형으로 오분류
+    // → 라운드트립 렌더 대변위, #1892).
+    if drawing.shape_attr.ctrl_id == tags::SHAPE_CONTAINER_ID {
+        is_container = true;
+    }
+
     // 캡션 파싱: SHAPE_COMPONENT 앞의 LIST_HEADER는 캡션
     let mut caption: Option<Caption> = None;
     if let Some(comp_idx) = shape_comp_idx {
@@ -336,9 +343,17 @@ pub(crate) fn parse_common_obj_attr(ctrl_data: &[u8]) -> CommonObjAttr {
     let attr = r.read_u32().unwrap_or(0);
     common.attr = attr;
     common.treat_as_char = attr & 0x01 != 0;
+    // [#2784] affectLSpacing(줄 간격에 영향) — 개체 공통 속성 attr bit 2 (스펙 표 70).
+    common.affect_line_spacing = attr & (1 << 2) != 0;
     common.flow_with_text = attr & (1 << 13) != 0;
     common.allow_overlap = attr & (1 << 14) != 0;
     common.size_protect = attr & (1 << 20) != 0;
+    // 개체 잠금 — HWP5 는 attr **비트 30** 에 싣는다.
+    //
+    // 실측으로 뽑았다: 한글이 `Ctrl.Properties.Item("Lock")` 을 1 로 답하는 표들의 attr 이
+    // 안 잠긴 표보다 정확히 `2^30` 만큼 크다(같은 문서 안 표 열둘로 대조). 여태 HWPX 경로에서만
+    // 읽고 HWP5 는 늘 `false` 여서, 잠긴 개체가 저장·변환에서 풀려 나갔다.
+    common.locked = attr & (1 << 30) != 0;
     common.hwp5_gen_shape_attr_bit26 = attr & (1 << 26) != 0;
     common.hwp5_gen_shape_attr_bit28 = attr & (1 << 28) != 0;
     common.vert_rel_to = match (attr >> 3) & 0x03 {
@@ -785,11 +800,16 @@ fn parse_container_children(child_records: &[Record]) -> Vec<ShapeObject> {
             && child_slice[1..].iter().any(|r| {
                 r.tag_id == tags::HWPTAG_SHAPE_COMPONENT && r.level > child_slice[0].level
             });
-        // CONTAINER 태그가 있거나 하위 SHAPE_COMPONENT가 있으면 중첩 Group
+        // CONTAINER 태그가 있거나 하위 SHAPE_COMPONENT가 있으면 중첩 Group.
+        // 자식이 없어도 component ctrl_id 가 '$con' 이면 빈 묶음이다 (#1892 —
+        // 사각형 폴백으로 빠지면 재파스 렌더 트리가 Group→Rect 로 갈라진다).
         let has_container_tag = child_slice[1..]
             .iter()
             .any(|r| r.tag_id == tags::HWPTAG_SHAPE_COMPONENT_CONTAINER);
-        if has_container_tag || has_nested_shapes {
+        if has_container_tag
+            || has_nested_shapes
+            || child_drawing.shape_attr.ctrl_id == tags::SHAPE_CONTAINER_ID
+        {
             let mut group = GroupShape::default();
             group.shape_attr = child_drawing.shape_attr.clone();
             group.children = parse_container_children(child_slice);
@@ -914,6 +934,34 @@ fn parse_picture(common: CommonObjAttr, shape_attr: ShapeComponentAttr, data: &[
     // 남은 바이트 보존 (라운드트립용)
     if r.remaining() > 0 {
         pic.raw_picture_extra = r.read_bytes(r.remaining()).unwrap_or_default().to_vec();
+        if let Some(&border_opacity) = pic.raw_picture_extra.first() {
+            pic.border_opacity = border_opacity;
+        }
+        if pic.raw_picture_extra.len() >= 5 {
+            pic.instance_id = u32::from_le_bytes([
+                pic.raw_picture_extra[1],
+                pic.raw_picture_extra[2],
+                pic.raw_picture_extra[3],
+                pic.raw_picture_extra[4],
+            ]);
+        }
+        if pic.raw_picture_extra.len() >= 18 {
+            if let Some(&alpha) = pic.raw_picture_extra.last() {
+                pic.image_attr.transparency =
+                    crate::model::image::alpha_byte_to_transparency_percent(alpha);
+            }
+        }
+        // [#1929] extra 꼬리의 원본 이미지 크기(offset 9..17: w4+h4)를 img_dim 으로
+        // 적재 — HWPX `hp:imgDim` 대응 필드. 종전에는 HWP5 파스가 이를 읽지 않아
+        // HWPX→HWP5 왕복에서 imgDim 이 (0,0) 으로 소실됐다 (직렬화기 non-raw
+        // 경로가 기록해도 재파스가 버림).
+        if pic.raw_picture_extra.len() >= 17 {
+            let e = &pic.raw_picture_extra;
+            pic.img_dim = (
+                u32::from_le_bytes([e[9], e[10], e[11], e[12]]),
+                u32::from_le_bytes([e[13], e[14], e[15], e[16]]),
+            );
+        }
     }
 
     pic
@@ -936,9 +984,17 @@ fn parse_line_shape_data(data: &[u8], line: &mut LineShape, is_connector: bool) 
         let start_subject_index = r.read_u32().unwrap_or(0);
         let end_subject_id = r.read_u32().unwrap_or(0);
         let end_subject_index = r.read_u32().unwrap_or(0);
-        let count = r.read_u32().unwrap_or(0) as usize;
+        // countCP 는 파일에서 온 u32 다. 남은 바이트로 실제 담을 수 있는 개수
+        // (제어점당 4+4+2=10바이트)로 상한을 둔다. 종전엔 상한이 없어
+        // (a) Vec::with_capacity 가 최대 ~51GB 예약을 시도해 RawVec 오버플로
+        // panic/abort, (b) read_*().unwrap_or(0) 가 EOF 를 삼켜 루프가 count
+        // 만큼(최대 40억회) 0 을 채우며 도는 문제가 있었다.
+        let count = (r.read_u32().unwrap_or(0) as usize).min(r.remaining() / 10);
         let mut control_points = Vec::with_capacity(count);
         for _ in 0..count {
+            if r.remaining() < 10 {
+                break;
+            }
             let x = r.read_i32().unwrap_or(0);
             let y = r.read_i32().unwrap_or(0);
             let point_type = r.read_u16().unwrap_or(0);
@@ -961,7 +1017,10 @@ fn parse_line_shape_data(data: &[u8], line: &mut LineShape, is_connector: bool) 
         });
     } else {
         // 일반 선
-        line.started_right_or_bottom = r.read_i32().unwrap_or(0) != 0;
+        // hwp5 스펙 표92: 속성 필드는 UINT16(2바이트). 선 개체 속성 전체 길이가
+        // 18바이트(4+4+4+4+2)로 명시되어 있는데 기존에는 INT32(4바이트)로 읽어
+        // 남은 2바이트로는 항상 실패해 unwrap_or(0)으로 값이 소실되고 있었다.
+        line.started_right_or_bottom = r.read_u16().unwrap_or(0) != 0;
     }
 }
 
@@ -1012,7 +1071,8 @@ fn parse_arc_shape_data(data: &[u8], arc: &mut ArcShape) {
 /// hwplib: INT32 count + (INT32 x, INT32 y) × count + skip(4)
 fn parse_polygon_shape_data(data: &[u8], poly: &mut PolygonShape) {
     let mut r = ByteReader::new(data);
-    let cnt = r.read_i32().unwrap_or(0) as usize;
+    let cnt_raw = r.read_i32().unwrap_or(0);
+    let cnt = if cnt_raw < 0 { 0 } else { cnt_raw as usize };
     poly.points.clear();
     for _ in 0..cnt {
         let x = r.read_i32().unwrap_or(0);
@@ -1030,7 +1090,12 @@ fn parse_polygon_shape_data(data: &[u8], poly: &mut PolygonShape) {
 /// hwplib: INT32 count + (INT32 x, INT32 y) × count + BYTE[count-1] segment_types + skip(4)
 fn parse_curve_shape_data(data: &[u8], curve: &mut CurveShape) {
     let mut r = ByteReader::new(data);
-    let cnt = r.read_i32().unwrap_or(0) as usize;
+    // count(INT32)는 파일에서 온 부호 있는 값이다. 음수(예: -1 = 0xFFFFFFFF)를
+    // 검증 없이 `as usize` 로 캐스팅하면 부호 확장으로 usize::MAX 근처의 거대한
+    // 값이 되어 아래 루프가 사실상 종료되지 않는(수십억 회) DoS 를 유발한다.
+    // 캐스팅 전에 음수를 0(빈 곡선)으로 처리한다. (#3012 다각형과 동일 클래스)
+    let cnt_raw = r.read_i32().unwrap_or(0);
+    let cnt = if cnt_raw < 0 { 0 } else { cnt_raw as usize };
     curve.points.clear();
     for _ in 0..cnt {
         let x = r.read_i32().unwrap_or(0);
@@ -1055,6 +1120,91 @@ fn parse_curve_shape_data(data: &[u8], curve: &mut CurveShape) {
 #[cfg(test)]
 mod task195_tests {
     use super::*;
+
+    #[test]
+    fn line_started_right_or_bottom_parsed_from_18byte_record() {
+        // hwp5 스펙 표92: 선 개체 속성은 4+4+4+4+2=18바이트이며 마지막 필드는
+        // UINT16. 18바이트만 주어져도 플래그(1)가 정확히 읽혀야 한다.
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i32.to_le_bytes()); // start.x
+        data.extend_from_slice(&0i32.to_le_bytes()); // start.y
+        data.extend_from_slice(&0i32.to_le_bytes()); // end.x
+        data.extend_from_slice(&0i32.to_le_bytes()); // end.y
+        data.extend_from_slice(&1u16.to_le_bytes()); // 속성(방향 보정 플래그)
+
+        let mut line = LineShape::default();
+        parse_line_shape_data(&data, &mut line, false);
+        assert!(
+            line.started_right_or_bottom,
+            "18바이트 레코드에서 UINT16 플래그가 true 로 읽혀야 함"
+        );
+    }
+
+    #[test]
+    fn connector_control_point_count_is_bounded_by_remaining() {
+        // 악의적 countCP(0xFFFFFFFF)가 (a) ~51GB Vec 예약으로 abort 하거나
+        // (b) EOF 를 삼킨 채 40억회 루프를 도는 일이 없어야 한다.
+        // 페이로드: link_type(4)+ssid(4)+ssidx(4)+esid(4)+esidx(4)=20, 그 뒤 countCP.
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i32.to_le_bytes()); // start.x
+        data.extend_from_slice(&0i32.to_le_bytes()); // start.y
+        data.extend_from_slice(&0i32.to_le_bytes()); // end.x
+        data.extend_from_slice(&0i32.to_le_bytes()); // end.y
+        data.extend_from_slice(&0u32.to_le_bytes()); // link_type
+        data.extend_from_slice(&0u32.to_le_bytes()); // start_subject_id
+        data.extend_from_slice(&0u32.to_le_bytes()); // start_subject_index
+        data.extend_from_slice(&0u32.to_le_bytes()); // end_subject_id
+        data.extend_from_slice(&0u32.to_le_bytes()); // end_subject_index
+        data.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // countCP (악성)
+
+        let mut line = LineShape::default();
+        parse_line_shape_data(&data, &mut line, true);
+        let connector = line.connector.expect("connector 파싱");
+        assert!(
+            connector.control_points.is_empty(),
+            "남은 바이트가 없으므로 제어점은 비어야 함: {}",
+            connector.control_points.len()
+        );
+    }
+
+    #[test]
+    fn polygon_point_count_negative_is_treated_as_zero() {
+        // count(INT32)에 음수(-1 = 0xFFFFFFFF)를 넣으면 as usize 부호확장으로
+        // 사실상 무한 루프에 빠지면 안 되고 빈 다각형으로 처리되어야 한다.
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-1i32).to_le_bytes()); // count (악성)
+
+        let mut poly = PolygonShape::default();
+        parse_polygon_shape_data(&data, &mut poly);
+        assert!(
+            poly.points.is_empty(),
+            "음수 count는 빈 점 목록으로 처리되어야 함: {}",
+            poly.points.len()
+        );
+    }
+
+    #[test]
+    fn curve_point_count_negative_is_treated_as_zero() {
+        // count(INT32)에 음수(-1 = 0xFFFFFFFF)를 넣으면 as usize 부호확장으로
+        // usize::MAX 근처의 거대한 값이 되어 `for _ in 0..cnt` 및
+        // `for _ in 0..(cnt - 1)` 루프가 사실상 종료되지 않는(수십억 회) DoS 를
+        // 유발한다. 음수 count 는 빈 곡선으로 처리되어야 한다. (#3012 다각형과 동일 클래스)
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-1i32).to_le_bytes()); // count (악성)
+
+        let mut curve = CurveShape::default();
+        parse_curve_shape_data(&data, &mut curve);
+        assert!(
+            curve.points.is_empty(),
+            "음수 count는 빈 점 목록으로 처리되어야 함: {}",
+            curve.points.len()
+        );
+        assert!(
+            curve.segment_types.is_empty(),
+            "음수 count는 빈 세그먼트 목록으로 처리되어야 함: {}",
+            curve.segment_types.len()
+        );
+    }
 
     #[test]
     fn test_parse_ole_shape_minimal() {

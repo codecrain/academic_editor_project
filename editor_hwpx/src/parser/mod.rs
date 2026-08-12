@@ -23,6 +23,7 @@ pub mod control;
 pub mod crypto;
 pub mod doc_info;
 pub mod header;
+pub mod hml;
 pub mod hwp3;
 pub mod hwpx;
 pub mod ingest;
@@ -45,21 +46,42 @@ pub enum FileFormat {
     Hwpx,
     /// HWP 3.0 바이너리
     Hwp3,
-    /// Legacy raw HWPML XML (미지원 — 감지만, Issue #1053)
-    LegacyHwpml,
+    /// Standalone HWPML XML
+    Hml,
+    /// DRM/보안 컨테이너로 보호된 문서 (미지원 — 감지만, Issue #1982)
+    /// Fasoo(`\x9b DRMONE`) / SoftCamp SCDSA(`SCDSA00x`) 등. 복호화는 범위 밖.
+    DrmProtected,
+    /// 빈 파일(0 바이트) (Issue #1982)
+    Empty,
     /// 알 수 없는 포맷
     Unknown,
 }
 
-const FORMAT_PROBE_SCAN_LIMIT: usize = 4096;
-const UNSUPPORTED_HWPML_CODE: &str = "UNSUPPORTED_HWPML";
 const UNSUPPORTED_FILE_FORMAT_CODE: &str = "UNSUPPORTED_FILE_FORMAT";
-const SUPPORTED_FORMATS_HINT: &str = "현재 rhwp는 HWP 5.0, HWPX, 일부 HWP 3.0 문서만 지원합니다.";
-const UNSUPPORTED_HWPML_HINT: &str =
-    "현재 rhwp는 HWP 5.0, HWPX, 일부 HWP 3.0 문서만 지원합니다. 한컴오피스에서 HWP 5.0 또는 HWPX로 다시 저장한 뒤 열어주세요.";
+const SUPPORTED_FORMATS_HINT: &str =
+    "현재 rhwp는 HWP 5.0, HWPX, 일부 HWP 3.0, HWPML 2.9 문서를 지원합니다.";
+const DRM_PROTECTED_CODE: &str = "DRM_PROTECTED";
+const DRM_PROTECTED_HINT: &str =
+    "DRM/보안 컨테이너로 보호된 문서입니다. 한컴오피스 등 DRM 클라이언트에서 보호를 해제한 뒤 저장해 열어주세요.";
+const EMPTY_FILE_CODE: &str = "EMPTY_FILE";
+const EMPTY_FILE_HINT: &str = "빈 파일(0 바이트)입니다.";
+
+// DRM/보안 컨테이너 시그니처 (Issue #1982 — 10k 서베이 검출).
+// Fasoo: `\x9b DRMONE  This Document is encrypted and protected by Fasoo`.
+const FASOO_DRM_SIG: &[u8] = b"\x9b DRMONE";
+// SoftCamp SCDSA(Security Content Document Security Agent): `SCDSA002`/`SCDSA004`.
+const SCDSA_SIG: &[u8] = b"SCDSA";
 
 /// 파일 데이터의 매직 바이트로 포맷을 감지한다.
 pub fn detect_format(data: &[u8]) -> FileFormat {
+    if data.is_empty() {
+        return FileFormat::Empty;
+    }
+    // DRM/보안 컨테이너(미지원 — 감지만, Issue #1982). 정상 매직보다 먼저 판별해
+    // "알 수 없는 파일 형식" 대신 명확한 안내를 준다.
+    if data.starts_with(FASOO_DRM_SIG) || data.starts_with(SCDSA_SIG) {
+        return FileFormat::DrmProtected;
+    }
     if data.len() >= 8 {
         // CFB/OLE 시그니처: D0 CF 11 E0 A1 B1 1A E1
         if data[0] == 0xD0 && data[1] == 0xCF && data[2] == 0x11 && data[3] == 0xE0 {
@@ -75,82 +97,10 @@ pub fn detect_format(data: &[u8]) -> FileFormat {
     if data.len() >= 17 && &data[0..17] == b"HWP Document File" {
         return FileFormat::Hwp3;
     }
-    if detect_legacy_hwpml(data) {
-        return FileFormat::LegacyHwpml;
+    if hml::detect_hml_signature(data) {
+        return FileFormat::Hml;
     }
     FileFormat::Unknown
-}
-
-fn format_probe_prefix(data: &[u8]) -> &[u8] {
-    &data[..data.len().min(FORMAT_PROBE_SCAN_LIMIT)]
-}
-
-fn trim_format_probe_prefix(data: &[u8]) -> &[u8] {
-    let mut start = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        3
-    } else {
-        0
-    };
-    while start < data.len() && data[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    &data[start..]
-}
-
-fn ascii_lower(byte: u8) -> u8 {
-    if byte.is_ascii_uppercase() {
-        byte + 32
-    } else {
-        byte
-    }
-}
-
-fn ascii_eq_ignore_case(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right.iter())
-            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
-}
-
-fn starts_with_ascii_ignore_case(data: &[u8], needle: &[u8]) -> bool {
-    data.get(..needle.len())
-        .is_some_and(|head| ascii_eq_ignore_case(head, needle))
-}
-
-fn contains_ascii_ignore_case(data: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && data
-            .windows(needle.len())
-            .any(|window| ascii_eq_ignore_case(window, needle))
-}
-
-fn detect_legacy_hwpml(data: &[u8]) -> bool {
-    let prefix = trim_format_probe_prefix(format_probe_prefix(data));
-    let looks_like_xml = starts_with_ascii_ignore_case(prefix, b"<?xml")
-        || starts_with_ascii_ignore_case(prefix, b"<hwpml");
-
-    looks_like_xml && contains_ascii_ignore_case(prefix, b"<hwpml")
-}
-
-fn detect_legacy_hwpml_format_name(data: &[u8]) -> &'static str {
-    let prefix = format_probe_prefix(data);
-    let versions: &[(&[u8], &'static str)] = &[
-        (b"version=\"2.1\"", "HWPML 2.1"),
-        (b"version='2.1'", "HWPML 2.1"),
-        (b"hwpml=\"2.1\"", "HWPML 2.1"),
-        (b"hwpml='2.1'", "HWPML 2.1"),
-        (b"version=\"2.0\"", "HWPML 2.0"),
-        (b"version='2.0'", "HWPML 2.0"),
-        (b"version=\"1.0\"", "HWPML 1.0"),
-        (b"version='1.0'", "HWPML 1.0"),
-    ];
-    for (needle, format_name) in versions {
-        if contains_ascii_ignore_case(prefix, needle) {
-            return format_name;
-        }
-    }
-    "HWPML"
 }
 
 /// 파싱 에러 (통합)
@@ -163,6 +113,7 @@ pub enum ParseError {
     CryptoError(crypto::CryptoError),
     HwpxError(hwpx::HwpxError),
     Hwp3Error(hwp3::Hwp3Error),
+    HmlError(hml::HmlError),
     EncryptedDocument,
     /// 감지는 되었으나 지원하지 않는 포맷
     UnsupportedFormat {
@@ -182,7 +133,11 @@ impl std::fmt::Display for ParseError {
             ParseError::CryptoError(e) => write!(f, "암호 오류: {}", e),
             ParseError::HwpxError(e) => write!(f, "HWPX 오류: {}", e),
             ParseError::Hwp3Error(e) => write!(f, "HWP 3.0 오류: {}", e),
-            ParseError::EncryptedDocument => write!(f, "암호화된 문서는 지원하지 않습니다"),
+            ParseError::HmlError(e) => write!(f, "HML 오류: {}", e),
+            ParseError::EncryptedDocument => write!(
+                f,
+                "비밀번호가 필요한 암호 문서입니다 (parse_document_with_password 또는 parse_hwp_with_password 로 비밀번호를 전달하세요)"
+            ),
             ParseError::UnsupportedFormat { code, format, hint } => {
                 write!(
                     f,
@@ -197,13 +152,25 @@ impl std::error::Error for ParseError {}
 
 impl From<hwpx::HwpxError> for ParseError {
     fn from(e: hwpx::HwpxError) -> Self {
-        ParseError::HwpxError(e)
+        match e {
+            hwpx::HwpxError::Encrypted(_) => ParseError::EncryptedDocument,
+            other => ParseError::HwpxError(other),
+        }
     }
 }
 
 impl From<hwp3::Hwp3Error> for ParseError {
     fn from(e: hwp3::Hwp3Error) -> Self {
-        ParseError::Hwp3Error(e)
+        match e {
+            hwp3::Hwp3Error::PasswordRequired => ParseError::EncryptedDocument,
+            other => ParseError::Hwp3Error(other),
+        }
+    }
+}
+
+impl From<hml::HmlError> for ParseError {
+    fn from(error: hml::HmlError) -> Self {
+        ParseError::HmlError(error)
     }
 }
 
@@ -215,9 +182,71 @@ impl From<hwp3::Hwp3Error> for ParseError {
 /// 3. DocInfo 파싱 (참조 테이블)
 /// 4. BodyText 섹션별 파싱 (배포용 문서: ViewText 복호화)
 pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
+    parse_hwp_inner(data, None)
+}
+
+/// 비밀번호로 보호된 HWP 파일을 비밀번호와 함께 파싱한다.
+///
+/// `encrypted` 플래그와 EncryptVersion 4가 설정된 문서를 연다. 비밀번호가 틀리면
+/// `ParseError::CryptoError(CryptoError::WrongPassword)` 가 반환된다. 비밀번호가
+/// 필요 없는 일반/배포용 문서에 비밀번호를 전달해도 결과는 동일하다(무시됨).
+pub fn parse_hwp_with_password(data: &[u8], password: &[u8]) -> Result<Document, ParseError> {
+    parse_hwp_inner(data, Some(password))
+}
+
+fn validate_password_encryption(file_header: &header::FileHeader) -> Result<(), ParseError> {
+    if file_header.flags.encrypted
+        && file_header.encrypt_version != crypto::SUPPORTED_PASSWORD_ENCRYPT_VERSION
+    {
+        return Err(ParseError::CryptoError(
+            crypto::CryptoError::UnsupportedScheme {
+                encrypt_version: file_header.encrypt_version,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn parse_doc_info_stream(
+    data: &[u8],
+    encrypted: bool,
+) -> Result<
+    (
+        crate::model::document::DocInfo,
+        crate::model::document::DocProperties,
+    ),
+    ParseError,
+> {
+    if encrypted {
+        // 압축 문서는 deflate 오류로 오답 비밀번호를 검출할 수 있지만 비압축 문서는
+        // 레코드 구조를 직접 확인해야 한다. DocInfo의 필수 선두 레코드 두 종류를
+        // 인증 표식으로 사용해 무작위 복호화 결과가 빈/부분 문서로 통과하지 않게 한다.
+        let records = record::Record::read_all(data)
+            .map_err(|_| ParseError::CryptoError(crypto::CryptoError::WrongPassword))?;
+        let has_required_prefix = records
+            .first()
+            .is_some_and(|record| record.tag_id == tags::HWPTAG_DOCUMENT_PROPERTIES)
+            && records
+                .iter()
+                .any(|record| record.tag_id == tags::HWPTAG_ID_MAPPINGS);
+        if !has_required_prefix {
+            return Err(ParseError::CryptoError(crypto::CryptoError::WrongPassword));
+        }
+    }
+
+    doc_info::parse_doc_info(data).map_err(|error| {
+        if encrypted {
+            ParseError::CryptoError(crypto::CryptoError::WrongPassword)
+        } else {
+            ParseError::DocInfoError(error)
+        }
+    })
+}
+
+fn parse_hwp_inner(data: &[u8], password: Option<&[u8]>) -> Result<Document, ParseError> {
     // 1. CFB 컨테이너 열기 (strict → lenient 폴백)
     match cfb_reader::CfbReader::open(data) {
-        Ok(cfb) => parse_hwp_with_cfb(cfb, data),
+        Ok(cfb) => parse_hwp_with_cfb(cfb, data, password),
         Err(strict_err) => {
             eprintln!(
                 "표준 CFB 파서 실패: {}, lenient 파서로 재시도...",
@@ -225,7 +254,7 @@ pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
             );
             let lenient = cfb_reader::LenientCfbReader::open(data)
                 .map_err(|_| ParseError::CfbError(strict_err))?;
-            parse_hwp_with_lenient(lenient, data)
+            parse_hwp_with_lenient(lenient, data, password)
         }
     }
 }
@@ -233,35 +262,75 @@ pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
 /// 표준 CfbReader로 파싱
 fn parse_hwp_with_cfb(
     mut cfb: cfb_reader::CfbReader,
-    _raw_data: &[u8],
+    raw_data: &[u8],
+    password: Option<&[u8]>,
 ) -> Result<Document, ParseError> {
     // 2. FileHeader 파싱
     let header_data = cfb.read_file_header().map_err(ParseError::CfbError)?;
     let file_header = header::parse_file_header(&header_data).map_err(ParseError::HeaderError)?;
+    validate_password_encryption(&file_header)?;
 
-    if file_header.flags.encrypted {
+    let encrypted = file_header.flags.encrypted;
+    // 비밀번호 암호 문서인데 비밀번호가 없으면 열 수 없다.
+    // 비밀번호가 제공되지 않은 경우 기존과 동일하게 EncryptedDocument 에러로
+    // 호출자가 비밀번호 입력을 유도할 수 있게 한다.
+    if encrypted && password.is_none() {
         return Err(ParseError::EncryptedDocument);
     }
 
     let compressed = file_header.flags.compressed;
     let distribution = file_header.flags.distribution;
 
-    // 3. DocInfo 파싱
-    let doc_info_data = cfb
-        .read_doc_info(compressed)
-        .map_err(ParseError::CfbError)?;
-    let (mut doc_info, doc_properties) =
-        doc_info::parse_doc_info(&doc_info_data).map_err(ParseError::DocInfoError)?;
+    // 3. DocInfo 파싱 (비밀번호 암호 문서: raw 읽기 → 복호화)
+    //
+    // EncryptVersion 4(한글 7.0 이후)만 지원한다. 구버전 1~3을 같은 알고리즘으로
+    // 해석하면 WrongPassword로 오진하므로 FileHeader 단계에서 명시적으로 거부한다.
+    let doc_info_data = if encrypted {
+        let raw = cfb
+            .read_stream_raw("/DocInfo")
+            .map_err(ParseError::CfbError)?;
+        crypto::decrypt_password_protected_limited(
+            &raw,
+            password.unwrap(),
+            compressed,
+            crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+        )
+        .map_err(ParseError::CryptoError)?
+    } else {
+        cfb.read_doc_info(compressed)
+            .map_err(ParseError::CfbError)?
+    };
+    let (mut doc_info, doc_properties) = parse_doc_info_stream(&doc_info_data, encrypted)?;
     doc_info.raw_stream = Some(doc_info_data);
 
     // 4. BodyText 섹션별 파싱
     let section_count = cfb.section_count();
-    let sections = parse_sections_strict(&mut cfb, section_count, compressed, distribution)?;
+    let sections = parse_sections_strict(
+        &mut cfb,
+        section_count,
+        compressed,
+        distribution,
+        encrypted,
+        password,
+    )?;
 
     // 5-7. 미리보기, BinData, 추가 스트림
     let preview = extract_preview(&mut cfb);
-    let bin_data_content = load_bin_data_content(&mut cfb, &doc_info.bin_data_list, compressed);
-    let extra_streams = collect_extra_streams(&mut cfb, &doc_info.bin_data_list);
+    let bin_data_content = load_bin_data_content(
+        &mut cfb,
+        raw_data,
+        &doc_info.bin_data_list,
+        compressed,
+        encrypted,
+        password,
+    );
+    let extra_streams = collect_extra_streams(
+        &mut cfb,
+        &doc_info.bin_data_list,
+        &bin_data_content,
+        encrypted,
+        password,
+    );
 
     // Document 조립
     let model_header = ModelFileHeader {
@@ -285,6 +354,13 @@ fn parse_hwp_with_cfb(
     // 다양한 스타일 사용 안하므로 작은 비율).
     let summary_hwp3_era = cfb.detect_hwp3_variant();
 
+    // [Issue #1770] rhwp HWPX→HWP 변환본 식별 — 마커 스트림 감지 (결정론).
+    // 변환본 IR 은 HWPX LINE_SEG 시멘틱 그대로이므로 pagination/렌더의
+    // is_hwpx_source 분기를 HWPX 로 해석해야 roundtrip 쪽수가 자기정합한다.
+    let is_hwpx_variant = extra_streams
+        .iter()
+        .any(|(p, _)| p == crate::model::document::HWPX_ORIGIN_STREAM_PATH);
+
     let mut doc = Document {
         header: model_header,
         doc_properties,
@@ -293,7 +369,14 @@ fn parse_hwp_with_cfb(
         preview,
         bin_data_content,
         extra_streams,
+        hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant,
+        provenance: crate::model::provenance::SourceProvenance {
+            format: crate::model::provenance::SourceFormat::Hwp5,
+            hwp3_lineage: false,
+            hwpx_lineage: is_hwpx_variant,
+        },
     };
 
     // 자동 번호 할당 (문서 전체에서 순차적으로)
@@ -305,13 +388,17 @@ fn parse_hwp_with_cfb(
     // [Task #1001] HwpSummary HWP3 시대 년 AND PS/CS 비율 작음 → 변환본 확정.
     // 두 신호 결합으로 false positive 차단 (exam_eng 등 일반 HWP5 가 본문에
     // HWP3 시대 텍스트만 인용한 경우).
-    if summary_hwp3_era {
+    // [#1880 v2] rhwp HWPX→HWP 변환본 제외 — 원본 HWPX 가 HWP3-계보 요약정보를
+    // 승계해도 rhwp 변환본 IR 은 HWPX 시멘틱이므로 spacing 반감 보정이 오발동
+    // 하면 안 된다 (위 apply_hwp3_origin_fixup 게이트와 동일 근거).
+    if summary_hwp3_era && !doc.is_hwpx_variant {
         let total_paras: usize = doc.sections.iter().map(|s| s.paragraphs.len()).sum();
         if total_paras > 50 {
             let ps_r = doc.doc_info.para_shapes.len() as f64 / total_paras as f64;
             let cs_r = doc.doc_info.char_shapes.len() as f64 / total_paras as f64;
             if ps_r < 0.20 && cs_r < 0.20 {
                 doc.is_hwp3_variant = true;
+                doc.provenance.hwp3_lineage = true;
                 // [Task #1001 Stage 11] line_segs.vertical_pos /2 보정 revert —
                 // 실제 raw vpos 비교 결과 HWP5 변환본 vpos 는 HWP3 의 2배가 아닌
                 // ~1.15배 (15% 만 차이). /2 fix 시 HWP5 가 HWP3 보다 더 compact 되어
@@ -321,10 +408,16 @@ fn parse_hwp_with_cfb(
                 // [Task #1037 → #1042 정정] ParaShape unit semantic normalize.
                 // HWP3 vs HWP5 variant 비교 결과 (diag_1042_hwp3_vs_hwp5_paragraph):
                 //   - margin_left/right: HWP5 raw = HWP3 raw 동일 → /2 적용은 wrong
-                //   - indent / spacing_before / spacing_after: HWP5 raw = HWP3 × 2 → /2 정합
+                //   - spacing_before / spacing_after: HWP5 raw = HWP3 × 2 → /2 정합
                 // margin_left/right /2 제거 — HWP3 정답 paragraph 분포 정합.
+                //
+                // [Task #1472] indent /2 제거 — IR 은 정답(full HWPUNIT, HWPX 일치)로 둔다.
+                //   종전 indent /2 는 본문 내어쓰기를 절반으로 훼손(한컴/HWPX 와 어긋남)하면서,
+                //   미주 TAC 수식 흐름의 available_width 계산이 indent_scale=2.0 으로 이를 되돌려
+                //   "수식 effective indent = (indent/2)×2 = full" 로 페이지네이션을 한컴과 정합시켰다.
+                //   재설계: IR indent 는 full 로 두고, 미주 수식 흐름의 indent_scale 을 변환본에서만
+                //   절반(2.0→1.0)으로 낮춰 effective indent(=full) 를 불변 유지한다(아래 렌더러).
                 for ps in &mut doc.doc_info.para_shapes {
-                    ps.indent /= 2;
                     ps.spacing_before /= 2;
                     ps.spacing_after /= 2;
                 }
@@ -426,6 +519,47 @@ fn fixup_line_segs_for_variant(paragraphs: &mut [crate::model::paragraph::Paragr
 }
 
 fn apply_hwp3_origin_fixup(doc: &mut Document) {
+    // [#1880 v2] rhwp HWPX→HWP 변환본(is_hwpx_variant, #1886 마커)은 한컴
+    // HWP3→HWP5 변환본이 아니다 — 결정론 마커가 비율 휴리스틱에 우선한다.
+    // 미게이트 시 저-스타일 대형 문서(2959953)가 비율에 걸려 margin_bottom
+    // -1600 이 오발동, HWPX 렌더와 페이지 기하가 21.3px 어긋나 PI_MOVED 유발
+    // (HWPX 파스는 #1608 에서 동종 감지 제거됨).
+    if doc.is_hwpx_variant {
+        return;
+    }
+    // [#3707] rhwp 가 만든 HWP3→HWP5 변환본에 쪽나눔 허용치를 되돌린다.
+    //
+    // HWP3 파서는 `pagination_bottom_tolerance = 1600 HU`(21.3px)를 세운다 — 한글97 의
+    // 마지막 줄 tolerance 를 흉내 내 **페이지네이터에게만** 여유를 주는 렌더러 내부
+    // 값이고 파일 포맷 필드가 아니다. HWP5 로 저장·재파싱하면 0 이 되어 본문 가용이
+    // 21.3px 짧아진다.
+    //
+    // 그만큼 미주 단 가용이 줄어 단 전환이 일찍 걸리고, 2단 미주의 왼쪽 단이 조기에
+    // 닫혀 미주가 다음 쪽으로 밀린다(SO-SUEOP 44쪽: 미주 128·129 가 45쪽으로). 한컴은
+    // 원본·왕복본 모두 44쪽에 실으므로 허용치가 살아 있는 쪽이 정답지와 맞는다.
+    //
+    // 파일에 실리는 여백(`margin_bottom`)은 건드리지 않는다 — 줄이면 한컴이 보는 쪽
+    // 기하가 원본과 달라지고 `convert --verify` 의 IR 비교에도 잡힌다. 이 값은 그
+    // 비교에서 제외되는 렌더러 내부 값이라 왕복 정합을 깨지 않는다.
+    if doc
+        .extra_streams
+        .iter()
+        .any(|(p, _)| p == crate::model::document::HWP3_ORIGIN_STREAM_PATH)
+    {
+        // 마커의 존재 이유가 출처 복원이다 — lineage 를 함께 세워야
+        // `native_hwp5_layout` 이 변환본을 원본 HWP5 로 오판하지 않는다.
+        // (종전에는 휴리스틱(문단>50·shape 비율)만 lineage 를 세워, 마커가
+        // 있는 소형 서식 변환본이 native 로 새어 저장-lineseg 전용 분기가
+        // 발화했다 — issue_1892 자기일관 실측.)
+        doc.provenance.hwp3_lineage = true;
+        for section in doc.sections.iter_mut() {
+            let pd = &mut section.section_def.page_def;
+            if pd.pagination_bottom_tolerance == 0 {
+                pd.pagination_bottom_tolerance = 1600.min(pd.margin_bottom);
+            }
+        }
+    }
+
     let total_paragraphs: usize = doc.sections.iter().map(|s| s.paragraphs.len()).sum();
     if total_paragraphs <= 50 {
         return;
@@ -448,11 +582,14 @@ fn apply_hwp3_origin_fixup(doc: &mut Document) {
 }
 
 /// CfbReader로 섹션들 파싱
+#[allow(clippy::too_many_arguments)]
 fn parse_sections_strict(
     cfb: &mut cfb_reader::CfbReader,
     section_count: u32,
     compressed: bool,
     distribution: bool,
+    encrypted: bool,
+    password: Option<&[u8]>,
 ) -> Result<Vec<crate::model::document::Section>, ParseError> {
     let mut sections = Vec::new();
 
@@ -463,6 +600,21 @@ fn parse_sections_strict(
                 .read_body_text_section(i, compressed, true)
                 .map_err(ParseError::CfbError)?;
             crypto::decrypt_viewtext_section(&raw, compressed).map_err(ParseError::CryptoError)?
+        } else if encrypted {
+            // 비밀번호 암호 문서: BodyText raw → 비밀번호 복호화.
+            // read_body_text_section(compressed=false) 가 스트림 경로 탐색
+            // (BodyText/Section{i} → /Section{i}) 을 담당하므로 raw 만 얻어
+            // 복호화+압축해제는 crypto 로 위임한다.
+            let raw = cfb
+                .read_body_text_section(i, false, false)
+                .map_err(ParseError::CfbError)?;
+            crypto::decrypt_password_protected_limited(
+                &raw,
+                password.unwrap(),
+                compressed,
+                crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+            )
+            .map_err(ParseError::CryptoError)?
         } else {
             cfb.read_body_text_section(i, compressed, false)
                 .map_err(ParseError::CfbError)?
@@ -489,24 +641,39 @@ fn parse_sections_strict(
 fn parse_hwp_with_lenient(
     lenient: cfb_reader::LenientCfbReader,
     _raw_data: &[u8],
+    password: Option<&[u8]>,
 ) -> Result<Document, ParseError> {
     // FileHeader 파싱
     let header_data = lenient.read_file_header().map_err(ParseError::CfbError)?;
     let file_header = header::parse_file_header(&header_data).map_err(ParseError::HeaderError)?;
+    validate_password_encryption(&file_header)?;
 
-    if file_header.flags.encrypted {
+    let encrypted = file_header.flags.encrypted;
+    if encrypted && password.is_none() {
         return Err(ParseError::EncryptedDocument);
     }
 
     let compressed = file_header.flags.compressed;
     let distribution = file_header.flags.distribution;
 
-    // DocInfo 파싱
-    let doc_info_data = lenient
-        .read_doc_info(compressed)
-        .map_err(ParseError::CfbError)?;
-    let (mut doc_info, doc_properties) =
-        doc_info::parse_doc_info(&doc_info_data).map_err(ParseError::DocInfoError)?;
+    // DocInfo 파싱 (비밀번호 암호 문서: lenient read_stream raw → 복호화)
+    let doc_info_data = if encrypted {
+        let raw = lenient
+            .read_stream("DocInfo")
+            .map_err(ParseError::CfbError)?;
+        crypto::decrypt_password_protected_limited(
+            &raw,
+            password.unwrap(),
+            compressed,
+            crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+        )
+        .map_err(ParseError::CryptoError)?
+    } else {
+        lenient
+            .read_doc_info(compressed)
+            .map_err(ParseError::CfbError)?
+    };
+    let (mut doc_info, doc_properties) = parse_doc_info_stream(&doc_info_data, encrypted)?;
     doc_info.raw_stream = Some(doc_info_data);
 
     // BodyText 섹션별 파싱
@@ -519,6 +686,20 @@ fn parse_hwp_with_lenient(
                 .read_body_text_section_full(i, compressed, true)
                 .map_err(ParseError::CfbError)?;
             crypto::decrypt_viewtext_section(&raw, compressed).map_err(ParseError::CryptoError)?
+        } else if encrypted {
+            // 비밀번호 암호 문서: lenient reader 로 raw 섹션 바이트를 얻어 복호화.
+            // read_body_text_section_full(compressed=false, distribution=false) 가
+            // Section{i} raw 를 반환한다.
+            let raw = lenient
+                .read_body_text_section_full(i, false, false)
+                .map_err(ParseError::CfbError)?;
+            crypto::decrypt_password_protected_limited(
+                &raw,
+                password.unwrap(),
+                compressed,
+                crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+            )
+            .map_err(ParseError::CryptoError)?
         } else {
             lenient
                 .read_body_text_section_full(i, compressed, false)
@@ -538,7 +719,13 @@ fn parse_hwp_with_lenient(
     }
 
     // BinData 로드 시도
-    let bin_data_content = load_bin_data_content_lenient(&lenient, &doc_info.bin_data_list);
+    let bin_data_content = load_bin_data_content_lenient(
+        &lenient,
+        &doc_info.bin_data_list,
+        encrypted,
+        compressed,
+        password,
+    );
 
     // Document 조립 (preview, extra_streams는 lenient에서 생략)
     let model_header = ModelFileHeader {
@@ -563,7 +750,14 @@ fn parse_hwp_with_lenient(
         preview: None,
         bin_data_content,
         extra_streams: Vec::new(),
+        is_hwpx_variant: false,
+        hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        provenance: crate::model::provenance::SourceProvenance {
+            format: crate::model::provenance::SourceFormat::Hwp5,
+            hwp3_lineage: false,
+            hwpx_lineage: false,
+        },
     };
 
     assign_auto_numbers(&mut doc);
@@ -589,10 +783,52 @@ fn parse_hwp_with_lenient(
     Ok(doc)
 }
 
+fn bin_data_should_compress(
+    compression: crate::model::bin_data::BinDataCompression,
+    document_compressed: bool,
+) -> bool {
+    use crate::model::bin_data::BinDataCompression;
+    match compression {
+        BinDataCompression::Default => document_compressed,
+        BinDataCompression::Compress => true,
+        BinDataCompression::NoCompress => false,
+    }
+}
+
+/// BinData 스트림의 실제 압축 여부를 판정한다.
+///
+/// 일반 HWP는 `HWPTAG_BIN_DATA`의 개별 압축 속성을 따른다. 반면 한컴이
+/// EncryptVersion 4로 저장한 암호 문서는 `NoCompress` BinData도 문서 전역
+/// `compressed` 플래그에 따라 압축한 뒤 암호화한다. 따라서 암호 문서에서 개별
+/// 속성을 따르면 복호화까지만 된 raw-deflate 바이트를 이미지로 오인하게 된다.
+fn bin_data_stream_is_compressed(
+    compression: crate::model::bin_data::BinDataCompression,
+    document_compressed: bool,
+    encrypted: bool,
+) -> bool {
+    if encrypted {
+        document_compressed
+    } else {
+        bin_data_should_compress(compression, document_compressed)
+    }
+}
+
+fn decode_encrypted_stream_limited(
+    raw: &[u8],
+    password: &[u8],
+    compressed: bool,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    crypto::decrypt_password_protected_limited(raw, password, compressed, max_bytes).ok()
+}
+
 /// LenientCfbReader로 BinData 로드
 fn load_bin_data_content_lenient(
     lenient: &cfb_reader::LenientCfbReader,
     bin_data_list: &[crate::model::bin_data::BinData],
+    encrypted: bool,
+    compressed: bool,
+    password: Option<&[u8]>,
 ) -> Vec<BinDataContent> {
     use crate::model::bin_data::BinDataType;
 
@@ -611,16 +847,37 @@ fn load_bin_data_content_lenient(
             bd.extension.as_deref().unwrap_or("dat")
         };
         let storage_name = format!("BIN{:04X}.{}", bd.storage_id, ext);
+        let stream_compressed =
+            bin_data_stream_is_compressed(bd.compression, compressed, encrypted);
 
         match lenient.read_stream(&storage_name) {
             Ok(data) => {
-                let mut decompressed = match cfb_reader::decompress_stream(&data) {
-                    Ok(d) => d,
-                    Err(_) => data,
+                let mut decompressed = if encrypted {
+                    let pwd = password.unwrap();
+                    match crypto::decrypt_password_protected_limited(
+                        &data,
+                        pwd,
+                        stream_compressed,
+                        crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "경고: BinData '{}' 복호화 실패 (lenient): {}",
+                                storage_name, e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    match cfb_reader::decompress_stream(&data) {
+                        Ok(d) => d,
+                        Err(_) => data,
+                    }
                 };
 
                 // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
-                if is_storage && decompressed.len() > 8 {
+                if is_storage && decompressed.len() >= 12 {
                     let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
                     if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
                         decompressed.drain(..4);
@@ -629,7 +886,7 @@ fn load_bin_data_content_lenient(
 
                 contents.push(BinDataContent {
                     id: bd.storage_id,
-                    data: decompressed,
+                    data: decompressed.into(),
                     extension: ext.to_string(),
                 });
             }
@@ -705,14 +962,17 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
         doc.doc_properties.equation_start_num.saturating_sub(1),
     ];
 
-    fn counter_index(t: AutoNumberType) -> usize {
+    fn counter_index(t: AutoNumberType) -> Option<usize> {
         match t {
-            AutoNumberType::Page => 0,
-            AutoNumberType::Footnote => 1,
-            AutoNumberType::Endnote => 2,
-            AutoNumberType::Picture => 3,
-            AutoNumberType::Table => 4,
-            AutoNumberType::Equation => 5,
+            AutoNumberType::Page => Some(0),
+            AutoNumberType::Footnote => Some(1),
+            AutoNumberType::Endnote => Some(2),
+            AutoNumberType::Picture => Some(3),
+            AutoNumberType::Table => Some(4),
+            AutoNumberType::Equation => Some(5),
+            // 총 쪽수는 페이지네이션이 끝난 뒤 결정되는 표시값이다. 일반 자동번호
+            // 카운터를 증가시키거나 NewNumber로 재설정할 대상이 아니다.
+            AutoNumberType::TotalPage => None,
         }
     }
 
@@ -743,16 +1003,42 @@ pub(crate) fn assign_auto_numbers(doc: &mut Document) {
 fn assign_auto_numbers_in_controls(
     controls: &mut [crate::model::control::Control],
     counters: &mut [u16; 6],
-    counter_index: fn(crate::model::control::AutoNumberType) -> usize,
+    counter_index: fn(crate::model::control::AutoNumberType) -> Option<usize>,
 ) {
     use crate::model::control::Control;
+
+    fn assign_caption_auto_numbers(
+        caption: &mut Option<crate::model::shape::Caption>,
+        counters: &mut [u16; 6],
+        counter_index: fn(crate::model::control::AutoNumberType) -> Option<usize>,
+    ) {
+        if let Some(caption) = caption {
+            for para in &mut caption.paragraphs {
+                assign_auto_numbers_in_controls(&mut para.controls, counters, counter_index);
+            }
+        }
+    }
+
+    fn assign_text_box_auto_numbers(
+        text_box: &mut Option<crate::model::shape::TextBox>,
+        counters: &mut [u16; 6],
+        counter_index: fn(crate::model::control::AutoNumberType) -> Option<usize>,
+    ) {
+        if let Some(text_box) = text_box {
+            for para in &mut text_box.paragraphs {
+                assign_auto_numbers_in_controls(&mut para.controls, counters, counter_index);
+            }
+        }
+    }
 
     for ctrl in controls.iter_mut() {
         match ctrl {
             Control::AutoNumber(an) => {
-                let idx = counter_index(an.number_type);
-                counters[idx] += 1;
-                an.assigned_number = counters[idx];
+                if let Some(idx) = counter_index(an.number_type) {
+                    counters[idx] += 1;
+                    an.assigned_number = counters[idx];
+                    an.number = counters[idx];
+                }
             }
             Control::Table(table) => {
                 // 표 내부 셀의 문단도 처리
@@ -766,61 +1052,125 @@ fn assign_auto_numbers_in_controls(
                     }
                 }
                 // 표 캡션 처리
-                if let Some(ref mut caption) = table.caption {
-                    for para in &mut caption.paragraphs {
-                        assign_auto_numbers_in_controls(
-                            &mut para.controls,
-                            counters,
-                            counter_index,
-                        );
-                    }
-                }
+                assign_caption_auto_numbers(&mut table.caption, counters, counter_index);
             }
             Control::Picture(pic) => {
                 // 그림 캡션 처리
-                if let Some(ref mut caption) = pic.caption {
-                    for para in &mut caption.paragraphs {
-                        assign_auto_numbers_in_controls(
-                            &mut para.controls,
+                assign_caption_auto_numbers(&mut pic.caption, counters, counter_index);
+            }
+            Control::Shape(shape) => {
+                use crate::model::shape::ShapeObject;
+
+                match shape.as_mut() {
+                    ShapeObject::Line(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
                             counters,
                             counter_index,
                         );
                     }
-                }
-            }
-            Control::Shape(shape) => {
-                // 묶음 개체(Group)의 캡션 처리
-                if let crate::model::shape::ShapeObject::Group(ref mut group) = shape.as_mut() {
-                    if let Some(ref mut caption) = group.caption {
-                        for para in &mut caption.paragraphs {
-                            assign_auto_numbers_in_controls(
-                                &mut para.controls,
-                                counters,
-                                counter_index,
-                            );
-                        }
+                    ShapeObject::Rectangle(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
                     }
-                }
-                // 도형(글상자 등) 캡션 처리
-                if let Some(ref mut drawing) = shape.drawing_mut() {
-                    if let Some(ref mut caption) = drawing.caption {
-                        for para in &mut caption.paragraphs {
-                            assign_auto_numbers_in_controls(
-                                &mut para.controls,
-                                counters,
-                                counter_index,
-                            );
-                        }
+                    ShapeObject::Ellipse(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
                     }
-                    // 글상자 내부 문단의 자동 번호 처리
-                    if let Some(ref mut text_box) = drawing.text_box {
-                        for para in &mut text_box.paragraphs {
-                            assign_auto_numbers_in_controls(
-                                &mut para.controls,
+                    ShapeObject::Arc(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
+                    }
+                    ShapeObject::Polygon(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
+                    }
+                    ShapeObject::Curve(s) => {
+                        assign_caption_auto_numbers(
+                            &mut s.drawing.caption,
+                            counters,
+                            counter_index,
+                        );
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
+                    }
+                    ShapeObject::Group(s) => {
+                        assign_caption_auto_numbers(&mut s.caption, counters, counter_index);
+                    }
+                    ShapeObject::Picture(s) => {
+                        assign_caption_auto_numbers(&mut s.caption, counters, counter_index);
+                    }
+                    ShapeObject::Chart(s) => {
+                        if s.caption.is_some() {
+                            assign_caption_auto_numbers(&mut s.caption, counters, counter_index);
+                        } else {
+                            assign_caption_auto_numbers(
+                                &mut s.drawing.caption,
                                 counters,
                                 counter_index,
                             );
                         }
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
+                    }
+                    ShapeObject::Ole(s) => {
+                        if s.caption.is_some() {
+                            assign_caption_auto_numbers(&mut s.caption, counters, counter_index);
+                        } else {
+                            assign_caption_auto_numbers(
+                                &mut s.drawing.caption,
+                                counters,
+                                counter_index,
+                            );
+                        }
+                        assign_text_box_auto_numbers(
+                            &mut s.drawing.text_box,
+                            counters,
+                            counter_index,
+                        );
                     }
                 }
             }
@@ -845,8 +1195,9 @@ fn assign_auto_numbers_in_controls(
                 }
             }
             Control::NewNumber(nn) => {
-                let idx = counter_index(nn.number_type);
-                counters[idx] = nn.number.saturating_sub(1);
+                if let Some(idx) = counter_index(nn.number_type) {
+                    counters[idx] = nn.number.saturating_sub(1);
+                }
             }
             _ => {}
         }
@@ -889,22 +1240,131 @@ impl DocumentParser for Hwp3Parser {
     }
 }
 
-/// 포맷 자동 감지 후 적절한 파서로 파싱
-pub fn parse_document(data: &[u8]) -> Result<Document, ParseError> {
+/// Standalone HWPML XML parser.
+pub struct HmlParser;
+
+impl DocumentParser for HmlParser {
+    fn parse(&self, data: &[u8]) -> Result<Document, ParseError> {
+        hml::parse_hml(data)
+            .map(|result| result.document)
+            .map_err(ParseError::from)
+    }
+}
+
+/// HML 입력에서만 제공되는 열기 메타데이터와 손실 진단.
+pub struct HmlImportMetadata {
+    pub hwpml_version: Option<String>,
+    pub sub_version: Option<String>,
+    pub style: Option<String>,
+    pub encoding: hml::HmlEncoding,
+    pub resource_count: usize,
+    pub warnings: Vec<hml::HmlWarning>,
+    pub preserved_fragments: Vec<hml::PreservedFragment>,
+}
+
+/// 공통 IR과 입력 포맷 전용 열기 메타데이터를 분리해 전달한다.
+pub struct ParsedDocument {
+    pub document: Document,
+    pub hml_metadata: Option<HmlImportMetadata>,
+}
+
+/// 포맷 자동 감지 후 공통 IR과 입력 메타데이터를 파싱한다.
+pub fn parse_document_with_metadata(data: &[u8]) -> Result<ParsedDocument, ParseError> {
+    parse_document_inner(data, None)
+}
+
+/// 포맷 자동 감지 후 비밀번호와 함께 파싱한다.
+///
+/// HWP5 EncryptVersion 4, 압축 HWP3, ODF AES-256-CBC HWPX 비밀번호 암호 문서를 연다.
+/// 비밀번호가 틀리면 암호 불일치/손상 오류를 반환한다. 암호화되지 않은 HWPX는 기존
+/// 파서 결과를 그대로 반환한다.
+pub fn parse_document_with_metadata_password(
+    data: &[u8],
+    password: &[u8],
+) -> Result<ParsedDocument, ParseError> {
+    parse_document_inner(data, Some(password))
+}
+
+fn parse_document_inner(
+    data: &[u8],
+    password: Option<&[u8]>,
+) -> Result<ParsedDocument, ParseError> {
     match detect_format(data) {
-        FileFormat::Hwp => HwpParser.parse(data),
-        FileFormat::Hwpx => HwpxParser.parse(data),
-        FileFormat::Hwp3 => Hwp3Parser.parse(data),
-        FileFormat::LegacyHwpml => Err(ParseError::UnsupportedFormat {
-            code: UNSUPPORTED_HWPML_CODE,
-            format: detect_legacy_hwpml_format_name(data),
-            hint: UNSUPPORTED_HWPML_HINT,
+        FileFormat::Hwp => parse_hwp_inner(data, password).map(without_hml_metadata),
+        FileFormat::Hwpx => match password {
+            Some(password) => hwpx::parse_hwpx_with_password(data, password),
+            None => hwpx::parse_hwpx(data),
+        }
+        .map_err(ParseError::from)
+        .map(without_hml_metadata),
+        FileFormat::Hwp3 => match password {
+            Some(password) => hwp3::parse_hwp3_with_password(data, password),
+            None => hwp3::parse_hwp3(data),
+        }
+        .map_err(ParseError::from)
+        .map(without_hml_metadata),
+        FileFormat::Hml => {
+            let result = hml::parse_hml(data).map_err(ParseError::from)?;
+            Ok(ParsedDocument {
+                document: result.document,
+                hml_metadata: Some(HmlImportMetadata {
+                    hwpml_version: result.metadata.hwpml_version,
+                    sub_version: result.metadata.sub_version,
+                    style: result.metadata.style,
+                    encoding: result.metadata.encoding,
+                    resource_count: result.metadata.resource_count,
+                    warnings: result.warnings,
+                    preserved_fragments: result.preserved_fragments,
+                }),
+            })
+        }
+        FileFormat::DrmProtected => Err(ParseError::UnsupportedFormat {
+            code: DRM_PROTECTED_CODE,
+            format: drm_format_name(data),
+            hint: DRM_PROTECTED_HINT,
+        }),
+        FileFormat::Empty => Err(ParseError::UnsupportedFormat {
+            code: EMPTY_FILE_CODE,
+            format: "빈 파일",
+            hint: EMPTY_FILE_HINT,
         }),
         FileFormat::Unknown => Err(ParseError::UnsupportedFormat {
             code: UNSUPPORTED_FILE_FORMAT_CODE,
             format: "알 수 없는 파일 형식",
             hint: SUPPORTED_FORMATS_HINT,
         }),
+    }
+}
+
+fn without_hml_metadata(document: Document) -> ParsedDocument {
+    ParsedDocument {
+        document,
+        hml_metadata: None,
+    }
+}
+
+/// 포맷 자동 감지 후 공통 IR만 반환하는 호환 진입점.
+pub fn parse_document(data: &[u8]) -> Result<Document, ParseError> {
+    parse_document_with_metadata(data).map(|parsed| parsed.document)
+}
+
+/// 포맷 자동 감지 후 비밀번호와 함께 공통 IR만 반환한다.
+///
+/// 비암호 문서와 다른 지원 포맷에서는 비밀번호를 무시한다. 암호화된 HWP5의
+/// EncryptVersion이 4가 아니면 `UnsupportedScheme`을 반환하며, HWP3는 압축
+/// 암호 본문, HWPX는 ODF AES-256-CBC/PBKDF2 패키지를 지원한다.
+pub fn parse_document_with_password(data: &[u8], password: &[u8]) -> Result<Document, ParseError> {
+    parse_document_with_metadata_password(data, password).map(|parsed| parsed.document)
+}
+
+/// DRM 벤더 시그니처로 사람이 읽을 이름을 고른다 (Issue #1982).
+fn drm_format_name(data: &[u8]) -> &'static str {
+    if data.starts_with(FASOO_DRM_SIG) {
+        "DRM 보호 문서 (Fasoo)"
+    } else if data.starts_with(SCDSA_SIG) {
+        "DRM 보호 문서 (SoftCamp SCDSA)"
+    } else {
+        "DRM 보호 문서"
     }
 }
 
@@ -1058,10 +1518,26 @@ fn detect_image_format(data: &[u8]) -> PreviewImageFormat {
 /// 이미 별도로 파싱되므로 제외한다.
 fn collect_extra_streams(
     cfb: &mut cfb_reader::CfbReader,
-    _bin_data_list: &[crate::model::bin_data::BinData],
+    bin_data_list: &[crate::model::bin_data::BinData],
+    bin_data_content: &[BinDataContent],
+    encrypted: bool,
+    password: Option<&[u8]>,
 ) -> Vec<(String, Vec<u8>)> {
     let all_streams = cfb.list_streams();
     let mut extra = Vec::new();
+
+    // [Task #1554] 직렬화기(`cfb_writer`)가 `bin_data_content` 로부터 재생성할
+    // /BinData 스트림 경로 집합. 직렬화기와 동일한 명명 규칙(`find_bin_data_info_with_compress`)
+    // 을 미러링하여 계산한다. 이 집합에 들어가지 않는 /BinData 스트림은 대응 BinData
+    // 레코드가 없는 "고아 스트림"(예: img-start-001 의 20개 BIN, interview.hwp 의 BIN0001)
+    // 이며, 그대로 두면 저장 시 통째 드롭된다. extra_streams 로 원본 바이트를 보존한다.
+    let emitted_bin_paths: std::collections::HashSet<String> = bin_data_content
+        .iter()
+        .map(|c| {
+            let (storage_id, ext) = serialized_bin_name(bin_data_list, c);
+            format!("/BinData/BIN{:04X}.{}", storage_id, ext)
+        })
+        .collect();
 
     for path in &all_streams {
         // 이미 파싱된 스트림은 제외
@@ -1069,15 +1545,26 @@ fn collect_extra_streams(
             || path == "/DocInfo"
             || path.starts_with("/BodyText/")
             || path.starts_with("/ViewText/")
-            || path.starts_with("/BinData/")
             || path == "/PrvImage"
             || path == "/PrvText"
         {
             continue;
         }
 
-        // 나머지 스트림 보존
-        if let Ok(data) = cfb.read_stream_raw(path) {
+        // /BinData 는 직렬화기가 재생성하는 스트림만 제외하고, 고아 스트림은 보존
+        if path.starts_with("/BinData/") && emitted_bin_paths.contains(path) {
+            continue;
+        }
+
+        // 비밀번호 암호화 대상 중 모델링하지 않는 스트림은 평문 raw 상태로 보존한다.
+        // 직렬화기는 암호화 플래그를 제거하므로 암호문을 그대로 보존하면 Scripts와
+        // 고아 BinData가 읽을 수 없는 상태로 저장된다.
+        if let Ok(mut data) = cfb.read_stream_raw(path) {
+            if encrypted && (path.starts_with("/Scripts/") || path.starts_with("/BinData/")) {
+                if let Some(password) = password {
+                    data = crypto::decrypt_password_stream(&data, password);
+                }
+            }
             extra.push((path.clone(), data));
         }
     }
@@ -1085,16 +1572,314 @@ fn collect_extra_streams(
     extra
 }
 
+/// 직렬화기가 `BinDataContent` 에 대해 생성할 스트림 이름의 (storage_id, ext) 계산.
+///
+/// `cfb_writer::find_bin_data_info_with_compress` 의 명명 규칙(매칭 레코드 우선,
+/// 없으면 content 자체값)을 미러링한다. extra_streams 의 고아 /BinData 판별 전용.
+fn serialized_bin_name<'a>(
+    bin_data_list: &'a [crate::model::bin_data::BinData],
+    content: &'a BinDataContent,
+) -> (u16, &'a str) {
+    use crate::model::bin_data::BinDataType;
+    for bd in bin_data_list {
+        if matches!(bd.data_type, BinDataType::Embedding | BinDataType::Storage)
+            && bd.storage_id == content.id
+        {
+            return (bd.storage_id, bd.extension.as_deref().unwrap_or("dat"));
+        }
+    }
+    (content.id, &content.extension)
+}
+
 /// BinData 스토리지에서 이미지 데이터 로드
 ///
 /// bin_data_list의 각 항목에 대해 CFB 스토리지에서 바이너리 데이터를 읽어온다.
 /// Embedding 타입인 경우에만 로드하며, 압축된 경우 해제한다.
+/// [Task #2263] HWP5 CFB 원본을 보유하고 요청 시점에 BinData 스트림을 압축 해제한다.
+///
+/// 파싱 시점에 모든 내장 이미지를 풀어 IR 에 상주시키면 원본 파일 크기의
+/// 수십 배 메모리를 쓰게 된다. CFB 안의 BinData 스트림은 zlib 압축 상태이므로,
+/// 원본 컨테이너만 들고 있다가 실제로 렌더·직렬화되는 항목만 그때 푼다.
+struct Hwp5BinResolver {
+    cfb: std::sync::Mutex<cfb_reader::CfbReader>,
+    /// 선두 4-byte size prefix 정규화가 필요한 OLE Storage 스트림명
+    ole_streams: std::collections::HashSet<String>,
+    /// 스트림별 압축 여부. HWPTAG_BIN_DATA 속성이 문서 전역 플래그보다 우선한다.
+    compressed_streams: std::collections::HashMap<String, bool>,
+    /// 비밀번호 암호 문서 여부 (FileHeader encrypted 플래그)
+    encrypted: bool,
+    /// 비밀번호 바이트. 지연 로딩이 파싱 이후 렌더 시점에 스트림을 읽으므로
+    /// 리졸버가 바이트를 소유해야 한다.
+    password: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for Hwp5BinResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Hwp5BinResolver")
+            .field("ole_streams", &self.ole_streams.len())
+            .field("compressed_streams", &self.compressed_streams.len())
+            .field("encrypted", &self.encrypted)
+            .finish()
+    }
+}
+
+impl Hwp5BinResolver {
+    /// raw BinData 바이트를 복호화(암호 문서)+압축 해제한다.
+    /// 비암호 문서에서 압축 해제 실패 시 원본을 그대로 반환한다(기존 동작).
+    fn try_decode(&self, key: &str, raw: &[u8]) -> Option<Vec<u8>> {
+        if self.encrypted {
+            let pwd = self.password.as_deref().unwrap_or(&[]);
+            let compressed = self.compressed_streams.get(key).copied().unwrap_or(false);
+            crypto::decrypt_password_protected_limited(
+                raw,
+                pwd,
+                compressed,
+                crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+            )
+            .ok()
+        } else {
+            match cfb_reader::decompress_stream(raw) {
+                Ok(d) => Some(d),
+                Err(_) => Some(raw.to_vec()),
+            }
+        }
+    }
+}
+
+impl crate::model::bin_data::BinDataResolver for Hwp5BinResolver {
+    fn resolve(&self, key: &str) -> Vec<u8> {
+        let mut cfb = match self.cfb.lock() {
+            Ok(c) => c,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let raw = match cfb.read_bin_data(key) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("경고: BinData '{}' 로드 실패: {}", key, e);
+                return Vec::new();
+            }
+        };
+
+        let mut decompressed = match self.try_decode(key, &raw) {
+            Some(d) => d,
+            None => {
+                eprintln!(
+                    "경고: BinData '{}' 복호화 실패 (비밀번호 불일치 또는 손상)",
+                    key
+                );
+                return Vec::new();
+            }
+        };
+
+        // Task #195 단계 6: OLE Storage는 해제 후 선두 4바이트 size prefix를 스킵하여
+        // 내부 CFB(`d0cf11e0...`) 시작 바이트부터 노출한다.
+        if self.ole_streams.contains(key) && decompressed.len() >= 12 {
+            let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
+                decompressed.drain(..4);
+            }
+        }
+
+        decompressed
+    }
+
+    fn resolve_limited(&self, key: &str, max_bytes: usize) -> Option<Vec<u8>> {
+        let mut cfb = match self.cfb.lock() {
+            Ok(cfb) => cfb,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        // 암호 문서는 블록 단위 복호화가 전체 스트림을 요구하므로 제한 없이 읽는다.
+        let raw = if self.encrypted {
+            match cfb.read_bin_data(key) {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("경고: BinData '{}' bounded 로드 실패: {}", key, error);
+                    return None;
+                }
+            }
+        } else {
+            match cfb.read_bin_data_limited(key, max_bytes) {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("경고: BinData '{}' bounded 로드 실패: {}", key, error);
+                    return None;
+                }
+            }
+        };
+
+        let mut bytes = if self.encrypted {
+            let password = self.password.as_deref().unwrap_or(&[]);
+            let compressed = self.compressed_streams.get(key).copied().unwrap_or(false);
+            decode_encrypted_stream_limited(&raw, password, compressed, max_bytes)?
+        } else {
+            match cfb_reader::decompress_stream_limited(&raw, max_bytes) {
+                Ok(data) => data,
+                Err(cfb_reader::CfbError::LimitExceeded(_)) => return None,
+                Err(_) => raw,
+            }
+        };
+        if self.ole_streams.contains(key) && bytes.len() >= 12 {
+            let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            if bytes[..8] != cfb_magic && bytes[4..12] == cfb_magic {
+                bytes.drain(..4);
+            }
+        }
+        (bytes.len() <= max_bytes).then_some(bytes)
+    }
+
+    /// [#2550] 저장된 형태 그대로의 바이트 — 압축 해제 없이 반환한다.
+    ///
+    /// 복호화는 크기 1:1 변환이라 deflate bomb 위험이 없으므로 수행한다. 반환
+    /// 바이트는 원본 스트림과 같은 압축 상태이며, OLE size prefix 도 (압축 안에)
+    /// 그대로 들어 있다 — 저장 경로가 이 바이트를 그대로 기록하면 왕복 무손실이다.
+    fn resolve_raw(&self, key: &str) -> Option<crate::model::bin_data::StoredBinData> {
+        let raw = {
+            let mut cfb = match self.cfb.lock() {
+                Ok(cfb) => cfb,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match cfb.read_bin_data(key) {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("경고: BinData '{}' 원본 로드 실패: {}", key, error);
+                    return None;
+                }
+            }
+        };
+        let bytes = if self.encrypted {
+            let password = self.password.as_deref().unwrap_or(&[]);
+            // `decrypt_hwp5_stream` 은 입력 길이로 truncate 하므로 크기가 보존된다.
+            crypto::decrypt_password_stream(&raw, password)
+        } else {
+            raw
+        };
+        Some(crate::model::bin_data::StoredBinData {
+            compressed: self.compressed_streams.get(key).copied().unwrap_or(false),
+            bytes,
+        })
+    }
+
+    /// [#2550] `resolve().len()` 의 bounded 미러 — 출력을 materialize 하지 않는다.
+    ///
+    /// 상한(비암호 [`MAX_BIN_DATA_BYTES`](crate::model::bin_data::MAX_BIN_DATA_BYTES),
+    /// 암호 `MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES`) 초과 항목은 bounded 로드 경로가
+    /// placeholder 로 접으므로 길이도 0 으로 보고한다.
+    fn resolved_len(&self, key: &str) -> usize {
+        let raw = {
+            let mut cfb = match self.cfb.lock() {
+                Ok(cfb) => cfb,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match cfb.read_bin_data(key) {
+                Ok(data) => data,
+                Err(_) => return 0,
+            }
+        };
+
+        let stream_compressed = self.compressed_streams.get(key).copied().unwrap_or(false);
+        let (plain, len) = if self.encrypted {
+            // 복호화(1:1) 후 압축 여부에 따라 길이만 센다. resolve() 는 오류·상한
+            // 초과 시 빈 값을 반환하므로 길이도 0 이다.
+            let password = self.password.as_deref().unwrap_or(&[]);
+            let plain = crypto::decrypt_password_stream(&raw, password);
+            let len = if stream_compressed {
+                match cfb_reader::decompressed_len_capped(
+                    &plain,
+                    crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+                ) {
+                    Ok(len) => len,
+                    Err(_) => return 0,
+                }
+            } else if plain.len() > crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES {
+                return 0;
+            } else {
+                plain.len()
+            };
+            (plain, len)
+        } else {
+            let len = match cfb_reader::decompressed_len_capped(
+                &raw,
+                crate::model::bin_data::MAX_BIN_DATA_BYTES,
+            ) {
+                Ok(len) => len,
+                Err(cfb_reader::CfbError::LimitExceeded(_)) => return 0,
+                // 해제 실패 시 원본 바이트를 그대로 노출하는 resolve() 를 미러링.
+                Err(_) => raw.len(),
+            };
+            (raw, len)
+        };
+
+        // resolve() 의 OLE size prefix strip 을 선두 12바이트만 해제해 미러링한다.
+        if len >= 12 && self.ole_streams.contains(key) {
+            let head = if self.encrypted && !stream_compressed {
+                plain.get(..12).map(<[u8]>::to_vec).unwrap_or_default()
+            } else {
+                cfb_reader::decompress_stream_prefix(&plain, 12)
+                    .unwrap_or_else(|_| plain.get(..12).map(<[u8]>::to_vec).unwrap_or_default())
+            };
+            let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            if head.len() >= 12 && head[..8] != cfb_magic && head[4..12] == cfb_magic {
+                return len - 4;
+            }
+        }
+        len
+    }
+
+    /// [#2550] 상한 초과 항목은 placeholder(빈 값) 의미이므로 길이 0 판정을 공유한다.
+    fn resolved_is_empty(&self, key: &str) -> bool {
+        self.resolved_len(key) == 0
+    }
+}
+
 fn load_bin_data_content(
     cfb: &mut cfb_reader::CfbReader,
+    data: &[u8],
     bin_data_list: &[crate::model::bin_data::BinData],
-    _compressed: bool,
+    compressed: bool,
+    encrypted: bool,
+    password: Option<&[u8]>,
 ) -> Vec<BinDataContent> {
     use crate::model::bin_data::BinDataType;
+
+    // 지연 로딩 리졸버가 참조할 OLE Storage 스트림 집합을 먼저 구성한다.
+    let mut ole_streams = std::collections::HashSet::new();
+    let mut compressed_streams = std::collections::HashMap::new();
+    for bd in bin_data_list.iter() {
+        if matches!(bd.data_type, BinDataType::Embedding | BinDataType::Storage) {
+            let ext = if bd.data_type == BinDataType::Storage {
+                bd.extension.as_deref().unwrap_or("OLE")
+            } else {
+                bd.extension.as_deref().unwrap_or("dat")
+            };
+            let storage_name = format!("BIN{:04X}.{}", bd.storage_id, ext);
+            if bd.data_type == BinDataType::Storage {
+                ole_streams.insert(storage_name.clone());
+            }
+            compressed_streams.insert(
+                storage_name,
+                bin_data_stream_is_compressed(bd.compression, compressed, encrypted),
+            );
+        }
+    }
+
+    let resolver: Option<std::sync::Arc<dyn crate::model::bin_data::BinDataResolver>> =
+        match cfb_reader::CfbReader::open(data) {
+            Ok(reader) => Some(std::sync::Arc::new(Hwp5BinResolver {
+                cfb: std::sync::Mutex::new(reader),
+                ole_streams,
+                compressed_streams,
+                encrypted,
+                password: password.map(|p| p.to_vec()),
+            })),
+            Err(e) => {
+                // 리졸버를 못 열면 지연 로딩 불가 — 기존처럼 즉시 로드로 폴백한다.
+                eprintln!(
+                    "경고: BinData 지연 로딩 리졸버 생성 실패: {} — 즉시 로드로 폴백",
+                    e
+                );
+                None
+            }
+        };
 
     let mut contents = Vec::new();
 
@@ -1114,18 +1899,60 @@ fn load_bin_data_content(
             bd.extension.as_deref().unwrap_or("dat")
         };
         let storage_name = format!("BIN{:04X}.{}", bd.storage_id, ext);
+        let stream_compressed =
+            bin_data_stream_is_compressed(bd.compression, compressed, encrypted);
+
+        // [Task #2263] 스트림 존재만 확인하고(압축 해제 없이) 지연 등록한다.
+        //
+        // 기존 동작은 읽기 실패 시 항목을 배열에 넣지 않고 건너뛴다. 이 의미를
+        // 보존해야 위치 기반 조회(`find_bin_data` 의 `get(id-1)`)와 왕복 길이
+        // 비교가 깨지지 않으므로, `has_stream` 으로 존재 여부만 미리 확인한다.
+        if let Some(resolver) = resolver.as_ref() {
+            if !cfb.has_stream(&format!("/BinData/{}", storage_name)) {
+                eprintln!("경고: BinData '{}' 스트림 없음", storage_name);
+                continue;
+            }
+            contents.push(BinDataContent {
+                id: bd.storage_id,
+                data: crate::model::bin_data::BinDataBytes::Lazy {
+                    resolver: resolver.clone(),
+                    key: storage_name.clone(),
+                },
+                extension: ext.to_string(),
+            });
+            continue;
+        }
 
         match cfb.read_bin_data(&storage_name) {
             Ok(data) => {
-                // 압축된 BinData 해제 시도
-                let mut decompressed = match cfb_reader::decompress_stream(&data) {
-                    Ok(d) => d,
-                    Err(_) => data, // 압축 해제 실패 시 원본 사용 (비압축 데이터)
+                // 암호 문서: 복호화+압축해제. 그 외: 압축 해제 시도 (실패 시 원본).
+                let mut decompressed = if encrypted {
+                    let pwd = password.unwrap();
+                    match crypto::decrypt_password_protected_limited(
+                        &data,
+                        pwd,
+                        stream_compressed,
+                        crypto::MAX_PASSWORD_DECOMPRESSED_STREAM_BYTES,
+                    ) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "경고: BinData '{}' 복호화 실패 (비밀번호 불일치?): {}",
+                                storage_name, e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    match cfb_reader::decompress_stream(&data) {
+                        Ok(d) => d,
+                        Err(_) => data, // 압축 해제 실패 시 원본 사용 (비압축 데이터)
+                    }
                 };
 
                 // Task #195 단계 6: OLE Storage는 해제 후 선두 4바이트 size prefix를 스킵하여
                 // 내부 CFB(`d0cf11e0...`) 시작 바이트부터 노출한다.
-                if is_storage && decompressed.len() > 8 {
+                if is_storage && decompressed.len() >= 12 {
                     // CFB 매직이 바로 시작하면 prefix 없음
                     let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
                     if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
@@ -1135,7 +1962,7 @@ fn load_bin_data_content(
 
                 contents.push(BinDataContent {
                     id: bd.storage_id,
-                    data: decompressed,
+                    data: decompressed.into(),
                     extension: ext.to_string(),
                 });
             }
@@ -1151,6 +1978,157 @@ fn load_bin_data_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn document_with_number_controls(controls: Vec<crate::model::control::Control>) -> Document {
+        let mut paragraph = crate::model::paragraph::Paragraph::default();
+        paragraph.controls = controls;
+
+        let mut section = crate::model::document::Section::default();
+        section.paragraphs.push(paragraph);
+
+        let mut document = Document::default();
+        document.doc_properties.page_start_num = 1;
+        document.sections.push(section);
+        document
+    }
+
+    fn auto_number_values(
+        document: &Document,
+    ) -> Vec<(crate::model::control::AutoNumberType, u16, u16)> {
+        use crate::model::control::Control;
+
+        document.sections[0].paragraphs[0]
+            .controls
+            .iter()
+            .filter_map(|control| match control {
+                Control::AutoNumber(auto_number) => Some((
+                    auto_number.number_type,
+                    auto_number.number,
+                    auto_number.assigned_number,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn total_page_auto_number_does_not_advance_page_counter() {
+        use crate::model::control::{AutoNumber, AutoNumberType, Control};
+
+        let mut document = document_with_number_controls(vec![
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::Page,
+                ..Default::default()
+            }),
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::TotalPage,
+                number: 8,
+                assigned_number: 8,
+                ..Default::default()
+            }),
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::Page,
+                ..Default::default()
+            }),
+        ]);
+
+        assign_auto_numbers(&mut document);
+
+        assert_eq!(
+            auto_number_values(&document),
+            vec![
+                (AutoNumberType::Page, 1, 1),
+                (AutoNumberType::TotalPage, 8, 8),
+                (AutoNumberType::Page, 2, 2),
+            ],
+            "TotalPage 표시값은 보존되고 뒤 Page 번호는 연속이어야 한다"
+        );
+    }
+
+    #[test]
+    fn total_page_new_number_does_not_reset_page_counter() {
+        use crate::model::control::{AutoNumber, AutoNumberType, Control, NewNumber};
+
+        let mut document = document_with_number_controls(vec![
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::Page,
+                ..Default::default()
+            }),
+            Control::NewNumber(NewNumber {
+                number_type: AutoNumberType::TotalPage,
+                number: 99,
+            }),
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::Page,
+                ..Default::default()
+            }),
+            Control::NewNumber(NewNumber {
+                number_type: AutoNumberType::Page,
+                number: 10,
+            }),
+            Control::AutoNumber(AutoNumber {
+                number_type: AutoNumberType::Page,
+                ..Default::default()
+            }),
+        ]);
+
+        assign_auto_numbers(&mut document);
+
+        assert_eq!(
+            auto_number_values(&document),
+            vec![
+                (AutoNumberType::Page, 1, 1),
+                (AutoNumberType::Page, 2, 2),
+                (AutoNumberType::Page, 10, 10),
+            ],
+            "NewNumber(TotalPage)는 Page 카운터에 영향이 없고 NewNumber(Page)는 유지돼야 한다"
+        );
+    }
+
+    /// [#1880 v2] HWP3-origin 비율 휴리스틱 대상 문서(문단>50, 저-스타일 비율)
+    /// 를 합성해, HWPX-변환본 마커(is_hwpx_variant) 유무에 따라 margin_bottom
+    /// 보정(-1600)이 갈리는지 확인한다. 마커 있으면 보정 오발동 금지.
+    fn hwp3_ratio_suspect_doc() -> Document {
+        let mut doc = Document::default();
+        doc.doc_info
+            .para_shapes
+            .push(crate::model::style::ParaShape::default()); // ps_ratio = 1/60
+        doc.doc_info
+            .char_shapes
+            .push(crate::model::style::CharShape::default()); // cs_ratio = 1/60
+        let mut section = crate::model::document::Section::default();
+        section.section_def.page_def.margin_bottom = 4252;
+        for _ in 0..60 {
+            section
+                .paragraphs
+                .push(crate::model::paragraph::Paragraph::default());
+        }
+        doc.sections.push(section);
+        doc
+    }
+
+    #[test]
+    fn issue1880v2_hwp3_fixup_applies_to_native() {
+        let mut doc = hwp3_ratio_suspect_doc();
+        assert!(!doc.is_hwpx_variant);
+        apply_hwp3_origin_fixup(&mut doc);
+        assert_eq!(
+            doc.sections[0].section_def.page_def.margin_bottom,
+            4252 - 1600,
+            "native HWP5 의심본은 종전대로 margin_bottom 보정"
+        );
+    }
+
+    #[test]
+    fn issue1880v2_hwp3_fixup_skipped_for_hwpx_variant() {
+        let mut doc = hwp3_ratio_suspect_doc();
+        doc.is_hwpx_variant = true;
+        apply_hwp3_origin_fixup(&mut doc);
+        assert_eq!(
+            doc.sections[0].section_def.page_def.margin_bottom, 4252,
+            "rhwp HWPX→HWP 변환본(마커)은 HWP3-origin 보정 오발동 금지 (#1880 v2, 2959953)"
+        );
+    }
 
     #[test]
     fn test_parse_hwp_too_small() {
@@ -1206,7 +2184,33 @@ mod tests {
     #[test]
     fn test_detect_format_too_short() {
         assert_eq!(detect_format(&[0x50, 0x4B]), FileFormat::Unknown);
-        assert_eq!(detect_format(&[]), FileFormat::Unknown);
+    }
+
+    #[test]
+    fn issue1982_detect_empty_file() {
+        assert_eq!(detect_format(&[]), FileFormat::Empty);
+        let err = parse_document(&[]).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnsupportedFormat { code, .. } if *code == EMPTY_FILE_CODE),
+            "empty file → EMPTY_FILE: {err}"
+        );
+    }
+
+    #[test]
+    fn issue1982_detect_drm_containers() {
+        // Fasoo DRM
+        let fasoo = b"\x9b DRMONE  This Document is encrypted and protected by Fasoo DRM";
+        assert_eq!(detect_format(fasoo), FileFormat::DrmProtected);
+        // SoftCamp SCDSA
+        let scdsa = b"SCDSA002\x00\x00\xd0\x04";
+        assert_eq!(detect_format(scdsa), FileFormat::DrmProtected);
+        let err = parse_document(fasoo).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::UnsupportedFormat { code, .. } if *code == DRM_PROTECTED_CODE),
+            "DRM → DRM_PROTECTED: {err}"
+        );
+        assert_eq!(drm_format_name(fasoo), "DRM 보호 문서 (Fasoo)");
+        assert_eq!(drm_format_name(scdsa), "DRM 보호 문서 (SoftCamp SCDSA)");
     }
 
     #[test]
@@ -1234,13 +2238,13 @@ mod tests {
     fn test_detect_format_legacy_hwpml_21() {
         let hwpml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <HWPML Version="2.1"></HWPML>"#;
-        assert_eq!(detect_format(hwpml), FileFormat::LegacyHwpml);
+        assert_eq!(detect_format(hwpml), FileFormat::Hml);
     }
 
     #[test]
-    fn test_detect_format_legacy_hwpml_with_bom_and_space() {
+    fn test_detect_format_rejects_lowercase_generic_xml_root() {
         let hwpml = b"\xEF\xBB\xBF  \n<?xml version='1.0'?><hwpml version='2.1'></hwpml>";
-        assert_eq!(detect_format(hwpml), FileFormat::LegacyHwpml);
+        assert_eq!(detect_format(hwpml), FileFormat::Unknown);
     }
 
     #[test]
@@ -1258,21 +2262,34 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_document_legacy_hwpml_returns_unsupported_code() {
+    fn test_parse_document_reports_unsupported_hwpml_version() {
         let hwpml = br#"<?xml version="1.0" encoding="UTF-8"?>
 <HWPML Version="2.1"></HWPML>"#;
         let err = parse_document(hwpml).unwrap_err();
         match err {
-            ParseError::UnsupportedFormat { code, format, hint } => {
-                assert_eq!(code, "UNSUPPORTED_HWPML");
-                assert_eq!(format, "HWPML 2.1");
-                assert!(
-                    hint.contains("HWP 5.0"),
-                    "hint must explain support: {hint}"
-                );
+            ParseError::HmlError(hml::HmlError::UnsupportedVersion(version)) => {
+                assert_eq!(version, "2.1");
             }
-            other => panic!("expected UnsupportedFormat, got {other:?}"),
+            other => panic!("expected HML unsupported version, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_document_with_metadata_preserves_hml_import_diagnostics() {
+        let parsed =
+            parse_document_with_metadata(include_bytes!("../../samples/hml/formatting_table.hml"))
+                .expect("real HML fixture should parse");
+        let metadata = parsed
+            .hml_metadata
+            .expect("HML import metadata should be retained");
+
+        assert_eq!(metadata.hwpml_version.as_deref(), Some("2.91"));
+        assert_eq!(metadata.encoding, hml::HmlEncoding::Utf8);
+        assert_eq!(metadata.resource_count, 0);
+        assert!(metadata
+            .warnings
+            .iter()
+            .any(|warning| warning.xml_path == "/HWPML/TAIL/SCRIPTCODE"));
     }
 
     #[test]
@@ -1325,5 +2342,334 @@ mod tests {
         }
         let result = MockParser.parse(&[]);
         assert!(result.is_err());
+    }
+
+    fn set_password_header(data: &[u8], encrypt_version: u32) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let mut compound =
+            cfb::CompoundFile::open(std::io::Cursor::new(data.to_vec())).expect("cfb open");
+        let mut header = Vec::new();
+        {
+            let mut stream = compound
+                .open_stream("/FileHeader")
+                .expect("FileHeader 스트림");
+            stream.read_to_end(&mut header).unwrap();
+        }
+        let flags = u32::from_le_bytes(header[36..40].try_into().unwrap()) | 0x02;
+        header[36..40].copy_from_slice(&flags.to_le_bytes());
+        header[44..48].copy_from_slice(&encrypt_version.to_le_bytes());
+        {
+            let mut stream = compound
+                .create_stream("/FileHeader")
+                .expect("FileHeader 갱신");
+            stream.seek(SeekFrom::Start(0)).unwrap();
+            stream.write_all(&header).unwrap();
+        }
+        compound.into_inner().into_inner()
+    }
+
+    fn add_raw_streams(data: &[u8], streams: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut compound =
+            cfb::CompoundFile::open(std::io::Cursor::new(data.to_vec())).expect("cfb open");
+        for (path, payload) in streams {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                compound.create_storage_all(parent).unwrap();
+            }
+            let mut stream = compound.create_stream(path).expect("테스트 스트림 생성");
+            stream.write_all(payload).unwrap();
+        }
+        compound.into_inner().into_inner()
+    }
+
+    fn raw_deflate(data: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn encrypt_hwp_streams_for_test(data: &[u8], password: &[u8]) -> Vec<u8> {
+        use std::io::{Read, Write};
+
+        let mut compound =
+            cfb::CompoundFile::open(std::io::Cursor::new(data.to_vec())).expect("cfb open");
+        let encrypted_paths: Vec<String> = compound
+            .walk()
+            .filter(|entry| entry.is_stream())
+            .map(|entry| entry.path().to_string_lossy().replace('\\', "/"))
+            .filter(|path| {
+                path == "/DocInfo"
+                    || path.starts_with("/BodyText/")
+                    || path.starts_with("/ViewText/")
+                    || path.starts_with("/BinData/")
+                    || path.starts_with("/Scripts/")
+            })
+            .collect();
+
+        for path in encrypted_paths {
+            let mut raw = Vec::new();
+            {
+                let mut stream = compound.open_stream(&path).expect("암호화 대상 스트림");
+                stream.read_to_end(&mut raw).unwrap();
+            }
+            let encrypted = crypto::encrypt_password_stream_for_test(&raw, password);
+            let mut stream = compound.create_stream(&path).expect("암호문 스트림 갱신");
+            stream.write_all(&encrypted).unwrap();
+        }
+
+        let bytes = compound.into_inner().into_inner();
+        set_password_header(&bytes, crypto::SUPPORTED_PASSWORD_ENCRYPT_VERSION)
+    }
+
+    fn extra_stream_payload<'a>(doc: &'a Document, path: &str) -> &'a [u8] {
+        doc.extra_streams
+            .iter()
+            .find(|(candidate, _)| candidate == path)
+            .map(|(_, data)| data.as_slice())
+            .unwrap_or_else(|| panic!("추가 스트림 없음: {path}"))
+    }
+
+    fn total_paragraphs(doc: &Document) -> usize {
+        doc.sections
+            .iter()
+            .map(|section| section.paragraphs.len())
+            .sum()
+    }
+
+    /// 비밀번호 암호 라우팅 검증: 일반 샘플의 FileHeader 에서 encrypted 비트와
+    /// EncryptVersion만 켠 변형을 만들어 (스트림 자체는 암호화하지 않음)
+    /// 파서의 분기를 확인한다.
+    ///
+    /// - 비밀번호 없음 → ParseError::EncryptedDocument
+    /// - 비밀번호 제공(틀림) → 실제 복호화 시도 후 WrongPassword (압축 해제 실패)
+    /// - 원본은 여전히 정상 파싱 (회귀 없음)
+    #[test]
+    fn test_encrypted_flag_routes_password_paths() {
+        let original = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        // 원본 정상 파싱 (회귀 가드)
+        assert!(parse_document(&original).is_ok(), "원본은 파싱되어야 함");
+
+        let modified = set_password_header(&original, crypto::SUPPORTED_PASSWORD_ENCRYPT_VERSION);
+
+        // 1) 비밀번호 없음 → EncryptedDocument
+        match parse_document(&modified) {
+            Err(ParseError::EncryptedDocument) => {}
+            Err(e) => panic!("비밀번호 없는 암호 문서는 EncryptedDocument 이어야 함: {e}"),
+            Ok(_) => panic!("encrypted 플래그가 켜졌으면 파싱이 성공하면 안 됨"),
+        }
+
+        // 2) 비밀번호 제공 (스트림이 실제로 암호화되지 않았으므로 복호화 결과는 쓰레기
+        //    → 압축 해제 실패 → CryptoError::WrongPassword)
+        match parse_document_with_metadata_password(&modified, b"any-password") {
+            Err(ParseError::CryptoError(crypto::CryptoError::WrongPassword)) => {}
+            Err(e) => panic!("틀린 비밀번호는 WrongPassword 여야 함 (다른 에러): {e}"),
+            Ok(_) => panic!("틀린 비밀번호인데 파싱이 성공하면 안 됨"),
+        }
+    }
+
+    #[test]
+    fn test_encrypted_document_rejects_unsupported_encrypt_version() {
+        let original = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let modified = set_password_header(&original, 3);
+
+        assert!(matches!(
+            parse_document_with_password(&modified, b"password"),
+            Err(ParseError::CryptoError(
+                crypto::CryptoError::UnsupportedScheme { encrypt_version: 3 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_encrypted_stream_limited_decode_enforces_decompression_bound() {
+        const PASSWORD: &[u8] = b"bounded-password";
+        let plaintext = vec![b'A'; 4096];
+        let compressed = raw_deflate(&plaintext);
+        let encrypted = crypto::encrypt_password_stream_for_test(&compressed, PASSWORD);
+
+        assert!(
+            decode_encrypted_stream_limited(&encrypted, PASSWORD, true, 1024).is_none(),
+            "압축 해제 결과가 상한을 넘으면 materialize하지 않아야 함"
+        );
+        assert_eq!(
+            decode_encrypted_stream_limited(&encrypted, PASSWORD, true, plaintext.len()).unwrap(),
+            plaintext
+        );
+    }
+
+    #[test]
+    fn test_password_encrypted_uncompressed_hwp_detects_wrong_password() {
+        const PASSWORD: &[u8] = b"uncompressed-password";
+
+        let mut source_doc = Document::default();
+        source_doc.header.version = crate::model::document::HwpVersion {
+            major: 5,
+            minor: 0,
+            build: 1,
+            revision: 7,
+        };
+        source_doc.doc_properties.section_count = 1;
+        source_doc.sections.push(crate::model::document::Section {
+            paragraphs: vec![crate::model::paragraph::Paragraph {
+                text: "비압축".to_string(),
+                char_count: 4,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let uncompressed =
+            crate::serializer::serialize_document(&source_doc).expect("비압축 기준 HWP");
+        let baseline = parse_document(&uncompressed).expect("비압축 기준 재파싱");
+        let encrypted = encrypt_hwp_streams_for_test(&uncompressed, PASSWORD);
+
+        assert!(matches!(
+            parse_document_with_password(&encrypted, b"wrong-password"),
+            Err(ParseError::CryptoError(crypto::CryptoError::WrongPassword))
+        ));
+        let decrypted =
+            parse_document_with_password(&encrypted, PASSWORD).expect("비압축 암호 HWP 파싱");
+        assert_eq!(decrypted.sections.len(), baseline.sections.len());
+        assert_eq!(total_paragraphs(&decrypted), total_paragraphs(&baseline));
+    }
+
+    #[test]
+    fn test_password_encrypted_hwp_full_stream_roundtrip() {
+        use crate::model::bin_data::{
+            BinData, BinDataCompression, BinDataContent, BinDataStatus, BinDataType,
+        };
+
+        const PASSWORD: &[u8] = "한글-password".as_bytes();
+        const SCRIPT_TEXT: &[u8] = b"function OnDocumentOpen() { return 7; }";
+        const ORPHAN_TEXT: &[u8] = b"orphan BinData preserved after password decryption";
+        const BIN_PAYLOAD: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+
+        // 권위 샘플을 한 번 정상 파싱한 뒤, 문서 전역 compressed=true와 반대인
+        // NoCompress BinData를 추가해 스트림별 압축 속성도 함께 검증한다.
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let mut source_doc = parse_document(&source).expect("원본 파싱");
+        let storage_id = source_doc
+            .doc_info
+            .bin_data_list
+            .iter()
+            .map(|item| item.storage_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        source_doc.doc_info.bin_data_list.push(BinData {
+            raw_data: None,
+            attr: 0x0021, // Embedding + NoCompress
+            data_type: BinDataType::Embedding,
+            compression: BinDataCompression::NoCompress,
+            status: BinDataStatus::NotAccessed,
+            abs_path: None,
+            rel_path: None,
+            storage_id,
+            extension: Some("pwdtest".to_string()),
+        });
+        source_doc.bin_data_content.push(BinDataContent {
+            id: storage_id,
+            data: BIN_PAYLOAD.to_vec().into(),
+            extension: "pwdtest".to_string(),
+        });
+        source_doc.doc_info.raw_stream_dirty = true;
+
+        let serialized = crate::serializer::serialize_document(&source_doc).expect("기준 HWP 생성");
+        let script_raw = raw_deflate(SCRIPT_TEXT);
+        let orphan_raw = raw_deflate(ORPHAN_TEXT);
+        let with_extras = add_raw_streams(
+            &serialized,
+            &[
+                ("/Scripts/PasswordTest", &script_raw),
+                ("/BinData/ORPHAN.pwd", &orphan_raw),
+            ],
+        );
+        let baseline = parse_document(&with_extras).expect("기준 HWP 재파싱");
+
+        // 실제 한컴 EncryptVersion 4 저장 동작은 BIN_DATA attr이 NoCompress여도
+        // 문서 전역 compressed=true이면 BinData를 raw-deflate한 뒤 암호화한다.
+        // 일반 HWP 기준본은 NoCompress를 유지하고, 암호화 입력만 이 on-disk
+        // 형태로 바꿔 실제 파일의 압축 계약을 재현한다.
+        let password_bin_path = format!("/BinData/BIN{:04X}.pwdtest", storage_id);
+        let password_bin_raw = raw_deflate(BIN_PAYLOAD);
+        let password_layout = add_raw_streams(
+            &with_extras,
+            &[(password_bin_path.as_str(), password_bin_raw.as_slice())],
+        );
+        let encrypted = encrypt_hwp_streams_for_test(&password_layout, PASSWORD);
+
+        assert!(matches!(
+            parse_document(&encrypted),
+            Err(ParseError::EncryptedDocument)
+        ));
+        assert!(matches!(
+            parse_document_with_password(&encrypted, b"wrong-password"),
+            Err(ParseError::CryptoError(crypto::CryptoError::WrongPassword))
+        ));
+
+        let decrypted =
+            parse_document_with_password(&encrypted, PASSWORD).expect("암호 HWP 전체 파싱");
+        assert_eq!(decrypted.sections.len(), baseline.sections.len());
+        assert_eq!(total_paragraphs(&decrypted), total_paragraphs(&baseline));
+        assert_eq!(
+            decrypted
+                .bin_data_content
+                .iter()
+                .find(|content| content.id == storage_id)
+                .expect("NoCompress BinData")
+                .data
+                .load(),
+            BIN_PAYLOAD
+        );
+        assert_eq!(
+            cfb_reader::decompress_stream(extra_stream_payload(
+                &decrypted,
+                "/Scripts/PasswordTest"
+            ))
+            .expect("Scripts 평문 raw-deflate"),
+            SCRIPT_TEXT
+        );
+        assert_eq!(
+            cfb_reader::decompress_stream(extra_stream_payload(&decrypted, "/BinData/ORPHAN.pwd"))
+                .expect("고아 BinData 평문 raw-deflate"),
+            ORPHAN_TEXT
+        );
+
+        // 암호화 쓰기는 지원하지 않으므로 저장 결과는 일반 HWP로 강하한다.
+        // 이때 플래그뿐 아니라 EncryptVersion과 보존 스트림 암호문도 정리돼야 한다.
+        let saved = crate::serializer::serialize_document(&decrypted).expect("복호 문서 저장");
+        let mut saved_cfb = cfb_reader::CfbReader::open(&saved).expect("저장 CFB");
+        let saved_header =
+            header::parse_file_header(&saved_cfb.read_file_header().unwrap()).unwrap();
+        assert!(!saved_header.flags.encrypted);
+        assert_eq!(saved_header.encrypt_version, 0);
+
+        let reparsed = parse_document(&saved).expect("저장 결과 비밀번호 없이 재파싱");
+        assert_eq!(
+            reparsed
+                .bin_data_content
+                .iter()
+                .find(|content| content.id == storage_id)
+                .expect("저장 NoCompress BinData")
+                .data
+                .load(),
+            BIN_PAYLOAD
+        );
+        assert_eq!(
+            cfb_reader::decompress_stream(extra_stream_payload(&reparsed, "/Scripts/PasswordTest"))
+                .expect("저장 Scripts"),
+            SCRIPT_TEXT
+        );
+        assert_eq!(
+            cfb_reader::decompress_stream(extra_stream_payload(&reparsed, "/BinData/ORPHAN.pwd"))
+                .expect("저장 고아 BinData"),
+            ORPHAN_TEXT
+        );
     }
 }

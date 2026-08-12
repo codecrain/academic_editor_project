@@ -73,6 +73,11 @@ function ptToRaw(pt: number): number {
   return Math.round(pt * HWPUNIT_PER_PT);
 }
 
+/** 줄 간격 입력값을 lineSpacingInput의 min/max(0~9999)로 클램프 */
+function clampLineSpacing(value: number): number {
+  return Math.max(0, Math.min(9999, value));
+}
+
 /** px → raw HWPUNIT (2x) — 비교용 */
 function pxToRaw2x(px: number): number {
   return Math.round(px * 150);  // px * 72/96 * 100 * 2
@@ -241,12 +246,9 @@ export class ParaShapeDialog {
 
     this.overlay.appendChild(this.dialog);
 
-    // Escape / 오버레이 클릭
+    // Escape
     this.overlay.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') { e.stopPropagation(); this.hide(); }
-    });
-    this.overlay.addEventListener('mousedown', (e) => {
-      if (e.target === this.overlay) this.hide();
     });
 
     enableDialogDrag(this.dialog, titleBar);
@@ -699,6 +701,19 @@ export class ParaShapeDialog {
     this.borderResult.bdSpacingInputs[1].value = (sp[2] / HWPUNIT_PER_MM).toFixed(2);
     this.borderResult.bdSpacingInputs[2].value = (sp[1] / HWPUNIT_PER_MM).toFixed(2);
     this.borderResult.bdSpacingInputs[3].value = (sp[3] / HWPUNIT_PER_MM).toFixed(2);
+    this.borderResult.bdConnectCb.checked = p.borderConnect ?? false;
+    this.borderResult.bdIgnoreMarginCb.checked = p.borderIgnoreMargin ?? false;
+    // 굵기/색/선종류 컨트롤을 대표 테두리로 동기화한다. buildBorderTab의
+    // onBorderControlChange()/applyBorderPreset()이 이 컨트롤의 '현재 값'을 그대로
+    // 읽어 borderStates에 기록하므로, 미리보기만 문서 값을 반영하고 컨트롤은
+    // 하드코딩 기본값(선 없음/0/검정)에 머무르면 테두리 재적용 시 기존 서식이
+    // 조용히 유실된다 (#2908/#2913과 동일 패턴).
+    const repSide = (['left', 'top', 'right', 'bottom'] as const)
+      .find(s => this.borderStates[s].type !== 0) ?? 'left';
+    const rep = this.borderStates[repSide];
+    this.borderResult.bdTypeSelect.value = String(rep.type);
+    this.borderResult.bdWidthSelect.value = String(rep.width);
+    this.borderResult.bdColorInput.value = rep.color;
     this.borderResult.updateBdPreview();
 
     this.updatePreview();
@@ -735,7 +750,7 @@ export class ParaShapeDialog {
       }
       p.style.fontSize = '11px';
       p.style.lineHeight = '1.5';
-      p.style.color = '#333';
+      p.style.color = '#111111';
       p.textContent = text;
       this.previewEl.appendChild(p);
     });
@@ -781,9 +796,9 @@ export class ParaShapeDialog {
 
     let newLS: number;
     if (newLSType === 'Percent') {
-      newLS = parseInt(this.lineSpacingInput.value) || 160;
+      newLS = clampLineSpacing(parseInt(this.lineSpacingInput.value) || 160);
     } else {
-      newLS = ptToRaw(parseFloat(this.lineSpacingInput.value) || 0);
+      newLS = ptToRaw(clampLineSpacing(parseFloat(this.lineSpacingInput.value) || 0));
     }
     // Percent는 raw 비교, 그 외는 px → HWPUNIT 변환 후 비교
     const origLS = (p.lineSpacingType || 'Percent') === 'Percent'
@@ -897,6 +912,10 @@ export class ParaShapeDialog {
     if (newSp[0] !== origSp[0] || newSp[1] !== origSp[1] || newSp[2] !== origSp[2] || newSp[3] !== origSp[3]) {
       mods.borderSpacing = newSp;
     }
+    const borderConnect = this.borderResult.bdConnectCb.checked;
+    if (borderConnect !== (p.borderConnect ?? false)) mods.borderConnect = borderConnect;
+    const borderIgnoreMargin = this.borderResult.bdIgnoreMarginCb.checked;
+    if (borderIgnoreMargin !== (p.borderIgnoreMargin ?? false)) mods.borderIgnoreMargin = borderIgnoreMargin;
 
     return mods;
   }

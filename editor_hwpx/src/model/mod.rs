@@ -4,6 +4,7 @@
 //! 구조체로 표현한다. 모든 크기 단위는 HWPUNIT(1/7200인치)을 사용한다.
 
 pub mod bin_data;
+pub mod color;
 pub mod control;
 pub mod document;
 pub mod event;
@@ -13,6 +14,7 @@ pub mod image;
 pub mod page;
 pub mod paragraph;
 pub mod path;
+pub mod provenance;
 pub mod shape;
 pub mod style;
 pub mod table;

@@ -494,7 +494,11 @@ test('table.insertCaption creates a native caption and writes its text through t
   });
 
   assert.deepEqual(calls, [
-    ['setTableProperties', 1, 3, 2, { hasCaption: true, captionDirection: 2 }],
+    ['setTableProperties', 1, 3, 2, {
+      hasCaption: true,
+      captionDirection: 2,
+      captionAutoNumber: false,
+    }],
     ['deleteTextInCell', 1, 3, 2, 65534, 0, 0, 4],
     ['insertTextInCell', 1, 3, 2, 65534, 0, 0, '평가 결과'],
   ]);
@@ -645,7 +649,11 @@ test('table.create lower-level adapter exercises width, height, cell text, and c
     ['insertTextInCell', 0, 2, 0, 3, 0, 0, '라'],
   ]);
   assert.deepEqual(calls.slice(9), [
-    ['setTableProperties', 0, 2, 0, { hasCaption: true, captionDirection: 2 }],
+    ['setTableProperties', 0, 2, 0, {
+      hasCaption: true,
+      captionDirection: 2,
+      captionAutoNumber: false,
+    }],
     ['deleteTextInCell', 0, 2, 0, 65534, 0, 0, 4],
     ['insertTextInCell', 0, 2, 0, 65534, 0, 0, '평가표'],
   ]);

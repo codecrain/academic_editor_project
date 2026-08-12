@@ -10,18 +10,20 @@ const PX_PER_MM = 96 / 25.4;
 /** 눈금자 높이/너비 (CSS px) */
 const RULER_SIZE = 20;
 
-/** 눈금자 배경색 (여백 영역) */
-const BG_MARGIN = '#d0d0d0';
-/** 본문 영역 배경색 */
-const BG_BODY = '#ffffff';
-/** 눈금선 색상 */
-const TICK_COLOR = '#555555';
-/** 숫자 색상 */
-const TEXT_COLOR = '#333333';
-/** 문단 마커 색상 */
-const MARKER_COLOR = '#4080c0';
 /** 문단 마커 크기 (CSS px) */
 const MARKER_SIZE = 6;
+
+interface RulerPalette {
+  bgMargin: string;
+  bgBody: string;
+  tick: string;
+  text: string;
+  marker: string;
+}
+
+function cssVar(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+}
 
 export class Ruler {
   private hCtx: CanvasRenderingContext2D | null;
@@ -64,6 +66,7 @@ export class Ruler {
       eventBus.on('viewport-resize', () => { this.resize(); this.scheduleUpdate(); }),
       eventBus.on('document-changed', () => this.scheduleUpdate()),
       eventBus.on('document-view-changed', () => this.scheduleUpdate()),
+      eventBus.on('theme-changed', () => this.scheduleUpdate()),
       eventBus.on('cursor-para-changed', (props) => this.onParaChanged(props as ParaProperties)),
       eventBus.on('cursor-cell-changed', (data) => this.onCellChanged(data as { inCell: boolean; cellX?: number; cellWidth?: number })),
       eventBus.on('cursor-rect-updated', (rect: any) => {
@@ -75,6 +78,16 @@ export class Ruler {
     );
 
     this.resize();
+  }
+
+  private palette(): RulerPalette {
+    return {
+      bgMargin: cssVar('--ruler-bg', '#d0d0d0'),
+      bgBody: cssVar('--ruler-body', '#ffffff'),
+      tick: cssVar('--ruler-tick', '#555555'),
+      text: cssVar('--ruler-text', '#333333'),
+      marker: cssVar('--ruler-marker', '#4080c0'),
+    };
   }
 
   /** Canvas 물리 크기를 컨테이너에 맞춰 설정 */
@@ -111,20 +124,12 @@ export class Ruler {
     this.drawVertical();
   }
 
-  /**
-   * 페이지 좌측 화면 좌표를 계산한다 (scroll-container 뷰포트 기준).
-   * scroll-content는 margin: 0 auto로 가운데 정렬되므로,
-   * 컨테이너가 scroll-content보다 넓으면 auto-margin 오프셋을 반영한다.
-   */
-  private getPageScreenLeft(pageInfo: { width: number }, zoom: number, scrollX: number): number {
-    const scrollContentWidth = this.virtualScroll.getMaxPageWidth() + 40;
-    const containerWidth = this.container.clientWidth;
-    // margin: 0 auto에 의한 오프셋
-    const contentOffsetX = Math.max(0, (containerWidth - scrollContentWidth) / 2);
-    const pageDisplayWidth = pageInfo.width * zoom;
-    // scroll-content 내에서 페이지 가운데 정렬 (left: 50%; transform: translateX(-50%))
-    const pageLeftInContent = (scrollContentWidth - pageDisplayWidth) / 2;
-    return contentOffsetX + pageLeftInContent - scrollX;
+  /** 페이지 좌측 화면 좌표를 계산한다 (scroll-container 뷰포트 기준). */
+  private getPageScreenLeft(scrollX: number): number {
+    return this.virtualScroll.getPageLeftResolved(
+      0,
+      this.virtualScroll.getTotalWidth(),
+    ) - scrollX;
   }
 
   /** 커서가 위치한 문단 속성이 변경되었을 때 호출 */
@@ -188,9 +193,10 @@ export class Ruler {
 
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const palette = this.palette();
 
     // 전체 배경 (여백색)
-    ctx.fillStyle = BG_MARGIN;
+    ctx.fillStyle = palette.bgMargin;
     ctx.fillRect(0, 0, canvasW, canvasH);
 
     if (this.wasm.pageCount === 0) {
@@ -203,21 +209,21 @@ export class Ruler {
     const pageInfo = this.wasm.getPageInfo(0);
 
     // 페이지 화면 좌표 (편집 용지와 정확히 일치)
-    const pageScreenLeft = this.getPageScreenLeft(pageInfo, zoom, scrollX);
+    const pageScreenLeft = this.getPageScreenLeft(scrollX);
     const pageDisplayWidth = pageInfo.width * zoom;
 
-    // 본문 영역 배경 (흰색)
+    // 본문 영역 배경
     const bodyLeftPx = pageScreenLeft + pageInfo.marginLeft * zoom;
     const bodyRightPx = pageScreenLeft + pageDisplayWidth - pageInfo.marginRight * zoom;
 
     if (this.inCell) {
-      // 셀 모드: 셀 영역만 흰색, 나머지는 음영
+      // 셀 모드: 셀 영역만 본문 톤, 나머지는 여백 톤
       const cellLeftPx = pageScreenLeft + this.cellX * zoom;
       const cellRightPx = pageScreenLeft + (this.cellX + this.cellWidth) * zoom;
-      ctx.fillStyle = BG_BODY;
+      ctx.fillStyle = palette.bgBody;
       ctx.fillRect(cellLeftPx, 0, cellRightPx - cellLeftPx, canvasH);
     } else if (pageInfo.columns && pageInfo.columns.length > 1) {
-      // 다단 모드: 현재 커서가 위치한 단만 흰색으로 표시
+      // 다단 모드: 현재 커서가 위치한 단만 본문 톤으로 표시
       const cursorX = this.cursorColumnX;
       let activeCol = 0;
       for (let i = 0; i < pageInfo.columns.length; i++) {
@@ -230,10 +236,10 @@ export class Ruler {
       const col = pageInfo.columns[activeCol];
       const colLeft = pageScreenLeft + col.x * zoom;
       const colRight = pageScreenLeft + (col.x + col.width) * zoom;
-      ctx.fillStyle = BG_BODY;
+      ctx.fillStyle = palette.bgBody;
       ctx.fillRect(colLeft, 0, colRight - colLeft, canvasH);
     } else {
-      ctx.fillStyle = BG_BODY;
+      ctx.fillStyle = palette.bgBody;
       ctx.fillRect(bodyLeftPx, 0, bodyRightPx - bodyLeftPx, canvasH);
     }
 
@@ -241,8 +247,8 @@ export class Ruler {
     const mmPx = PX_PER_MM * zoom;
     const pageWidthMm = Math.ceil(pageInfo.width / PX_PER_MM);
 
-    ctx.strokeStyle = TICK_COLOR;
-    ctx.fillStyle = TEXT_COLOR;
+    ctx.strokeStyle = palette.tick;
+    ctx.fillStyle = palette.text;
     ctx.lineWidth = 0.5;
     ctx.font = '9px sans-serif';
     ctx.textAlign = 'center';
@@ -276,7 +282,7 @@ export class Ruler {
 
     // 문단 들여쓰기 마커 (▽ 첫 줄, △ 나머지 줄, △ 오른쪽)
     if (this.hasParaInfo) {
-      ctx.fillStyle = MARKER_COLOR;
+      ctx.fillStyle = palette.marker;
 
       // 셀 안이면 셀 경계, 다단이면 현재 단 경계, 아니면 본문 영역 기준
       let refLeft: number;
@@ -335,9 +341,10 @@ export class Ruler {
 
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const palette = this.palette();
 
     // 전체 배경 (여백색)
-    ctx.fillStyle = BG_MARGIN;
+    ctx.fillStyle = palette.bgMargin;
     ctx.fillRect(0, 0, canvasW, canvasH);
 
     if (this.wasm.pageCount === 0) {
@@ -358,17 +365,17 @@ export class Ruler {
       const pageScreenTop = this.virtualScroll.getPageOffset(pageIdx) - scrollY;
       const pageInfo = this.wasm.getPageInfo(pageIdx);
 
-      // 본문 영역 배경 (흰색)
+      // 본문 영역 배경
       const bodyTopPx = pageScreenTop + (pageInfo.marginHeader + pageInfo.marginTop) * zoom;
       const bodyBottomPx = pageScreenTop + pageInfo.height * zoom - (pageInfo.marginFooter + pageInfo.marginBottom) * zoom;
-      ctx.fillStyle = BG_BODY;
+      ctx.fillStyle = palette.bgBody;
       ctx.fillRect(0, bodyTopPx, canvasW, bodyBottomPx - bodyTopPx);
 
       // mm 눈금 그리기
       const pageHeightMm = Math.ceil(pageInfo.height / PX_PER_MM);
 
-      ctx.strokeStyle = TICK_COLOR;
-      ctx.fillStyle = TEXT_COLOR;
+      ctx.strokeStyle = palette.tick;
+      ctx.fillStyle = palette.text;
       ctx.lineWidth = 0.5;
       ctx.font = '9px sans-serif';
       ctx.textAlign = 'center';

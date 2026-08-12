@@ -1,3 +1,5 @@
+import { detectPlatformKind, type PlatformKind } from '../engine/navigation-keymap.ts';
+
 /** 키보드 단축키 정의 */
 export interface ShortcutDef {
   /** 키 문자 (소문자). 예: 'z', 'b', '=', '-' */
@@ -8,6 +10,8 @@ export interface ShortcutDef {
   ctrl?: boolean;
   shift?: boolean;
   alt?: boolean;
+  /** 특정 플랫폼에서만 활성화해야 하는 단축키 */
+  platform?: PlatformKind;
 }
 
 /** 기본 단축키 → 커맨드 ID 매핑 */
@@ -20,6 +24,9 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
 
   [{ key: 'e', ctrl: true }, 'edit:delete'],
   [{ key: 'ㄷ', ctrl: true }, 'edit:delete'],
+  // macOS Option+C가 문자 입력으로 해석되어도 물리 C 키를 한컴 호환 모양 복사로 처리한다.
+  [{ key: 'c', code: 'KeyC', alt: true }, 'edit:format-copy'],
+  [{ key: 'ㅊ', alt: true }, 'edit:format-copy'],
 
   // 파일
   [{ key: 's', ctrl: true }, 'file:save'],
@@ -36,6 +43,11 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   [{ key: 'ㄹ', alt: true }, 'format:char-shape'],
   [{ key: 't', alt: true }, 'format:para-shape'],
   [{ key: 'ㅅ', alt: true }, 'format:para-shape'],
+  // [#3682] 개체 속성 — 커맨드(shortcutLabel 'P')는 정의돼 있었으나 단축키 매핑이
+  // 없어 어떤 경로로도 실행되지 않았다(차트/그림/도형 공통). 개체 선택 상태에서만
+  // canExecute 가 참이므로 본문 타이핑의 'p' 와 충돌하지 않는다.
+  [{ key: 'p', code: 'KeyP' }, 'format:object-properties'],
+  [{ key: 'ㅔ', code: 'KeyP' }, 'format:object-properties'],
 
   // 서식 – 스타일
   [{ key: 'f6' }, 'format:style-dialog'],
@@ -55,7 +67,8 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   [{ key: 'l', ctrl: true }, 'edit:find-again'],
   [{ key: 'v', alt: true, shift: true }, 'edit:compare-documents'],
   [{ key: 'h', ctrl: true, shift: true }, 'edit:document-history'],
-  [{ key: 'g', alt: true }, 'edit:goto'],
+  // macOS 영문 입력에서 Option+G의 key는 ©가 되지만 물리 키는 KeyG로 유지된다.
+  [{ key: 'g', code: 'KeyG', alt: true }, 'edit:goto'],
   [{ key: 'ㅎ', alt: true }, 'edit:goto'],
 
   // 입력
@@ -107,8 +120,8 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   [{ key: 'ㅇ', alt: true, shift: true }, 'format:align-distribute'],
 
   // 표
-  [{ key: 'insert', alt: true }, 'table:insert-col-left'],
-  [{ key: 'delete', alt: true }, 'table:delete-col'],
+  [{ key: 'enter', alt: true }, 'table:insert-row-col'],
+  [{ key: 'delete', alt: true }, 'table:delete-row-col'],
   [{ key: 's', ctrl: true, shift: true }, 'table:block-sum'],
   [{ key: 'a', ctrl: true, shift: true }, 'table:block-avg'],
   [{ key: 'p', ctrl: true, shift: true }, 'table:block-product'],
@@ -121,12 +134,14 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
 export function matchShortcut(
   e: KeyboardEvent,
   shortcuts: [ShortcutDef, string][],
+  platform: PlatformKind = detectPlatformKind(),
 ): string | null {
   const ctrlOrMeta = e.ctrlKey || e.metaKey;
   const eventKey = e.key.toLowerCase();
   const eventCode = (e.code ?? '').toLowerCase();
 
   for (const [def, cmdId] of shortcuts) {
+    if (def.platform && def.platform !== platform) continue;
     if (def.ctrl && !ctrlOrMeta) continue;
     if (!def.ctrl && ctrlOrMeta) continue;
     if ((def.shift ?? false) !== e.shiftKey) continue;

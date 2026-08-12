@@ -243,11 +243,8 @@ test('HWPX command catalog publishes every operation as executable', () => {
   const metadata = getHwpxCommandCatalog({ op: 'setDocumentMetadata' }).commands[0];
   assert.equal(metadata.readiness, 'available');
   assert.equal(metadata.capability, 'available');
-  assert.equal(metadata.execution, 'structural-adapter');
-  assert.deepEqual(metadata.nativeMethods, [
-    'setDocumentMetadata',
-    'getDocumentMetadata',
-  ]);
+  assert.equal(metadata.execution, 'preserve-package-adapter');
+  assert.deepEqual(metadata.nativeMethods, []);
   assert.doesNotThrow(() => validateHwpxCommands([{
     op: 'setDocumentMetadata',
     title: '공공기관 업무보고',

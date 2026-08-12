@@ -8,6 +8,7 @@ import { analyzeSvgCellClipping } from '../../editor_server/svg-render-evidence.
 const {
   HwpxApiSession,
   initHwpxRuntime,
+  readHwpxDocumentMetadata,
   readZip,
   replaceLeadingTabTemplateTextXml,
 } = hwpxApiUtils;
@@ -1324,7 +1325,7 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
   const session = new HwpxApiSession(input);
-  const result = session.commandsBatch([
+  const created = session.commandsBatch([
     {
       commandId: 'actual-table',
       op: 'table.create',
@@ -1335,13 +1336,14 @@ test('HWPX API structural table creation survives qualification and reopen', asy
       height: 6_000,
       cellTexts: ['A', 'B', 'C', 'D'],
     },
+  ]);
+  const tableTarget = created.results[0].target;
+  const result = session.commandsBatch([
     {
       commandId: 'actual-cell-style',
       op: 'applyStyle',
       target: {
-        sectionIndex: 0,
-        paragraphIndex: 1,
-        controlIndex: 0,
+        ...tableTarget,
         cellIndex: 0,
         cellParagraphIndex: 0,
       },
@@ -1350,8 +1352,8 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   ]);
 
   assert.equal(result.qualification.ok, true);
-  assert.equal(result.results[0].target.kind, 'table');
-  assert.equal(result.results[1].target.kind, 'cell');
+  assert.equal(created.results[0].target.kind, 'table');
+  assert.equal(result.results[0].target.kind, 'cell');
   const reopened = new HwpxApiSession(session.save().bytes);
   const table = reopened.readJson().tables.find(item =>
     item.dims.rowCount === 2 && item.dims.colCount === 2);
@@ -1378,11 +1380,30 @@ test('HWPX API table.insertCaption survives source-built save and reopen', async
   }]);
   assert.equal(result.results[0].target.kind, 'tableCaption');
   const reopened = new HwpxApiSession(session.save().bytes);
-  const properties = JSON.parse(reopened.doc.getTableProperties(0, 1, 0));
+  const captionTarget = result.results[0].target;
+  const properties = JSON.parse(reopened.doc.getTableProperties(
+    captionTarget.sectionIndex,
+    captionTarget.paragraphIndex,
+    captionTarget.controlIndex,
+  ));
   assert.equal(properties.hasCaption, true);
-  const captionLength = reopened.doc.getCellParagraphLength(0, 1, 0, 65534, 0);
+  const captionLength = reopened.doc.getCellParagraphLength(
+    captionTarget.sectionIndex,
+    captionTarget.paragraphIndex,
+    captionTarget.controlIndex,
+    65534,
+    0,
+  );
   assert.equal(
-    reopened.doc.getTextInCell(0, 1, 0, 65534, 0, 0, captionLength),
+    reopened.doc.getTextInCell(
+      captionTarget.sectionIndex,
+      captionTarget.paragraphIndex,
+      captionTarget.controlIndex,
+      65534,
+      0,
+      0,
+      captionLength,
+    ),
     result.results[0].expectedCaptionText,
   );
 });
@@ -1400,10 +1421,30 @@ test('HWPX API table.create caption survives source-built save and reopen', asyn
     caption: 'CAP',
   }]);
   const reopened = new HwpxApiSession(session.save().bytes);
-  const properties = JSON.parse(reopened.doc.getTableProperties(0, 1, 0));
+  const captionTarget = result.results[0].createdTargets.find(target => target.kind === 'tableCaption');
+  assert.ok(captionTarget);
+  const properties = JSON.parse(reopened.doc.getTableProperties(
+    captionTarget.sectionIndex,
+    captionTarget.paragraphIndex,
+    captionTarget.controlIndex,
+  ));
   assert.equal(properties.hasCaption, true);
-  const captionLength = reopened.doc.getCellParagraphLength(0, 1, 0, 65534, 0);
-  assert.equal(reopened.doc.getTextInCell(0, 1, 0, 65534, 0, 0, captionLength), 'CAP');
+  const captionLength = reopened.doc.getCellParagraphLength(
+    captionTarget.sectionIndex,
+    captionTarget.paragraphIndex,
+    captionTarget.controlIndex,
+    65534,
+    0,
+  );
+  assert.equal(reopened.doc.getTextInCell(
+    captionTarget.sectionIndex,
+    captionTarget.paragraphIndex,
+    captionTarget.controlIndex,
+    65534,
+    0,
+    0,
+    captionLength,
+  ), 'CAP');
   assert.equal(result.results[0].expectedCaptionText, 'CAP');
 });
 
@@ -1440,7 +1481,7 @@ test('HWPX API setDocumentMetadata survives source-built save and reopen', async
     keywords: '성과,검수',
   }]);
   const reopened = new HwpxApiSession(session.save().bytes);
-  const metadata = JSON.parse(reopened.doc.getDocumentMetadata());
+  const metadata = readHwpxDocumentMetadata(reopened.inputBytes);
   assert.equal(metadata.title, '공공기관 성과보고서');
   assert.equal(metadata.author, '기획조정실');
   assert.equal(metadata.keywords, '성과,검수');

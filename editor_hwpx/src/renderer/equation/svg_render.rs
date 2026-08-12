@@ -10,6 +10,8 @@ use super::symbols::{DecoKind, FontStyleKind};
 /// 수식 전용 font-family
 /// 순서: Latin Modern Math (LaTeX 설치 시) → STIX Two Text (Mac/STIX 설치 시) → STIX Two Math → Times New Roman (Windows 기본) → serif
 /// Cambria Math 는 Windows 에서 "볼드 인상" 을 유발해 제외. Pretendard 는 산세리프라 수식 부적합으로 제외. (Task #280)
+pub const DEFAULT_EQUATION_FONT_FAMILY_ATTR: &str =
+    "font-family=\"'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif\"";
 const EQ_FONT_FAMILY: &str = " font-family=\"'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif\"";
 
 /// 수식을 SVG 조각 문자열로 렌더링
@@ -95,19 +97,20 @@ fn render_box(
             ));
         }
         LayoutKind::MathSymbol(text) => {
-            let text_x = x;
-            let text_y = y + lb.baseline;
-            let esc = escape_xml(text);
-            // 적분 기호: layout에서 BIG_OP_SCALE이 적용된 높이를 font-size로 사용
-            let fi = if super::layout::is_integral_symbol(text) {
-                lb.height
+            // 적분 기호(∫): 폰트 `<text>` 대신 stroke path 로 렌더 (Task #1317).
+            // 폰트 미임베딩 SVG 에서 뷰어 대체 폰트의 글리프 bbox 편차로 상·하한이
+            // 어긋나던 문제를, 폰트 독립·결정적 path 로 해소한다(geom SSOT).
+            if super::layout::is_integral_symbol(text) {
+                svg.push_str(&integral_path(x, y, fs, color));
             } else {
-                fs
-            };
-            svg.push_str(&format!(
-                "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"{:.2}\" fill=\"{}\"{}>{}</text>\n",
-                text_x, text_y, fi, color, EQ_FONT_FAMILY, esc,
-            ));
+                let text_x = x;
+                let text_y = y + lb.baseline;
+                let esc = escape_xml(text);
+                svg.push_str(&format!(
+                    "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"{:.2}\" fill=\"{}\"{}>{}</text>\n",
+                    text_x, text_y, fs, color, EQ_FONT_FAMILY, esc,
+                ));
+            }
         }
         LayoutKind::Function(name) => {
             let text_x = x;
@@ -229,18 +232,20 @@ fn render_box(
             );
         }
         LayoutKind::BigOp { symbol, sub, sup } => {
-            let op_fs = fs * super::layout::BIG_OP_SCALE;
             let is_integral = super::layout::is_integral_symbol(symbol);
+            // Task #1313: 적분은 전용 스케일(INTEGRAL_SCALE), ∑/∏ 등은 BIG_OP_SCALE.
+            let op_fs = fs
+                * if is_integral {
+                    super::layout::INTEGRAL_SCALE
+                } else {
+                    super::layout::BIG_OP_SCALE
+                };
             let esc = escape_xml(symbol);
 
             if is_integral {
-                // 적분: 기호는 왼쪽, 첨자는 오른쪽 위/아래 (nolimits)
-                let op_x = x;
-                let op_y = y + op_fs * 0.8;
-                svg.push_str(&format!(
-                    "<text x=\"{:.2}\" y=\"{:.2}\" font-size=\"{:.2}\" fill=\"{}\"{}>{}</text>\n",
-                    op_x, op_y, op_fs, color, EQ_FONT_FAMILY, esc,
-                ));
+                // 적분: 기호는 왼쪽, 첨자는 오른쪽 위/아래 (nolimits).
+                // Task #1317: 폰트 `<text>` 대신 stroke path 로 렌더(geom SSOT).
+                svg.push_str(&integral_path(x, y, fs, color));
             } else {
                 // ∑, ∏ 등: 기호는 중앙, 첨자는 위/아래 (limits)
                 let sup_h = sup.as_ref().map(|b| b.height + fs * 0.05).unwrap_or(0.0);
@@ -400,6 +405,31 @@ fn render_box(
         }
         LayoutKind::Space(_) | LayoutKind::Newline | LayoutKind::Empty => {}
     }
+}
+
+/// 적분 기호(∫)를 stroke path 로 렌더 (Task #1317).
+///
+/// 글리프 박스 좌상단 `(x, y)` 기준으로 `integral_geom` 의 기하를 사용해 한 줄짜리
+/// S-곡선(bottom-left → top-right, 양끝 갈고리)을 그린다. 폰트에 의존하지 않으므로
+/// SVG 뷰어/환경에 무관하게 동일한 visual bbox 를 보장하며, layout 의 상·하한
+/// attach point(동일 geom)와 정합한다.
+fn integral_path(x: f64, y: f64, fs: f64, color: &str) -> String {
+    let g = integral_geom(fs);
+    let h = g.bottom_y - g.top_y;
+    // 하단 갈고리 끝(좌하) → 상단 갈고리 끝(우상). 하부는 우측, 상부는 좌측으로
+    // 휘어 적분기호 특유의 기운 S 형태를 만든다(round cap 으로 갈고리 표현).
+    let p0x = x + g.bottom_hook_x;
+    let p0y = y + g.bottom_y;
+    let p3x = x + g.top_hook_x;
+    let p3y = y + g.top_y;
+    let c1x = x + g.width * 1.02;
+    let c1y = y + g.bottom_y - h * 0.30;
+    let c2x = x - g.width * 0.10;
+    let c2y = y + g.top_y + h * 0.30;
+    format!(
+        "<path d=\"M{:.2},{:.2} C{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"/>\n",
+        p0x, p0y, c1x, c1y, c2x, c2y, p3x, p3y, color, g.stroke_w,
+    )
 }
 
 fn font_size_from_box(lb: &LayoutBox, base_fs: f64) -> f64 {
@@ -636,7 +666,13 @@ fn escape_xml(text: &str) -> String {
             '>' => result.push_str("&gt;"),
             '"' => result.push_str("&quot;"),
             '\'' => result.push_str("&apos;"),
-            _ => result.push(ch),
+            // XML 1.0 허용 문자: #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+            // 그 외(제어문자, U+FFFE, U+FFFF 등)는 제거 — 방출된 SVG 가 불법 XML 이 되지 않도록 (#3382)
+            '\u{09}' | '\u{0A}' | '\u{0D}' => result.push(ch),
+            '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}' => {
+                result.push(ch)
+            }
+            _ => {} // XML 무효 문자 제거
         }
     }
     result
@@ -662,6 +698,27 @@ mod tests {
         let ast = EqParser::new(tokens).parse();
         let layout = EqLayout::new(20.0).layout(&ast);
         render_equation_svg(&layout, "#000000", 20.0)
+    }
+
+    #[test]
+    fn escape_xml_drops_xml_invalid_control_chars() {
+        // #3382: 수식 SVG 는 본문 SVG(renderer/svg.rs)와 달리 XML 1.0 문자 필터가 없어,
+        // IR 텍스트에 섞인 제어문자를 그대로 방출하면 산출 SVG 가 불법 XML 이 된다
+        // ("PCDATA invalid Char value 3") — 뷰어가 해당 페이지 렌더를 중단한다.
+        assert_eq!(escape_xml("a\u{03}b"), "ab");
+        for c in ['\u{00}', '\u{08}', '\u{0B}', '\u{0C}', '\u{0E}', '\u{1F}'] {
+            assert_eq!(
+                escape_xml(&format!("x{c}y")),
+                "xy",
+                "control {:#04x}",
+                c as u32
+            );
+        }
+        assert_eq!(escape_xml("a\u{FFFE}\u{FFFF}b"), "ab");
+        // 탭·개행·복귀는 XML 1.0 허용 문자이므로 유지
+        assert_eq!(escape_xml("a\tb\nc\rd"), "a\tb\nc\rd");
+        // 기존 마크업 이스케이프는 무회귀
+        assert_eq!(escape_xml("<a & b>\"'"), "&lt;a &amp; b&gt;&quot;&apos;");
     }
 
     #[test]
@@ -722,7 +779,17 @@ mod tests {
     #[test]
     fn test_issue_1139_integral_left_right_parens_are_curved() {
         let svg = render_eq(" int _{0} ^{pi } {} x`cos LEFT ( {pi } over {2} -x RIGHT ) dx");
-        assert!(svg.contains(">∫<"), "적분 기호가 렌더링되어야 함: {}", svg);
+        // Task #1317: 적분 기호는 폰트 text(∫) 가 아닌 stroke path 로 렌더된다.
+        assert!(
+            !svg.contains(">∫<"),
+            "적분 기호는 path 로 렌더되어야 함(text ∫ 아님): {}",
+            svg
+        );
+        assert!(
+            svg.contains("<path"),
+            "적분 기호가 path 로 렌더되어야 함: {}",
+            svg
+        );
         assert!(svg.contains(">cos<"), "cos 함수가 렌더링되어야 함: {}", svg);
         assert!(
             svg.contains(">π<"),

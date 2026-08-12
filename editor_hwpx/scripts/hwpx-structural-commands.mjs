@@ -821,6 +821,7 @@ function applyInsertTableCaption(doc, command, context) {
       JSON.stringify({
         hasCaption: true,
         captionDirection: position === 'before' ? 2 : 3,
+        captionAutoNumber: false,
       }),
     ),
     'setTableProperties',
@@ -2082,7 +2083,7 @@ function applyAutoFitTableCell(doc, command, context) {
   };
 }
 
-const DOCUMENT_METADATA_FIELDS = [
+export const DOCUMENT_METADATA_FIELDS = [
   'title',
   'subject',
   'author',
@@ -2090,7 +2091,7 @@ const DOCUMENT_METADATA_FIELDS = [
   'description',
 ];
 
-function applyDocumentMetadata(doc, command) {
+export function normalizeDocumentMetadata(command) {
   const metadata = {};
   for (const field of DOCUMENT_METADATA_FIELDS) {
     if (command[field] !== undefined) {
@@ -2108,6 +2109,15 @@ function applyDocumentMetadata(doc, command) {
       'HWPX_METADATA_INVALID',
       'setDocumentMetadata requires at least one metadata field.',
     );
+  }
+  return metadata;
+}
+
+function applyDocumentMetadata(doc, command, context = {}) {
+  const metadata = normalizeDocumentMetadata(command);
+  if (typeof context.applyPackageMetadata === 'function') {
+    const native = context.applyPackageMetadata(metadata);
+    return structuralResult(command, native, { kind: 'documentMetadata' });
   }
   const setDocumentMetadata = requireMethod(doc, 'setDocumentMetadata');
   const native = parseNativeResult(
@@ -2157,7 +2167,7 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
     case 'table.autoFit':
       return applyAutoFitTableCell(doc, command, context);
     case 'setDocumentMetadata':
-      return applyDocumentMetadata(doc, command);
+      return applyDocumentMetadata(doc, command, context);
     default:
       throw structuralError(
         'HWPX_STRUCTURAL_OP_UNSUPPORTED',

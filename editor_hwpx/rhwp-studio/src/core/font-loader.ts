@@ -9,41 +9,51 @@
 interface FontEntry {
   name: string;
   file: string;
-  /** woff2(기본) 또는 woff */
+  /** woff2(기본) 또는 woff — CDN woff 파일용 */
   format?: 'woff2' | 'woff';
   /** CSS unicode-range — 지정 시 해당 코드포인트만 매칭, 다운로드도 해당 영역 사용 시에만 발생 */
   unicodeRange?: string;
 }
 
-function appBasePath(): string {
-  const configured = import.meta.env.BASE_URL || '/';
-  return configured.endsWith('/') ? configured : `${configured}/`;
+export interface WebFontLoadOptions {
+  /** true면 CDN 등 외부 URL 웹폰트 등록/로드를 건너뛴다. */
+  disableExternalWebFonts?: boolean;
 }
 
-export function resolveFontAssetUrl(file: string, basePath = appBasePath()): string {
-  if (/^(?:[a-z]+:)?\/\//i.test(file) || file.startsWith('data:') || file.startsWith('blob:')) {
-    return file;
-  }
-  const normalizedBase = basePath.endsWith('/') ? basePath : `${basePath}/`;
-  return `${normalizedBase}${file.replace(/^\/+/, '')}`;
+export interface CanvasKitBundledFontSource {
+  url: string;
+  aliases: string[];
 }
 
-// 함초롬체는 폐쇄망 런타임을 위해 저장소에 고정한다.
-const HAMCHOB_R = 'fonts/HANBatang.woff';
-const HAMCHOB_B = 'fonts/HANBatangB.woff';
-const HAMCHOD_R = 'fonts/HCRDotum.woff';
+export interface CanvasKitFontPlanOptions extends WebFontLoadOptions {
+  /** `fonts/` 상대 경로를 이 URL 아래의 확장/앱 자산으로 바꾼다. */
+  localFontBaseUrl?: string;
+  /** 배포 표면이 실제로 포함한 로컬 파일만 허용한다. 미지정 시 전체 카탈로그를 허용한다. */
+  availableLocalFiles?: ReadonlySet<string>;
+}
+
+export interface CanvasKitFontPlan {
+  sources: CanvasKitBundledFontSource[];
+  unavailableFonts: string[];
+}
+
+// 함초롬체 CDN (눈누 jsdelivr — 비상업적 사용 허용, 한컴 라이선스)
+const CDN_HAMCHOB_R = 'fonts/HANBatang.woff';
+const CDN_HAMCHOB_B = 'fonts/HANBatangB.woff';
+const CDN_HAMCHOD_R = 'fonts/HCRDotum.woff';
 
 // 한컴 webhwp CSS(@font-face) 매핑 기준 + HWP 문서에서 사용하는 별칭
 const FONT_LIST: FontEntry[] = [
-  // === 함초롬/함초롱/한컴 폰트 (로컬 고정 자산) ===
-  { name: '함초롬돋움', file: HAMCHOD_R, format: 'woff' },
-  { name: '함초롬바탕', file: HAMCHOB_R, format: 'woff' },
-  { name: '함초롱돋움', file: HAMCHOD_R, format: 'woff' },
-  { name: '함초롱바탕', file: HAMCHOB_R, format: 'woff' },
-  { name: '한컴돋움', file: HAMCHOD_R, format: 'woff' },
-  { name: '한컴바탕', file: HAMCHOB_R, format: 'woff' },
-  { name: '새돋움', file: HAMCHOD_R, format: 'woff' },
-  { name: '새바탕', file: HAMCHOB_R, format: 'woff' },
+  // === 함초롬/함초롱/한컴 폰트 (CDN 참조) ===
+  { name: '함초롬돋움', file: CDN_HAMCHOD_R, format: 'woff' },
+  { name: '함초롬바탕', file: CDN_HAMCHOB_R, format: 'woff' },
+  { name: '함초롱돋움', file: CDN_HAMCHOD_R, format: 'woff' },
+  { name: '함초롱바탕', file: CDN_HAMCHOB_R, format: 'woff' },
+  { name: '한컴돋움', file: CDN_HAMCHOD_R, format: 'woff' },
+  { name: '한컴바탕', file: CDN_HAMCHOB_R, format: 'woff' },
+  { name: '한컴산뜻돋움', file: CDN_HAMCHOD_R, format: 'woff' },
+  { name: '새돋움', file: CDN_HAMCHOD_R, format: 'woff' },
+  { name: '새바탕', file: CDN_HAMCHOB_R, format: 'woff' },
   // === 한컴 HY 폰트 → 오픈소스 대체 ===
   { name: 'HY헤드라인M', file: 'fonts/NotoSansKR-Bold.woff2' },
   { name: 'HYHeadLine M', file: 'fonts/NotoSansKR-Bold.woff2' },
@@ -61,28 +71,6 @@ const FONT_LIST: FontEntry[] = [
   // === 한글 시스템 폰트 → 오픈소스 대체 (OS 폰트 없을 때 폴백) ===
   { name: 'Malgun Gothic', file: 'fonts/Pretendard-Regular.woff2' },
   { name: '맑은 고딕', file: 'fonts/Pretendard-Regular.woff2' },
-  // === 공공기관/논문 문서에서 자주 보이는 서체명 alias ===
-  { name: 'KoPubWorld 바탕체', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPubWorld바탕체', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPubWorld Batang', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPub 바탕체', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPub바탕체', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPub Batang', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'KoPubWorld 돋움체', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: 'KoPubWorld돋움체', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: 'KoPubWorld Dotum', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: 'KoPub 돋움체', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: 'KoPub돋움체', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: 'KoPub Dotum', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: '휴먼명조', file: 'fonts/NanumMyeongjo-Regular.woff2' },
-  { name: '휴먼명조체', file: 'fonts/NanumMyeongjo-Regular.woff2' },
-  { name: '휴먼고딕', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: '휴먼고딕체', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: '신명조', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: '신명조체', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'SM신명조', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: '중고딕', file: 'fonts/NotoSansKR-Regular.woff2' },
-  { name: '고딕', file: 'fonts/NotoSansKR-Regular.woff2' },
   // Task #1224: 한컴 돋움/MS 돋움·굴림 계열은 한컴 돋움(획 두께 페이지밀도 0.265)에
   // 근접한 Noto Sans KR ExtraLight 로 대체. 기존 NotoSansKR-Regular(밀도 0.378)는
   // 획이 +43% 두꺼워 PDF 대비 과도하게 굵게 보였다(네이티브 generic_fallback 와 정합).
@@ -105,19 +93,6 @@ const FONT_LIST: FontEntry[] = [
   { name: '나눔고딕코딩', file: 'fonts/NanumGothicCoding-Regular.woff2' },
   // === 영문 폰트 → OS 폴백 (번들 제거) ===
   { name: 'Palatino Linotype', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Times New Roman', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Times', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Cambria', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Georgia', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Garamond', file: 'fonts/NotoSerifKR-Regular.woff2' },
-  { name: 'Arial', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Calibri', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Aptos', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Helvetica', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Tahoma', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Verdana', file: 'fonts/Pretendard-Regular.woff2' },
-  { name: 'Courier New', file: 'fonts/D2Coding-Regular.woff2' },
-  { name: 'Consolas', file: 'fonts/D2Coding-Regular.woff2' },
   // === Noto (OFL, 로컬) ===
   { name: 'Noto Sans KR', file: 'fonts/NotoSansKR-Regular.woff2' },
   // Task #1224: generic_fallback sans 체인 말단의 'Noto Sans KR ExtraLight' 해석용.
@@ -151,10 +126,6 @@ const FONT_LIST: FontEntry[] = [
   { name: 'Cafe24 Supermagic', file: 'fonts/Cafe24Supermagic-Regular-v1.0.woff2' },
   // === 수식 전용 폰트 (OFL/GUST, 로컬) ===
   { name: 'Latin Modern Math', file: 'fonts/LatinModernMath-Regular.woff2' },
-  { name: 'Cambria Math', file: 'fonts/LatinModernMath-Regular.woff2' },
-  { name: 'STIX Two Math', file: 'fonts/LatinModernMath-Regular.woff2' },
-  { name: 'XITS Math', file: 'fonts/LatinModernMath-Regular.woff2' },
-  { name: 'TeX Gyre Termes Math', file: 'fonts/LatinModernMath-Regular.woff2' },
   // === 기타 ===
   { name: 'SpoqaHanSans', file: 'fonts/SpoqaHanSans-Regular.woff2' },
   // === Gowun (OFL, 로컬) ===
@@ -177,10 +148,115 @@ export const REGISTERED_FONTS = new Set(FONT_LIST.map(f => f.name));
 const CRITICAL_FONTS = new Set(['함초롬바탕', '함초롬돋움']);
 
 /** CSS @font-face 등록 여부 (중복 등록 방지) */
-let fontFaceRegistered = false;
+let fontFaceRegistrationMode: 'all' | 'local-only' | null = null;
 
 /** 이미 로드 완료된 woff2 파일 (중복 네트워크 요청 방지) */
 const loadedFiles = new Set<string>();
+
+function isExternalFontFile(file: string): boolean {
+  return /^https?:\/\//i.test(file);
+}
+
+function selectableFontList(options?: WebFontLoadOptions): FontEntry[] {
+  if (options?.disableExternalWebFonts !== true) return FONT_LIST;
+  return FONT_LIST.filter(f => !isExternalFontFile(f.file));
+}
+
+function normalizeFontFamily(value: string): string {
+  return value
+    .replace(/\u0000/g, '')
+    .normalize('NFC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLocaleLowerCase('en-US');
+}
+
+function canvasKitFontUrl(file: string, localFontBaseUrl?: string): string {
+  if (isExternalFontFile(file) || !localFontBaseUrl) return file;
+  const base = localFontBaseUrl.replace(/\/+$/, '');
+  return `${base}/${file.replace(/^fonts\//, '')}`;
+}
+
+/** CanvasKit이 첫 replay 전에 등록해야 하는 실제 font byte source를 계산한다. */
+export function resolveCanvasKitFontPlan(
+  requiredFontFamilies: readonly string[],
+  options: CanvasKitFontPlanOptions = {},
+): CanvasKitFontPlan {
+  const canvasKitSubstitutes = new Map([
+    [normalizeFontFamily('휴먼명조'), normalizeFontFamily('HY신명조')],
+    [normalizeFontFamily('한양중고딕'), normalizeFontFamily('HY중고딕')],
+    [normalizeFontFamily('한컴 윤고딕 230'), normalizeFontFamily('Noto Sans KR ExtraLight')],
+  ]);
+  const entriesByFamily = new Map<string, FontEntry>();
+  for (const entry of FONT_LIST) {
+    entriesByFamily.set(normalizeFontFamily(entry.name), entry);
+  }
+
+  const sourcesByUrl = new Map<string, Set<string>>();
+  const unavailableFonts = new Map<string, string>();
+  const requiredEntries: Array<{ entry: FontEntry; requested: string }> = [];
+  for (const requested of requiredFontFamilies) {
+    const normalized = normalizeFontFamily(requested);
+    if (!normalized) continue;
+    const entry = entriesByFamily.get(normalized)
+      ?? entriesByFamily.get(canvasKitSubstitutes.get(normalized) ?? '');
+    if (!entry) {
+      unavailableFonts.set(normalized, requested.trim());
+      continue;
+    }
+    const localFile = entry.file.startsWith('fonts/')
+      ? entry.file.slice('fonts/'.length)
+      : null;
+    const unavailable = (options.disableExternalWebFonts === true && isExternalFontFile(entry.file))
+      || (localFile !== null
+        && options.availableLocalFiles !== undefined
+        && !options.availableLocalFiles.has(localFile));
+    if (unavailable) {
+      unavailableFonts.set(normalized, requested.trim());
+      continue;
+    }
+    requiredEntries.push({ entry, requested: requested.trim() });
+  }
+
+  for (const { entry, requested } of requiredEntries) {
+    const url = canvasKitFontUrl(entry.file, options.localFontBaseUrl);
+    const aliases = sourcesByUrl.get(url) ?? new Set<string>();
+    aliases.add(requested);
+    for (const candidate of FONT_LIST) {
+      if (candidate.file === entry.file) aliases.add(candidate.name);
+    }
+    sourcesByUrl.set(url, aliases);
+  }
+
+  return {
+    sources: [...sourcesByUrl.entries()].map(([url, aliases]) => ({
+      url,
+      aliases: [...aliases].sort((left, right) => left.localeCompare(right, 'ko')),
+    })),
+    unavailableFonts: [...unavailableFonts.values()]
+      .sort((left, right) => left.localeCompare(right, 'ko')),
+  };
+}
+
+function registerFontFaces(options?: WebFontLoadOptions): void {
+  const disableExternal = options?.disableExternalWebFonts === true;
+  const mode = disableExternal ? 'local-only' : 'all';
+  if (fontFaceRegistrationMode === mode) return;
+
+  const styleId = 'rhwp-web-font-faces';
+  let style = document.getElementById(styleId) as HTMLStyleElement | null;
+  if (!style) {
+    style = document.createElement('style');
+    style.id = styleId;
+    document.head.appendChild(style);
+  }
+  style.textContent = selectableFontList(options).map(f => {
+    const fmt = f.format ?? 'woff2';
+    const ur = f.unicodeRange ? ` unicode-range: ${f.unicodeRange};` : '';
+    return `@font-face { font-family: "${f.name}"; src: url("${f.file}") format("${fmt}"); font-display: swap;${ur} }`;
+  }).join('\n');
+  fontFaceRegistrationMode = mode;
+}
 
 /**
  * OS에 설치된 폰트인지 감지한다 (document.fonts.check 기반).
@@ -218,37 +294,30 @@ export function getDetectedOSFonts(): ReadonlySet<string> {
 
 /**
  * 웹폰트를 선별 로드한다.
- *   1단계(동기): CSS @font-face 전체 등록 (최초 1회, 네트워크 미발생)
+ *   1단계(동기): CSS @font-face 등록
  *   2단계: 대상 폰트 로드 (이미 로드된 파일은 건너뜀)
  *
  * @param docFonts 문서에서 사용하는 폰트 이름 목록 (있으면 해당 폰트 + CRITICAL만 로드, 없으면 전체)
  * @param onProgress 폰트 로드 진행률 콜백 (loaded, total)
+ * @param options 외부 웹폰트 사용 여부 등 로드 옵션
  */
 export async function loadWebFonts(
   docFonts?: string[],
   onProgress?: (loaded: number, total: number) => void,
+  options?: WebFontLoadOptions,
 ): Promise<void> {
   // 0) OS 폰트 감지 (@font-face 등록 전에 실행해야 정확)
-  if (!fontFaceRegistered) {
+  if (!fontFaceRegistrationMode) {
     detectOSFonts();
   }
 
-  // 1) CSS @font-face 규칙 전체 등록 (네트워크 미발생, 최초 1회만)
-  if (!fontFaceRegistered) {
-    const style = document.createElement('style');
-    style.textContent = FONT_LIST.map(f => {
-      const fmt = f.format ?? 'woff2';
-      const ur = f.unicodeRange ? ` unicode-range: ${f.unicodeRange};` : '';
-      return `@font-face { font-family: "${f.name}"; src: url("${resolveFontAssetUrl(f.file)}") format("${fmt}"); font-display: swap;${ur} }`;
-    }).join('\n');
-    document.head.appendChild(style);
-    fontFaceRegistered = true;
-  }
+  // 1) CSS @font-face 규칙 등록. 오프라인 옵션이면 외부 URL 폰트는 제외한다.
+  registerFontFaces(options);
 
   // 2) 로드 대상 결정: docFonts에 포함된 폰트 + CRITICAL만 로드
   //    OS에 설치된 폰트는 웹폰트 로딩 건너뜀
   const targetSet = new Set([...(docFonts ?? []), ...CRITICAL_FONTS]);
-  const toLoad = FONT_LIST.filter(f => {
+  const toLoad = selectableFontList(options).filter(f => {
     if (!targetSet.has(f.name)) return false;
     // OS에 동일 이름 폰트가 있으면 웹폰트 로딩 불필요
     if (detectedOSFonts.has(f.name)) return false;
@@ -291,7 +360,7 @@ export async function loadWebFonts(
         const names = fileToNames.get(f.file) ?? [f.name];
         const fmt = f.format ?? 'woff2';
         for (const name of names) {
-          const face = new FontFace(name, `url(${resolveFontAssetUrl(f.file)}) format('${fmt}')`);
+          const face = new FontFace(name, `url(${f.file}) format('${fmt}')`);
           const result = await face.load();
           document.fonts.add(result);
         }

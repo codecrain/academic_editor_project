@@ -100,13 +100,15 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:line-spacing-decrease',
     label: '줄 간격 줄이기',
+    shortcutLabel: 'Alt+Shift+A',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
       const props = ih.getParaProperties();
       const current = props?.lineSpacing ?? 160;
-      const newValue = current - 10;
+      // toolbar.ts ▼ 버튼과 동일하게 5%로 하한 clamp (issue #3009)
+      const newValue = Math.max(5, current - 10);
       ih.setLineSpacing(newValue);
     },
   },
@@ -114,6 +116,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:line-spacing-increase',
     label: '줄 간격 늘리기',
+    shortcutLabel: 'Alt+Shift+Z',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       const ih = services.getInputHandler();
@@ -128,6 +131,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:font-size-increase',
     label: '글꼴 크기 크게',
+    shortcutLabel: 'Alt+Shift+E',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.adjustFontSize(100); // +1pt
@@ -137,6 +141,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:font-size-decrease',
     label: '글꼴 크기 작게',
+    shortcutLabel: 'Alt+Shift+R',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.adjustFontSize(-100); // -1pt
@@ -186,6 +191,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:align-left',
     label: '왼쪽 정렬',
+    shortcutLabel: 'Ctrl+Shift+L',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.applyParaAlign('left');
@@ -194,6 +200,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:align-center',
     label: '가운데 정렬',
+    shortcutLabel: 'Alt+Shift+C',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.applyParaAlign('center');
@@ -202,6 +209,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:align-right',
     label: '오른쪽 정렬',
+    shortcutLabel: 'Alt+Shift+H',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.applyParaAlign('right');
@@ -210,6 +218,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:align-justify',
     label: '양쪽 정렬',
+    shortcutLabel: 'Ctrl+Shift+M',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.applyParaAlign('justify');
@@ -218,6 +227,7 @@ export const formatCommands: CommandDef[] = [
   {
     id: 'format:align-distribute',
     label: '배분 정렬',
+    shortcutLabel: 'Alt+Shift+D',
     canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       services.getInputHandler()?.applyParaAlign('distribute');
@@ -343,11 +353,9 @@ export const formatCommands: CommandDef[] = [
         } catch { /* ignore */ }
       }
       dialog.onApply = (nid, restartMode, startNum) => {
-        const pos = ih.getPosition();
         if (nid === 0) {
           // "(없음)": 번호 해제
-          services.wasm.applyParaFormat(pos.sectionIndex, pos.paragraphIndex,
-            JSON.stringify({ headType: 'None', numberingId: 0 }));
+          ih.applyParaPropsAtCursor({ headType: 'None', numberingId: 0 });
         } else if (restartMode === 0) {
           // "앞 번호 이어": 이전 번호 문단의 numbering_id를 찾아서 적용
           const prevNid = (props as any).numberingId ?? nid;
@@ -359,11 +367,9 @@ export const formatCommands: CommandDef[] = [
           // "이전 번호 이어": 현재 numbering_id 유지
           ih.applyNumbering(nid);
         }
-        services.eventBus.emit('document-changed');
       };
       dialog.onApplyBullet = (bulletChar) => {
         ih.applyBullet(bulletChar);
-        services.eventBus.emit('document-changed');
       };
       dialog.onClose = () => ih.focus();
       dialog.show();
@@ -406,7 +412,7 @@ export const formatCommands: CommandDef[] = [
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
-      const dialog = new StyleDialog(services.wasm, services.eventBus);
+      const dialog = new StyleDialog(services.wasm, services.eventBus, services);
 
       // 편집 요청
       dialog.onEditRequest = (styleId: number) => {
@@ -416,14 +422,23 @@ export const formatCommands: CommandDef[] = [
         const editDlg = new StyleEditDialog(services.wasm, services.eventBus, 'edit', {
           id: style.id, name: style.name, englishName: style.englishName,
           type: style.type, nextStyleId: style.nextStyleId,
-        });
+        }, undefined, services);
         editDlg.onSave = () => dialog.refresh();
         editDlg.show();
       };
 
       // 추가 요청
       dialog.onAddRequest = () => {
-        const addDlg = new StyleEditDialog(services.wasm, services.eventBus, 'add');
+        let baseInfo = {};
+        try {
+          baseInfo = {
+            charProps: ih.getCharProperties(),
+            paraProps: ih.getParaProperties(),
+          };
+        } catch {
+          baseInfo = {};
+        }
+        const addDlg = new StyleEditDialog(services.wasm, services.eventBus, 'add', undefined, baseInfo, services);
         addDlg.onSave = () => dialog.refresh();
         addDlg.show();
       };
@@ -454,11 +469,11 @@ export const formatCommands: CommandDef[] = [
         const ref = ih.getSelectedPictureRef();
         if (!ref) return;
         if (ref.type === 'equation') {
-          const dialog = new EquationPropertiesDialog(services.wasm, services.eventBus);
+          const dialog = new EquationPropertiesDialog(services.wasm, services.eventBus, services);
           dialog.open(ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.noteRef);
           return;
         }
-        const dialog = new PicturePropsDialog(services.wasm, services.eventBus);
+        const dialog = new PicturePropsDialog(services.wasm, services.eventBus, services);
         dialog.open(ref.sec, ref.ppi, ref.ci, ref.type);
         return;
       }
@@ -468,7 +483,7 @@ export const formatCommands: CommandDef[] = [
         const pos = ih.getCursorPosition();
         if (pos.parentParaIndex === undefined || pos.controlIndex === undefined || pos.cellIndex === undefined) return;
         const tableCtx = { sec: pos.sectionIndex, ppi: pos.parentParaIndex, ci: pos.controlIndex };
-        const dialog = new TableCellPropsDialog(services.wasm, services.eventBus, tableCtx, pos.cellIndex, 'table');
+        const dialog = new TableCellPropsDialog(services.wasm, services.eventBus, tableCtx, pos.cellIndex, 'table', services);
         dialog.show();
       }
     },

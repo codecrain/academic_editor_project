@@ -1,6 +1,10 @@
 /**
  * HWPX 비표준 lineseg 감지 알림 모달 (#177).
  *
+ * ⚠️ #2527: 현재 main.ts에서 호출하지 않는다(미사용). 자동 보정(reflowLinesegs)이
+ * 빈-lineseg 문서에서 글자 겹침을 유발해, 문서는 항상 '그대로 보기'로 연다.
+ * reflow 근본 수정 후 이 모달 재도입을 검토하기 위해 컴포넌트는 보존한다.
+ *
  * 문서 로드 완료 직후 `wasm.getValidationWarnings()` 결과를 받아,
  * 경고가 있으면 사용자에게 모달로 알리고 선택지를 제공한다.
  *
@@ -85,7 +89,7 @@ export class ValidationModal {
     summary.style.margin = '0 0 12px 16px';
     summary.style.padding = '0';
     summary.style.fontSize = '13px';
-    summary.style.color = '#555';
+    summary.style.color = 'var(--color-text-secondary)';
     for (const [kind, cnt] of Object.entries(this.report.summary)) {
       const li = document.createElement('li');
       li.textContent = `${kind}: ${cnt}건`;
@@ -100,7 +104,7 @@ export class ValidationModal {
     summaryEl.textContent = '상세 보기';
     summaryEl.style.cursor = 'pointer';
     summaryEl.style.fontSize = '13px';
-    summaryEl.style.color = '#0066cc';
+    summaryEl.style.color = 'var(--ui-link)';
     details.appendChild(summaryEl);
 
     const detailList = document.createElement('div');
@@ -108,10 +112,11 @@ export class ValidationModal {
     detailList.style.overflow = 'auto';
     detailList.style.marginTop = '8px';
     detailList.style.padding = '8px';
-    detailList.style.background = '#f6f6f6';
+    detailList.style.background = 'var(--color-surface-raised)';
     detailList.style.borderRadius = '4px';
     detailList.style.fontFamily = 'monospace';
     detailList.style.fontSize = '12px';
+    detailList.style.color = 'var(--color-text)';
 
     const maxShow = 50;
     const shown = this.report.warnings.slice(0, maxShow);
@@ -125,7 +130,7 @@ export class ValidationModal {
     }
     if (this.report.warnings.length > maxShow) {
       const more = document.createElement('div');
-      more.style.color = '#888';
+      more.style.color = 'var(--color-text-hint)';
       more.style.marginTop = '4px';
       more.textContent = `... 외 ${this.report.warnings.length - maxShow}건`;
       detailList.appendChild(more);
@@ -154,11 +159,6 @@ export class ValidationModal {
     dialog.appendChild(footer);
 
     this.overlay.appendChild(dialog);
-
-    // 오버레이 배경 클릭은 취소로 처리 (명시적 선택 유도하려면 막을 수도 있음)
-    this.overlay.addEventListener('click', (e) => {
-      if (e.target === this.overlay) this.resolve('cancel');
-    });
   }
 
   private bindKeyboard(): void {
