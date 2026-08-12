@@ -7,13 +7,16 @@
 (() => {
   const root = document.documentElement;
   const isThemeMode = (value) => value === 'system' || value === 'light' || value === 'dark';
-  let mode = 'system';
+  let mode = 'light';
   try {
     const settings = JSON.parse(localStorage.getItem('rhwp-settings') || '{}');
     const storedMode = settings && settings.theme && settings.theme.mode;
-    if (isThemeMode(storedMode)) mode = storedMode;
+    const storedVersion = Number(settings && settings.version) || 0;
+    if (isThemeMode(storedMode)) {
+      mode = storedMode === 'system' && storedVersion < 2 ? 'light' : storedMode;
+    }
   } catch {
-    mode = 'system';
+    mode = 'light';
   }
   const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   const effective = mode === 'dark' || (mode === 'system' && prefersDark) ? 'dark' : 'light';

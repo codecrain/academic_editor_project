@@ -157,7 +157,9 @@ export class FindDialog {
     const findLabel = document.createElement('label');
     findLabel.textContent = '찾을 내용:';
     findLabel.className = 'find-dialog-label';
+    findLabel.htmlFor = 'find-dialog-query';
     this.queryInput = document.createElement('input');
+    this.queryInput.id = 'find-dialog-query';
     this.queryInput.type = 'text';
     this.queryInput.className = 'find-dialog-input';
     this.queryInput.addEventListener('keydown', (e) => e.stopPropagation());
@@ -173,7 +175,9 @@ export class FindDialog {
     const replaceLabel = document.createElement('label');
     replaceLabel.textContent = '바꿀 내용:';
     replaceLabel.className = 'find-dialog-label';
+    replaceLabel.htmlFor = 'find-dialog-replace';
     this.replaceInput = document.createElement('input');
+    this.replaceInput.id = 'find-dialog-replace';
     this.replaceInput.type = 'text';
     this.replaceInput.className = 'find-dialog-input';
     this.replaceInput.addEventListener('keydown', (e) => e.stopPropagation());

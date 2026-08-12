@@ -1402,7 +1402,7 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       // Function 키(F1~F12) 등 Ctrl 없는 단축키 처리
       if (this.dispatcher) {
         const cmdId = matchShortcut(e, defaultShortcuts);
-        if (cmdId) {
+        if (cmdId && this.dispatcher.isEnabled?.(cmdId)) {
           e.preventDefault();
           this.dispatcher.dispatch(cmdId);
         }

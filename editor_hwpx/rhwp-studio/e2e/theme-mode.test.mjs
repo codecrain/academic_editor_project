@@ -87,18 +87,16 @@ async function selectTheme(page, mode) {
 runTest('보기 테마', async ({ page }) => {
   await loadApp(page);
 
-  await page.evaluate(() => {
-    localStorage.removeItem('rhwp-settings');
-    window.__theme?.setThemeMode?.('system');
-  });
-  await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  await page.evaluate(() => localStorage.removeItem('rhwp-settings'));
+  await loadApp(page);
 
   await createNewDocument(page);
 
   const initial = await getThemeState(page);
-  assert(initial.mode === 'system', 'TC1: 기본 테마 모드는 system이다');
-  assert(initial.activeModes.length === 1 && initial.activeModes[0] === 'system', 'TC1: 시스템 설정 메뉴만 active다');
-  assert(initial.storedMode === 'system', 'TC1: localStorage에도 system이 저장된다');
+  assert(initial.mode === 'light', 'TC1: 기본 테마 모드는 브라우저 설정과 무관하게 light다');
+  assert(initial.effective === 'light', 'TC1: 기본 effective theme도 light다');
+  assert(initial.activeModes.length === 1 && initial.activeModes[0] === 'light', 'TC1: 밝게 메뉴만 active다');
+  assert(initial.storedMode === '', 'TC1: 기본값은 불필요하게 localStorage에 기록하지 않는다');
 
   await selectTheme(page, 'dark');
   const dark = await getThemeState(page);

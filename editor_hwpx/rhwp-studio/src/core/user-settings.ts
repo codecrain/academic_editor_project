@@ -120,17 +120,18 @@ export const BUILTIN_FONT_SETS: readonly FontSet[] = [
 ];
 
 const STORAGE_KEY = 'rhwp-settings';
+const SETTINGS_VERSION = 2;
 
 function defaultSettings(): AppSettings {
   return {
-    version: 1,
+    version: SETTINGS_VERSION,
     font: {
       fontSets: [],
       showRecentFonts: true,
       recentFontCount: 3,
     },
     theme: {
-      mode: 'system',
+      mode: 'light',
     },
     dialog: {
       picturePropsKeepRatio: true,
@@ -151,7 +152,7 @@ function defaultSettings(): AppSettings {
 }
 
 function normalizeThemeMode(value: unknown): ThemeMode {
-  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'light';
 }
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
@@ -179,11 +180,13 @@ class UserSettingsService {
       const parsed = JSON.parse(raw) as Partial<AppSettings>;
       // 기본값 병합
       const defaults = defaultSettings();
+      const storedVersion = Number(parsed.version) || 0;
+      const storedThemeMode = normalizeThemeMode(parsed.theme?.mode);
       const dialog: Partial<DialogSettings> = parsed.dialog ?? {};
       const view: Partial<ViewSettings> = parsed.view ?? {};
       const autosave: Partial<AutosaveSettings> = parsed.autosave ?? {};
       return {
-        version: parsed.version ?? defaults.version,
+        version: defaults.version,
         font: {
           ...defaults.font,
           ...(parsed.font ?? {}),
@@ -191,7 +194,9 @@ class UserSettingsService {
         theme: {
           ...defaults.theme,
           ...(parsed.theme ?? {}),
-          mode: normalizeThemeMode(parsed.theme?.mode),
+          mode: storedThemeMode === 'system' && storedVersion < SETTINGS_VERSION
+            ? 'light'
+            : storedThemeMode,
         },
         dialog: {
           ...defaults.dialog,

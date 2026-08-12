@@ -43,3 +43,12 @@ test('모두 바꾸기(doReplaceAll)는 스냅샷으로 undo 기록된다', () =
     '모두 바꾸기는 편집 라우터의 snapshot 명령으로 기록되어야 함',
   );
 });
+
+test('찾기와 바꾸기 입력란은 보이는 레이블과 명시적으로 연결된다', () => {
+  const dialog = source('src/ui/find-dialog.ts');
+
+  assert.match(dialog, /findLabel\.htmlFor = 'find-dialog-query'/);
+  assert.match(dialog, /this\.queryInput\.id = 'find-dialog-query'/);
+  assert.match(dialog, /replaceLabel\.htmlFor = 'find-dialog-replace'/);
+  assert.match(dialog, /this\.replaceInput\.id = 'find-dialog-replace'/);
+});
