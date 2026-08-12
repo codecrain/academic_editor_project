@@ -9,6 +9,11 @@ import {
   materializeCoreArtifact,
   validateCoreArtifact,
 } from './hwpx-runtime-readiness.mjs';
+import {
+  inspectStudioBuild,
+  normalizeStudioBasePath,
+  writeStudioBuildMarker,
+} from './studio-build-contract.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceRoot = path.resolve(__dirname, '..');
@@ -16,16 +21,10 @@ const studioRoot = path.resolve(sourceRoot, 'rhwp-studio');
 const pkgRoot = path.resolve(sourceRoot, 'pkg');
 const sourceFontsRoot = path.resolve(sourceRoot, 'web', 'fonts');
 const studioFontsRoot = path.resolve(studioRoot, 'public', 'fonts');
-const basePath = normalizeBasePath(process.env.RHWP_STUDIO_BASE_PATH || '/hwpx/');
+const basePath = normalizeStudioBasePath(process.env.RHWP_STUDIO_BASE_PATH || '/hwpx/');
 
 function hasArg(name) {
   return process.argv.includes(name);
-}
-
-function normalizeBasePath(value) {
-  const raw = String(value || '/hwpx/').trim() || '/hwpx/';
-  const withStart = raw.startsWith('/') ? raw : `/${raw}`;
-  return withStart.endsWith('/') ? withStart : `${withStart}/`;
 }
 
 function quoteWindowsArg(value) {
@@ -107,14 +106,28 @@ function shouldBuild() {
   if (String(process.env.RHWP_STUDIO_REBUILD || '').toLowerCase() === 'true') {
     return true;
   }
-  return !existsSync(path.resolve(studioRoot, 'dist', 'index.html'));
+  const inspection = inspectStudioBuild(studioRoot, basePath);
+  if (!inspection.ok) {
+    console.log(`[rhwp] rebuilding studio because the static build is not valid for ${basePath} (${inspection.reason}).`);
+    return true;
+  }
+  return false;
 }
 
 function buildStudio() {
   console.log(`[rhwp] building rhwp-studio with base ${basePath}...`);
   run(npmCommand(), ['run', 'build', '--', `--base=${basePath}`], {
     cwd: studioRoot,
+    env: {
+      ...process.env,
+      RHWP_STUDIO_BASE_PATH: basePath,
+    },
   });
+  writeStudioBuildMarker(studioRoot, basePath);
+  const inspection = inspectStudioBuild(studioRoot, basePath);
+  if (!inspection.ok) {
+    throw new Error(`rhwp-studio build does not satisfy base-path contract: ${inspection.reason}`);
+  }
 }
 
 function assertUpstreamPresent() {

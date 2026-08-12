@@ -5,7 +5,7 @@
  * 명시적으로 [열기]를 눌러야 로딩하도록 게이트한다. 미동의(취소/×/Escape/밖 클릭)는
  * `false` 로 resolve 되어 로딩하지 않는다 — 보안 기본값 안전.
  *
- * 크롬 확장 모드에서도 동작: 확장은 `/rhwp/` 를 standalone 탭으로 열므로 popup
+ * 크롬 확장 모드에서도 동작: 확장은 구성된 Vite base를 standalone 탭으로 열므로 popup
  * 제약 없이 이 DOM 모달이 정상 렌더된다. `chrome` API 의존 없음.
  */
 import { ModalDialog } from './dialog';

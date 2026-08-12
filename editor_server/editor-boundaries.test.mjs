@@ -140,7 +140,10 @@ test('public compatibility wrappers delegate to shared modules without cloning i
   }
 
   const pkg = JSON.parse(await readFile(path.resolve('package.json'), 'utf8'));
-  assert.equal(pkg.scripts['start:gateway'], 'node editor_server/editor-gateway.mjs');
+  assert.equal(
+    pkg.scripts['start:gateway'],
+    'node editor_hwpx/scripts/ensure-studio.mjs && node editor_server/editor-gateway.mjs',
+  );
   assert.match(pkg.scripts['test:runtime'], /editor_server\/editor-gateway\.test\.mjs/);
   assert.match(pkg.scripts['test:runtime'], /editor_server\/editor-mcp\.test\.mjs/);
 });

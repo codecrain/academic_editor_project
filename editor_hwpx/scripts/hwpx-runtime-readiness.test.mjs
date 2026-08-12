@@ -15,6 +15,11 @@ import { fileURLToPath } from 'node:url';
 
 import { getHwpxCommandCatalog } from './hwpx-command-catalog.mjs';
 import * as runtimeReadiness from './hwpx-runtime-readiness.mjs';
+import {
+  inspectStudioBuild,
+  normalizeStudioBasePath,
+  writeStudioBuildMarker,
+} from './studio-build-contract.mjs';
 
 const {
   CORE_ARTIFACT_FILES,
@@ -25,6 +30,40 @@ const {
 const COMPLETE_RUNTIME_METHODS = [...new Set(
   getHwpxCommandCatalog().commands.flatMap(command => command.nativeMethods),
 )];
+
+test('studio build requires one coherent public base path', () => {
+  assert.equal(normalizeStudioBasePath('hwpx'), '/hwpx/');
+  assert.equal(normalizeStudioBasePath('/editor/hwpx/'), '/editor/hwpx/');
+
+  const studioRoot = mkdtempSync(path.join(tmpdir(), 'rhwp-studio-contract-'));
+  const distRoot = path.join(studioRoot, 'dist');
+  mkdirSync(distRoot);
+  writeFileSync(path.join(distRoot, 'index.html'), '<script src="/assets/app.js"></script>');
+  writeStudioBuildMarker(studioRoot, '/hwpx/');
+  assert.deepEqual(inspectStudioBuild(studioRoot, '/hwpx/'), {
+    ok: false,
+    reason: 'asset-outside-base',
+    basePath: '/hwpx/',
+    outsideBase: ['/assets/app.js'],
+  });
+
+  writeFileSync(
+    path.join(distRoot, 'index.html'),
+    '<script src="/hwpx/assets/app.js"></script><link href="/hwpx/app.css">',
+  );
+  writeFileSync(path.join(distRoot, 'manifest.webmanifest'), JSON.stringify({
+    start_url: '/hwpx/',
+    scope: '/hwpx/',
+    file_handlers: [{ action: '/hwpx/' }],
+  }));
+  assert.deepEqual(inspectStudioBuild(studioRoot, '/hwpx/'), {
+    ok: true,
+    reason: 'ready',
+    basePath: '/hwpx/',
+    builtBasePath: '/hwpx/',
+  });
+  assert.equal(inspectStudioBuild(studioRoot, '/editor/hwpx/').reason, 'base-marker-mismatch');
+});
 
 function artifactFixture(root, {
   name = '@rhwp/core',

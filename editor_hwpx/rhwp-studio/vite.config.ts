@@ -11,8 +11,16 @@ const subsecondWasmDir = resolve(
   'rhwp-subsecond-vite',
 );
 const useSubsecondWasm = process.env.RHWP_SUBSECOND === '1';
+const studioBasePath = normalizeBasePath(process.env.RHWP_STUDIO_BASE_PATH || '/hwpx/');
+
+function normalizeBasePath(value: string): string {
+  const raw = String(value || '/hwpx/').trim() || '/hwpx/';
+  const withStart = raw.startsWith('/') ? raw : `/${raw}`;
+  return withStart.endsWith('/') ? withStart : `${withStart}/`;
+}
 
 export default defineConfig({
+  base: studioBasePath,
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
     // 셀프 호스팅 빌드에서 외부(CDN) 웹폰트 로드를 빌드 시점에 끈다.
@@ -107,11 +115,11 @@ export default defineConfig({
         theme_color: '#2b6cb0',
         background_color: '#ffffff',
         display: 'standalone',
-        start_url: '/rhwp/',
-        scope: '/rhwp/',
+        start_url: studioBasePath,
+        scope: studioBasePath,
         file_handlers: [
           {
-            action: '/rhwp/',
+            action: studioBasePath,
             accept: {
               'application/x-hwp': ['.hwp'],
               'application/hwp+zip': ['.hwpx'],
