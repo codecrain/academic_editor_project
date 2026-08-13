@@ -153,7 +153,7 @@ impl DocumentCore {
         name: &str,
         editable: bool,
     ) -> Result<String, HwpError> {
-        let field_id = self.next_click_here_field_id();
+        let field_id = self.next_field_id();
         let inserted_offset = {
             let section = self
                 .document
@@ -222,7 +222,7 @@ impl DocumentCore {
         name: &str,
         editable: bool,
     ) -> Result<String, HwpError> {
-        let field_id = self.next_click_here_field_id();
+        let field_id = self.next_field_id();
         let inserted_offset = {
             let para = self.get_cell_paragraph_mut(
                 section_idx,
@@ -284,7 +284,7 @@ impl DocumentCore {
         if path.is_empty() {
             return Err(HwpError::InvalidField("cellPath가 비어 있음".into()));
         }
-        let field_id = self.next_click_here_field_id();
+        let field_id = self.next_field_id();
         let inserted_offset = {
             let para = self.get_cell_paragraph_mut_by_path(section_idx, parent_para_idx, path)?;
             insert_click_here_field_in_para(
@@ -327,11 +327,12 @@ impl DocumentCore {
             .map(|fi| {
                 let name = fi.field.field_name().unwrap_or("");
                 let guide = fi.field.guide_text().unwrap_or("");
+                let memo = fi.field.memo_text().unwrap_or("");
                 let location_json = field_location_json(&fi.location);
                 let (start_char_idx, end_char_idx) = field_range_bounds(self, fi)
                     .unwrap_or((0, fi.value.chars().count()));
                 format!(
-                    "{{\"fieldId\":{},\"fieldType\":\"{}\",\"cellField\":{},\"name\":{},\"guide\":{},\"command\":{},\"value\":{},\"location\":{},\"startCharIdx\":{},\"endCharIdx\":{},\"editableInForm\":{},\"listId\":{},\"paraInList\":{},\"startPos\":{},\"endPos\":{}}}",
+                    "{{\"fieldId\":{},\"fieldType\":\"{}\",\"cellField\":{},\"name\":{},\"guide\":{},\"memo\":{},\"command\":{},\"value\":{},\"location\":{},\"startCharIdx\":{},\"endCharIdx\":{},\"editableInForm\":{},\"listId\":{},\"paraInList\":{},\"startPos\":{},\"endPos\":{}}}",
                     fi.field.field_id,
                     fi.field.field_type_str(),
                     // 셀 구역 이름(가상 필드)과 문단 안 누름틀은 다른 것이다. `fieldType` 은 둘 다
@@ -339,6 +340,7 @@ impl DocumentCore {
                     fi.field.ctrl_id == 0,
                     json_escape(name),
                     json_escape(guide),
+                    json_escape(memo),
                     json_escape(&fi.field.command),
                     json_escape(&fi.value),
                     location_json,
@@ -2132,7 +2134,7 @@ impl DocumentCore {
         find_field_ctrl_idx_in_para(para, char_offset)
     }
 
-    fn next_click_here_field_id(&self) -> u32 {
+    pub(crate) fn next_field_id(&self) -> u32 {
         let mut max_id = 0u32;
         for section in &self.document.sections {
             for para in &section.paragraphs {
@@ -2177,6 +2179,16 @@ fn collect_max_field_id(para: &Paragraph, max_id: &mut u32) {
                     }
                 }
             }
+            Control::Header(header) => {
+                for header_para in &header.paragraphs {
+                    collect_max_field_id(header_para, max_id);
+                }
+            }
+            Control::Footer(footer) => {
+                for footer_para in &footer.paragraphs {
+                    collect_max_field_id(footer_para, max_id);
+                }
+            }
             _ => {}
         }
     }
@@ -2191,19 +2203,6 @@ fn insert_click_here_field_in_para(
     name: &str,
     editable: bool,
 ) -> Result<usize, HwpError> {
-    let text_len = para.text.chars().count();
-    let start = char_offset.min(text_len);
-    let positions = para.control_text_positions();
-    let insert_idx = positions
-        .iter()
-        .position(|&pos| pos > start)
-        .unwrap_or(para.controls.len());
-
-    for range in &mut para.field_ranges {
-        if range.control_idx >= insert_idx {
-            range.control_idx += 1;
-        }
-    }
 
     let field = Field {
         field_type: FieldType::ClickHere,
@@ -2228,12 +2227,33 @@ fn insert_click_here_field_in_para(
         guide_residue: None,
     };
 
+    insert_field_in_para(para, char_offset, field)
+}
+
+/// Inserts a zero-length same-paragraph field while preserving the control and
+/// CTRL_DATA index invariants used by HWPX serialization.
+pub(crate) fn insert_field_in_para(
+    para: &mut Paragraph,
+    char_offset: usize,
+    field: Field,
+) -> Result<usize, HwpError> {
+    let start = char_offset.min(para.text.chars().count());
+    let insert_idx = para
+        .control_text_positions()
+        .iter()
+        .position(|&pos| pos > start)
+        .unwrap_or(para.controls.len());
+
+    for range in &mut para.field_ranges {
+        if range.control_idx >= insert_idx {
+            range.control_idx += 1;
+        }
+    }
     para.controls.insert(insert_idx, Control::Field(field));
     if para.ctrl_data_records.len() < insert_idx {
         para.ctrl_data_records.resize(insert_idx, None);
     }
     para.ctrl_data_records.insert(insert_idx, None);
-
     let new_range = FieldRange {
         start_char_idx: start,
         end_char_idx: start,
@@ -2250,7 +2270,6 @@ fn insert_click_here_field_in_para(
         .unwrap_or(para.field_ranges.len());
     para.field_ranges.insert(range_idx, new_range);
     rebuild_char_offsets(para);
-
     Ok(start)
 }
 

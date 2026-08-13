@@ -2140,9 +2140,9 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       view: 'capabilities',
     });
     const capabilities = capabilitiesCall.result.structuredContent;
-    assert.equal(capabilities.contractVersion, '3.1.0');
+    assert.equal(capabilities.contractVersion, '3.2.0');
     assert.equal(capabilities.lifecycleTools.length, 9);
-    assert.equal(capabilities.commandCatalog.commandCount, 39);
+    assert.equal(capabilities.commandCatalog.commandCount, 48);
     assert.ok(capabilities.inspectViews.includes('fields'));
     assert.ok(capabilities.integratedCapabilityFamilies.assurance.includes('security'));
 
@@ -2399,6 +2399,9 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     assert.equal(artifact.browserPresentation.finalized, true);
     assert.equal(artifact.browserPresentation.sha256, artifact.sha256);
     assert.equal(artifact.browserPresentation.refreshMode, 'immutable_after_verified_save');
+    const finalizedEditorUrl = new URL(artifact.browserPresentation.url);
+    assert.equal(finalizedEditorUrl.searchParams.get('readonly'), '1');
+    assert.equal(finalizedEditorUrl.searchParams.get('finalized'), '1');
 
     const finalizedPreviewResponse = await fetch(
       `${origin}/v1/hwpx/documents/${opened.documentId}/live-source`,

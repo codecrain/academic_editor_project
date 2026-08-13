@@ -317,6 +317,26 @@ impl ParameterList {
         self.items.is_empty()
     }
 
+    /// Update the first named string parameter while preserving every unrelated
+    /// parameter and nested list. Returns false when the parameter is absent.
+    pub fn replace_named_string(&mut self, target_name: &str, replacement: &str) -> bool {
+        for item in &mut self.items {
+            match item {
+                Parameter::String { name: Some(name), value, .. } if name == target_name => {
+                    *value = replacement.to_string();
+                    return true;
+                }
+                Parameter::List(list) => {
+                    if list.replace_named_string(target_name, replacement) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// 캐노니컬 텍스트 형태로 직렬화한다(`<hp:{tag} cnt="N" name="...">...</hp:{tag}>`).
     ///
     /// 이 텍스트 형태는 HWPX 직렬화기와 HWP5 CTRL_DATA 보존(#4396) 양쪽이 공유하는

@@ -904,8 +904,12 @@ test('setPageSetup maps public fields to the RHWP PageDef payload', () => {
 
 test('setHeaderFooter creates, writes, and aligns the requested native control', () => {
   const calls = [];
+  let headerFooterReads = 0;
   const doc = {
     getSectionCount: () => 1,
+    getHeaderFooter: () => JSON.stringify(++headerFooterReads === 1
+      ? { ok: true, exists: false }
+      : { ok: true, exists: true, text: '?대?寃?좎슜', dynamicFields: [] }),
     createHeaderFooter: (...args) => {
       calls.push(['createHeaderFooter', ...args]);
       return '{"ok":true,"kind":"footer","applyTo":2,"paraIndex":0,"controlIndex":3}';

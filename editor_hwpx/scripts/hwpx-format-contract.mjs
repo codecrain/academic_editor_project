@@ -1,5 +1,6 @@
 const BOOLEAN = Object.freeze({ type: 'boolean' });
 const STRING = Object.freeze({ type: 'string' });
+const TEXT = Object.freeze({ type: 'string', allowEmpty: true });
 const COLOR = Object.freeze({ type: 'color' });
 const NUMBER = (minimum, maximum, integer = true) => Object.freeze({
   type: 'number', minimum, maximum, integer,
@@ -104,18 +105,27 @@ const FORMAT_SCOPES = Object.freeze({
     paddingRight: NUMBER(-32768, 32767),
     paddingTop: NUMBER(-32768, 32767),
     paddingBottom: NUMBER(-32768, 32767),
+    applyInnerMargin: BOOLEAN,
     verticalAlign: ENUM('top', 'center', 'bottom', 0, 1, 2),
     textDirection: NUMBER(0, 255),
     isHeader: BOOLEAN,
     cellProtect: BOOLEAN,
+    fieldName: TEXT,
+    editableInForm: BOOLEAN,
     borderLeft: Object.freeze({ type: 'object' }),
     borderRight: Object.freeze({ type: 'object' }),
     borderTop: Object.freeze({ type: 'object' }),
     borderBottom: Object.freeze({ type: 'object' }),
-    fillType: NUMBER(0, 255),
-    fillColor: NUMBER(0, 0xFFFF_FFFF),
-    patternColor: NUMBER(0, 0xFFFF_FFFF),
+    fillType: ENUM('none', 'solid'),
+    fillColor: COLOR,
+    patternColor: COLOR,
     patternType: NUMBER(0, 255),
+    diagonalLine: NUMBER(0, 255),
+    diagonalSlash: NUMBER(0, 7),
+    diagonalBackSlash: NUMBER(0, 7),
+    diagonalWidth: NUMBER(0, 255),
+    diagonalColor: COLOR,
+    centerLine: ENUM('NONE', 'VERTICAL', 'HORIZONTAL', 'CROSS'),
   }),
   table: Object.freeze({
     ...Object.fromEntries(Object.entries(COMMON_OBJECT_FIELDS).filter(([field]) => ![
@@ -188,6 +198,14 @@ const FORMAT_SCOPES = Object.freeze({
     connectorMidX: NUMBER(-0x8000_0000, 0x7FFF_FFFF),
     connectorMidY: NUMBER(-0x8000_0000, 0x7FFF_FFFF),
   }),
+  equation: Object.freeze({
+    ...COMMON_OBJECT_FIELDS,
+    script: TEXT,
+    fontSize: NUMBER(1, 0x7FFF_FFFF),
+    color: NUMBER(0, 0xFFFF_FFFF),
+    baseline: NUMBER(-32768, 32767),
+    fontName: TEXT,
+  }),
 });
 
 const HWP_ONLY_FORMAT_PROPERTIES = Object.freeze({
@@ -205,8 +223,11 @@ function validateValue(scope, field, value, rule) {
   if (rule.type === 'boolean' && typeof value !== 'boolean') {
     throw formatError('HWPX_FORMAT_VALUE_INVALID', `${scope}.${field} must be a boolean.`);
   }
-  if (rule.type === 'string' && (typeof value !== 'string' || value.trim().length === 0)) {
-    throw formatError('HWPX_FORMAT_VALUE_INVALID', `${scope}.${field} must be a nonblank string.`);
+  if (rule.type === 'string' && (typeof value !== 'string' || (!rule.allowEmpty && value.trim().length === 0))) {
+    throw formatError(
+      'HWPX_FORMAT_VALUE_INVALID',
+      `${scope}.${field} must be ${rule.allowEmpty ? 'a string' : 'a nonblank string'}.`,
+    );
   }
   if (rule.type === 'color' && !(Number.isInteger(value) && value >= 0 && value <= 0xFFFF_FFFF)
     && !(typeof value === 'string' && /^#?[0-9a-f]{6}(?:[0-9a-f]{2})?$/i.test(value))) {

@@ -11,6 +11,7 @@ import { HWPX_MCP_CONTRACT } from './hwpx-mcp-contract.mjs';
 
 const FIXTURES = Object.freeze({
   blank: path.resolve('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'),
+  basicTable: path.resolve('editor_hwpx/samples/hwpx/basic-table-01.hwpx'),
   body: path.resolve('editor_hwpx/samples/test-image.hwpx'),
   esg: path.resolve('editor_hwpx/samples/api-fixtures/esg-original.hwpx'),
   briefing: path.resolve('evaluation/hwpx-agent-final-20-v1/attachments/source/moe-2025-briefing.hwpx'),
@@ -171,6 +172,53 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       HWPX_MCP_CONTRACT.tools,
     );
 
+    await withDoc('blank', async (state) => {
+      const target = (await outlineItems(state, 'paragraph'))[0];
+      await inspectTargets(state, [target.location]);
+      const inserted = await edit(state, [{ op: 'field.insert', target: { native: { section: target.location.paragraph.section, para: target.location.paragraph.number, offset: 0, length: 0 } }, guide: 'Applicant name', name: 'mcp_applicant', editable: true }]);
+      const fields = await inspect(state, 'fields');
+      const fieldId = inserted.results[0].target.fieldId;
+      assert.ok(fields.fields.some((field) => field.fieldId === fieldId));
+      const managed = await edit(state, [{ op: 'field.manage', action: 'update', fieldId, guide: 'Applicant legal name', memo: 'Use the registered legal name', name: 'mcp_legal_applicant', editable: false }]);
+      assert.equal(managed.results[0].expectedField.name, 'mcp_legal_applicant');
+    });
+    await withDoc('blank', async (state) => {
+      const target = (await outlineItems(state, 'paragraph'))[0];
+      await inspectTargets(state, [target.location]);
+      const inserted = await edit(state, [{ op: 'note.insert', target: { native: { section: target.location.paragraph.section, para: target.location.paragraph.number, offset: 0, length: 0 } }, kind: 'endnote', text: 'MCP endnote body' }]);
+      const created = inserted.results[0].target;
+      const noteTarget = { native: { section: created.sectionIndex, para: created.paragraphIndex, control: created.controlIndex } };
+      await inspectTargets(state, [noteTarget]);
+      const managed = await edit(state, [{ op: 'note.manage', action: 'replaceText', target: noteTarget, text: 'MCP revised endnote\nSecond evidence paragraph' }]);
+      assert.equal(managed.results[0].expectedNoteText, 'MCP revised endnote\nSecond evidence paragraph');
+    });
+    await withDoc('blank', async (state) => {
+      const target = (await outlineItems(state, 'paragraph'))[0];
+      await inspectTargets(state, [target.location]);
+      await edit(state, [{ op: 'bookmark.manage', action: 'create', target: { native: { section: target.location.paragraph.section, para: target.location.paragraph.number, offset: 0, length: 0 } }, name: 'mcp_audit_start' }]);
+    });
+    await withDoc('basicTable', async (state) => {
+      const target = (await outlineItems(state, 'cell'))[0];
+      await inspectTargets(state, [target.location]);
+      const calculated = await edit(state, [{ op: 'table.transform', target: target.location, action: 'calculate', row: 0, column: 0, formula: '=1+2', writeResult: true }]);
+      assert.equal(calculated.results[0].expectedCellText, '3');
+    });
+    await withDoc('blank', async (state) => {
+      await edit(state, [{ op: 'section.configure', sectionIndex: 0, action: 'columns', properties: { count: 2, type: 'normal', sameWidth: true, spacing: 2268 } }]);
+    });
+    await withDoc('blank', async (state) => {
+      const target = (await outlineItems(state, 'paragraph'))[0];
+      await inspectTargets(state, [target.location]);
+      const created = await edit(state, [{ op: 'object.create', target: { native: { section: target.location.paragraph.section, para: target.location.paragraph.number, offset: 0, length: 0 } }, kind: 'shape', shapeType: 'rectangle', width: 18000, height: 9000 }]);
+      const createdTarget = created.results[0].target;
+      await inspectTargets(state, [target.location]);
+      await edit(state, [{ op: 'object.create', target: { native: { section: target.location.paragraph.section, para: target.location.paragraph.number, offset: 0, length: 0 } }, kind: 'shape', shapeType: 'ellipse', width: 16000, height: 8000 }]);
+      await inspectTargets(state, [target.location]);
+      const objects = await inspect(state, 'objects');
+      assert.ok(objects.shapes.some(item => item.native?.control === createdTarget.controlIndex));
+      await edit(state, [{ op: 'object.manage', action: 'arrange', kind: 'shape', order: 'front', target: { native: { section: createdTarget.sectionIndex, para: createdTarget.paragraphIndex, control: createdTarget.controlIndex } } }]);
+    });
+
     await withDoc('briefing', async (state) => {
       const outline = await inspect(state, 'outline', { limit: 1 });
       assert.ok(outline.items.length === 1);
@@ -322,6 +370,65 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
         await edit(state, [{ op: 'format.apply', scope, target, properties }]);
       }, fixture.startsWith('hwp') ? `${fixture}.hwp` : undefined);
     }
+
+    await withDoc('basicTable', async (state) => {
+      const target = (await outlineItems(state, 'cell'))[0];
+      assert.ok(target);
+      const before = (await inspectTargets(state, [target.location])).targets[0];
+      const beforeCell = before.style?.cell;
+      assert.ok(beforeCell?.borderLeft && beforeCell?.borderRight && beforeCell?.borderTop && beforeCell?.borderBottom);
+      await edit(state, [{
+        op: 'format.apply', scope: 'cell', target: target.location,
+        properties: { applyInnerMargin: true, fieldName: 'mcp-audit-field', editableInForm: true },
+      }]);
+      await inspectTargets(state, [target.location]);
+      await edit(state, [{
+        op: 'format.apply', scope: 'cell', target: target.location,
+        properties: { fillColor: '#fff2cc' },
+      }]);
+      const changed = (await inspectTargets(state, [target.location])).targets[0].style?.cell;
+      assert.equal(changed.applyInnerMargin, true);
+      assert.equal(changed.fieldName, 'mcp-audit-field');
+      assert.equal(changed.editableInForm, true);
+      assert.equal(changed.fillType, 'solid');
+      assert.equal(changed.fillColor, '#fff2cc');
+      for (const side of ['borderLeft', 'borderRight', 'borderTop', 'borderBottom']) {
+        assert.deepEqual(changed[side], beforeCell[side]);
+      }
+      const review = await call('editor_hwpx_review', { documentId: state.documentId, baseRevision: state.revision });
+      assert.equal(review.ok, true, JSON.stringify(review));
+      const saved = await call('editor_hwpx_save', {
+        documentId: state.documentId,
+        baseRevision: state.revision,
+        filename: 'mcp-cell-format-roundtrip.hwpx',
+        mode: 'verified',
+      });
+      state.closed = true;
+      active.delete(state.documentId);
+      artifacts.set(saved.artifactId, saved);
+      const bytes = await call('editor_hwpx_artifact_read', {
+        artifactId: saved.artifactId,
+        expectedSha256: saved.sha256,
+      });
+      const reopened = await call('editor_hwpx_open', {
+        filename: 'mcp-cell-format-roundtrip.hwpx',
+        bytesBase64: bytes.bytesBase64,
+      });
+      const reopenedState = { documentId: reopened.documentId, revision: reopened.revision, closed: false };
+      active.set(reopenedState.documentId, reopenedState);
+      const reopenedCell = (await inspectTargets(reopenedState, [target.location])).targets[0].style?.cell;
+      assert.equal(reopenedCell.applyInnerMargin, true);
+      assert.equal(reopenedCell.fieldName, 'mcp-audit-field');
+      assert.equal(reopenedCell.editableInForm, true);
+      assert.equal(reopenedCell.fillType, 'solid');
+      assert.equal(reopenedCell.fillColor, '#fff2cc');
+      for (const side of ['borderLeft', 'borderRight', 'borderTop', 'borderBottom']) {
+        assert.deepEqual(reopenedCell[side], beforeCell[side]);
+      }
+      await discard(reopenedState);
+      await call('editor_hwpx_artifact_delete', { artifactId: saved.artifactId, expectedSha256: saved.sha256 });
+      artifacts.delete(saved.artifactId);
+    });
 
     for (const action of ['split', 'pageBreak', 'columnBreak']) {
       await withDoc('blank', async (state) => {

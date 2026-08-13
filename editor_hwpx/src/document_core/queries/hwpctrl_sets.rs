@@ -1961,24 +1961,11 @@ impl DocumentCore {
             .ok_or_else(|| HwpError::InvalidField(format!("문단 {} 없음", para_idx)))?;
 
         // 컨트롤은 문단 안에서 **글자 차례대로** 놓인다 — 앞선 컨트롤 수가 끼울 자리다.
-        let control_index = para
-            .control_text_positions()
-            .iter()
-            .filter(|p| **p < char_idx)
-            .count();
         // 자리표 글자는 문단이 스스로 넣게 둔다 — `char_offsets`·`char_shapes`·`line_segs` 를
         // 함께 갱신해 준다. 여기서 지우거나 직접 만지면 `control_text_positions` 가 이 컨트롤을
         // 문단 맨 앞으로 오해해 캐럿 클램프까지 어긋난다(실제로 한 번 그랬다).
-        para.insert_text_at(char_idx, " ");
-        para.controls.insert(
-            control_index,
-            Control::AutoNumber(AutoNumber {
-                number_type,
-                ..Default::default()
-            }),
-        );
+        para.insert_auto_number_at(char_idx, number_type);
         // 글자 한 칸은 `insert_text_at` 이 이미 셌다 — 컨트롤 몫 일곱만 더한다(합 8칸).
-        para.char_count += (EXTENDED_CTRL_UNITS - 1) as u32;
         section.raw_stream = None;
         Ok(r#"{"ok":true}"#.to_string())
     }

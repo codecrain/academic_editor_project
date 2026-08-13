@@ -65,7 +65,7 @@ PDF MCP tools:
 
 `editor_docx_command_catalog`, `editor_hwpx_inspect(view="catalog")`, and
 `editor_pdf_command_catalog` are the machine-readable sources of truth. They
-currently expose 31 DOCX commands, 38 HWPX commands, and 46 PDF commands.
+currently expose 31 DOCX commands, 48 HWPX commands, and 46 PDF commands.
 HWPX command entries report
 `readiness` separately from `execution`; canonical commands that are not ready
 are rejected before mutation. Agents should query the applicable
@@ -589,6 +589,11 @@ Response:
 ```
 
 `target/find` is a locator only. Always call `target/inspect` before writing.
+
+For the MCP `editor_hwpx_inspect(view="target")` tool, always send the
+canonical `locations` array, including for one target. The HTTP route below
+also accepts its legacy single `location` shortcut; that shortcut is not an
+MCP argument and must not be used with the MCP client.
 
 `POST /v1/{format}/documents/{id}/target/inspect`
 
@@ -1505,7 +1510,7 @@ object.format
 object.replaceTextBoxText
 ```
 
-All 38 HWPX entries currently report `readiness=available`. For binary HWP,
+All 48 HWPX entries currently report `readiness=available` for HWPX sources. For binary HWP,
 the same catalog marks package-XML-only commands unavailable. Apply still fails closed
 when required target, object, or field inspection, exact revision, or
 operation-specific postconditions are missing.

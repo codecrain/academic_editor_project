@@ -53,6 +53,10 @@ try {
   assert.equal(await input.count(), 1, 'Studio must expose one file input');
   await input.setInputFiles(inputPath);
   await page.waitForSelector('#scroll-container canvas', { timeout: 30_000 });
+  await page.waitForFunction(
+    () => /\.hwpx\b/i.test(document.querySelector('#status-bar')?.textContent || ''),
+    { timeout: 30_000 },
+  );
 
   const firstCanvas = page.locator('#scroll-container canvas').first();
   const canvasBox = await firstCanvas.boundingBox();
@@ -101,7 +105,10 @@ try {
 
   await input.setInputFiles(downloadedPath);
   await page.waitForSelector('#scroll-container canvas', { timeout: 30_000 });
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  await page.waitForFunction(
+    () => /\.hwpx\b/i.test(document.querySelector('#status-bar')?.textContent || ''),
+    { timeout: 30_000 },
+  );
   const reopened = await page.evaluate(() => {
     const canvases = [...document.querySelectorAll('#scroll-container canvas')];
     return {
@@ -112,7 +119,7 @@ try {
   });
   assert.ok(reopened.canvasCount >= 1);
   assert.ok(reopened.canvasSizes.every(({ width, height }) => width > 0 && height > 0));
-  assert.match(reopened.status, /HWPX/);
+  assert.match(reopened.status, /\.hwpx\b/i);
   assert.deepEqual(consoleErrors, []);
 
   const screenshotPath = path.join(runRoot, 'browser-edited-reopened.png');

@@ -1396,6 +1396,32 @@ test('HWPX API structural table creation survives qualification and reopen', asy
   assert.deepEqual(table.cells.map(cell => cell.text), ['A', 'B', 'C', 'D']);
 });
 
+test('HWPX API table.structure splits and reattaches a table through native UI-equivalent methods', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  const table = session.commandsBatch([{
+    op: 'table.create', target: { paragraph: { section: 0, number: 0 } },
+    rows: 4, columns: 2, cellTexts: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'],
+  }]).results[0].target;
+  const tableTarget = { tableId: session.readJson().tables[0].id, cell: { number: 0 } };
+  const split = session.commandsBatch([{
+    op: 'table.structure', target: tableTarget, action: 'splitTable', atRow: 2,
+  }]).results[0];
+  assert.equal(split.expectedTableDimensions.rowCount, 2);
+  assert.equal(split.expectedCreatedTableDimensions.rowCount, 2);
+  const splitReopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(splitReopened.readJson().tables.length, 2);
+  const attachTarget = { tableId: splitReopened.readJson().tables[0].id, cell: { number: 0 } };
+  session.commandsBatch([{
+    op: 'table.structure', target: attachTarget, action: 'attachNextTable',
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const restored = reopened.readJson().tables;
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].dims.rowCount, 4);
+  assert.deepEqual(restored[0].cells.map(cell => cell.text), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']);
+});
+
 test('HWPX API table.insertCaption survives source-built save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
@@ -1542,6 +1568,60 @@ test('HWPX API setHeaderFooter survives source-built save and reopen', async () 
   assert.equal(paragraph.alignment, result.results[0].expectedHeaderFooterAlign);
 });
 
+test('HWPX header/footer page and total-page fields survive source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  const result = session.commandsBatch([{
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'footer',
+    applyTo: 'both',
+    align: 'center',
+    text: 'Page  of ',
+    fields: [
+      { type: 'pageNumber', charOffset: 5 },
+      { type: 'totalPages', charOffset: 9 },
+    ],
+  }]);
+
+  const before = JSON.parse(session.doc.getHeaderFooter(0, false, 0));
+  assert.deepEqual(before.dynamicFields.map(field => field.type), ['pageNumber', 'totalPages']);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const after = JSON.parse(reopened.doc.getHeaderFooter(0, false, 0));
+  assert.deepEqual(after.dynamicFields.map(field => field.type), ['pageNumber', 'totalPages']);
+  assert.match(after.text, /^Page\s+of\s+$/);
+  assert.equal(result.results[0].expectedHeaderFooterText, undefined);
+});
+
+test('HWPX header/footer file-name fields and native templates survive source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+
+  const fileNameSession = new HwpxApiSession(input);
+  fileNameSession.commandsBatch([{
+    op: 'setHeaderFooter',
+    target: { sectionIndex: 0 },
+    type: 'header',
+    text: 'File: ',
+    fields: [{ type: 'fileName', charOffset: 6 }],
+  }]);
+  const fileNameHeader = JSON.parse(fileNameSession.doc.getHeaderFooter(0, true, 0));
+  assert.deepEqual(fileNameHeader.dynamicFields, [{ type: 'fileName', paraIndex: 0, charOffset: 6 }]);
+
+  for (const templateId of [1, 4, 5, 10]) {
+    const session = new HwpxApiSession(input);
+    const result = session.commandsBatch([{
+      op: 'setHeaderFooter',
+      target: { sectionIndex: 0 },
+      type: 'header',
+      templateId,
+    }]);
+    const expected = result.results[0].expectedHeaderFooterFields.map(({ type }) => type);
+    const header = JSON.parse(session.doc.getHeaderFooter(0, true, 0));
+    assert.deepEqual(header.dynamicFields.map(({ type }) => type), expected);
+  }
+});
+
 test('HWPX API insertFootnote survives source-built save and reopen', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
@@ -1565,6 +1645,270 @@ test('HWPX API insertFootnote survives source-built save and reopen', async () =
     target.controlIndex,
   ));
   assert.equal(footnote.texts[0].slice(2), result.results[0].expectedFootnoteText);
+});
+
+test('HWPX API note.manage replaces multiline note text and formats a note paragraph through native controls', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  session.commandsBatch([{
+    op: 'insertText', target: { native: { section: 0, para: 0, offset: 0, length: 0 } }, text: 'Evidence',
+  }]);
+  const note = session.commandsBatch([{
+    op: 'note.insert', target: { native: { section: 0, para: 0, offset: 3, length: 0 } }, kind: 'footnote', text: 'Initial body',
+  }]).results[0].target;
+  const replacement = 'Revised evidence body\nSecond evidence paragraph';
+  const replace = session.commandsBatch([{
+    op: 'note.manage', action: 'replaceText', target: { native: { section: note.sectionIndex, para: note.paragraphIndex, control: note.controlIndex } }, text: replacement,
+  }]).results[0];
+  assert.equal(replace.expectedNoteText, replacement);
+  const formatted = session.commandsBatch([{
+    op: 'note.manage', action: 'formatParagraph', target: { native: { section: note.sectionIndex, para: note.paragraphIndex, control: note.controlIndex } }, paragraphIndex: 1, properties: { alignment: 'center' },
+  }]).results[0];
+  assert.equal(formatted.expectedFormat.properties.alignment, 'center');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const info = JSON.parse(reopened.doc.getFootnoteInfo(note.sectionIndex, note.paragraphIndex, note.controlIndex));
+  assert.deepEqual([info.texts[0].slice(2), info.texts[1]], replacement.split('\n'));
+  const notePara = JSON.parse(reopened.doc.getParaPropertiesInFootnote(note.sectionIndex, note.paragraphIndex, note.controlIndex, 1));
+  assert.equal(notePara.alignment, 'center');
+});
+
+test('HWPX API field.insert and endnote insertion survive source-built save and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx');
+  const session = new HwpxApiSession(input);
+  const field = session.commandsBatch([{
+    op: 'field.insert',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+    guide: 'Applicant name', name: 'applicant_name', editable: true,
+  }]).results[0];
+  const fields = JSON.parse(session.doc.getFieldList());
+  assert.equal(fields.find(item => item.fieldId === field.target.fieldId)?.name, 'applicant_name');
+  const updated = session.commandsBatch([{
+    op: 'field.manage', action: 'update', fieldId: field.target.fieldId,
+    guide: 'Applicant legal name', memo: 'Use the registered company name', name: 'legal_applicant_name', editable: false,
+  }]).results[0];
+  assert.equal(updated.expectedField.name, 'legal_applicant_name');
+  const reopenedAfterUpdate = new HwpxApiSession(session.save().bytes);
+  const persistedField = JSON.parse(reopenedAfterUpdate.doc.getFieldList())
+    .find(item => item.fieldId === field.target.fieldId);
+  assert.deepEqual({
+    name: persistedField?.name,
+    guide: persistedField?.guide,
+    memo: persistedField?.memo,
+    editableInForm: persistedField?.editableInForm,
+  }, {
+    name: 'legal_applicant_name',
+    guide: 'Applicant legal name',
+    memo: 'Use the registered company name',
+    editableInForm: false,
+  });
+  const guideOnlyUpdate = session.commandsBatch([{
+    op: 'field.manage', action: 'update', fieldId: field.target.fieldId,
+    guide: 'Applicant legal name (revised)',
+  }]).results[0];
+  assert.equal(guideOnlyUpdate.expectedField.memo, 'Use the registered company name');
+  const deletedField = session.commandsBatch([{
+    op: 'field.manage', action: 'delete', fieldId: field.target.fieldId,
+  }]).results[0];
+  assert.equal(deletedField.target.kind, 'deletedField');
+  const endnote = session.commandsBatch([{
+    op: 'note.insert',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+    kind: 'endnote', text: 'Endnote evidence body',
+  }]).results[0];
+  assert.equal(endnote.target.kind, 'note');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(JSON.parse(reopened.doc.getFieldList()).some(item => item.fieldId === field.target.fieldId), false);
+  const note = JSON.parse(reopened.doc.getFootnoteInfo(
+    endnote.target.sectionIndex, endnote.target.paragraphIndex, endnote.target.controlIndex,
+  ));
+  assert.equal(note.texts[0].slice(2), endnote.expectedNoteText);
+});
+
+test('HWPX API field.manage updates nested table-cell ClickHere fields without erasing memo', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  session.commandsBatch([{
+    op: 'table.create', target: { paragraph: { section: 0, number: 0 } },
+    rows: 1, columns: 1, cellTexts: ['Cell'],
+  }]);
+  const table = session.readJson().tables[0];
+  const field = session.commandsBatch([{
+    op: 'field.insert',
+    target: { tableId: table.id, cell: { number: 0 }, cellParagraphIndex: 0, offset: 0 },
+    guide: 'Cell guide', memo: 'Cell memo', name: 'cell_name', editable: true,
+  }]).results[0];
+  const updated = session.commandsBatch([{
+    op: 'field.manage', action: 'update', fieldId: field.target.fieldId,
+    guide: 'Cell guide revised',
+  }]).results[0];
+  assert.equal(updated.expectedField.memo, 'Cell memo');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const persisted = JSON.parse(reopened.doc.getFieldList()).find(item => item.fieldId === field.target.fieldId);
+  assert.deepEqual({ guide: persisted?.guide, memo: persisted?.memo, name: persisted?.name }, {
+    guide: 'Cell guide revised', memo: 'Cell memo', name: 'cell_name',
+  });
+});
+
+test('HWPX API bookmark create, rename, and delete qualify each saved revision', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  session.commandsBatch([{
+    op: 'bookmark.manage', action: 'create', name: 'audit_start',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]);
+  let bookmark = JSON.parse(session.doc.getBookmarks())[0];
+  assert.equal(bookmark.name, 'audit_start');
+  session.commandsBatch([{
+    op: 'bookmark.manage', action: 'rename', newName: 'audit_renamed',
+    target: { native: { section: 0, para: 0, control: bookmark.ctrlIdx } },
+  }]);
+  bookmark = JSON.parse(session.doc.getBookmarks())[0];
+  assert.equal(bookmark.name, 'audit_renamed');
+  const deleted = session.commandsBatch([{
+    op: 'bookmark.manage', action: 'delete',
+    target: { native: { section: 0, para: 0, control: bookmark.ctrlIdx } },
+  }]).results[0];
+  assert.equal(deleted.target.kind, 'deletedBookmark');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.deepEqual(JSON.parse(reopened.doc.getBookmarks()), []);
+});
+
+test('HWPX API section.configure applies UI-equivalent border, columns, definitions, page hide, and page numbering', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'pageBorder', properties: { spacingLeft: 100, spacingRight: 200, spacingTop: 300, spacingBottom: 400 } }]);
+  session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'columns', properties: { count: 2, type: 'normal', sameWidth: true, spacing: 2268 } }]);
+  session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'properties', properties: { hideHeader: true, columnSpacing: 200 } }]);
+  session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'endnoteShape', properties: { startNumber: 4, suffixChar: ']', separatorEnabled: false, placement: 'sectionEnd' } }]);
+  session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'pageHide', paragraphIndex: 0, properties: { hideHeader: true, hideFooter: false, hideMasterPage: false, hideBorder: false, hideFill: false, hidePageNum: false } }]);
+  const pageNumber = session.commandsBatch([{ op: 'section.configure', sectionIndex: 0, action: 'pageNumberStart', paragraphIndex: 0, offset: 0, startNumber: 3 }]).results[0];
+  assert.equal(pageNumber.target.kind, 'newNumber');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.equal(JSON.parse(reopened.doc.getColumnDef(0)).columnCount, 2);
+  assert.equal(JSON.parse(reopened.doc.getPageBorderFill(0)).spacingBottom, 400);
+  assert.deepEqual(Object.fromEntries(['startNumber', 'suffixChar', 'separatorEnabled', 'placement'].map(field => [field, JSON.parse(reopened.doc.getEndnoteShape(0))[field]])), {
+    startNumber: 4, suffixChar: ']', separatorEnabled: false, placement: 'sectionEnd',
+  });
+  assert.equal(JSON.parse(reopened.doc.getPageHide(0, 0)).hideHeader, true);
+  assert.ok(JSON.parse(reopened.doc.getControls()).some(item => item.ctrlId === 'nwno'));
+});
+
+test('HWPX API object creation, exact text-box editing, equation formatting, arrangement, and deletion qualify', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  const textBox = session.commandsBatch([{
+    op: 'object.create', kind: 'textBox', width: 18000, height: 9000, text: 'first',
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  session.commandsBatch([{
+    op: 'object.manage', action: 'setText', kind: 'textBox', text: 'second\nthird',
+    target: { native: { section: textBox.sectionIndex, para: textBox.paragraphIndex, control: textBox.controlIndex } },
+  }]);
+  const shape = session.commandsBatch([{
+    op: 'object.create', kind: 'shape', shapeType: 'rectangle', width: 18000, height: 9000,
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  session.commandsBatch([{
+    op: 'object.manage', action: 'arrange', kind: 'textBox', order: 'front',
+    target: { native: { section: textBox.sectionIndex, para: textBox.paragraphIndex, control: textBox.controlIndex } },
+  }]);
+  const equation = session.commandsBatch([{
+    op: 'object.create', kind: 'equation', script: 'x^2', fontSize: 1000, color: 0,
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  session.commandsBatch([{
+    op: 'object.format', scope: 'equation', properties: { script: 'y^3', fontSize: 1200, color: 255 },
+    target: { native: { section: equation.sectionIndex, para: equation.paragraphIndex, control: equation.controlIndex } },
+  }]);
+  const deleted = session.commandsBatch([{
+    op: 'object.manage', action: 'delete', kind: 'equation',
+    target: { native: { section: equation.sectionIndex, para: equation.paragraphIndex, control: equation.controlIndex } },
+  }]).results[0];
+  assert.equal(deleted.target.kind, 'deletedObject');
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const objects = JSON.parse(reopened.doc.getObjects());
+  assert.equal(objects.filter(item => item.kind === 'equation').length, 0);
+  assert.equal(objects.filter(item => item.kind === 'shape').length, 2);
+});
+
+test('HWPX API groups and ungroups inspected shapes through the same native path as the editor UI', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/hwpx/blank_hwpx.hwpx'));
+  const first = session.commandsBatch([{
+    op: 'object.create', kind: 'shape', shapeType: 'rectangle', width: 18000, height: 9000,
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  const second = session.commandsBatch([{
+    op: 'object.create', kind: 'shape', shapeType: 'ellipse', width: 14000, height: 7000,
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  const group = session.commandsBatch([{
+    op: 'object.manage', action: 'group', kind: 'object', targets: [
+      { native: { section: first.sectionIndex, para: first.paragraphIndex, control: first.controlIndex } },
+      { native: { section: second.sectionIndex, para: second.paragraphIndex, control: second.controlIndex } },
+    ],
+  }]).results[0];
+  assert.equal(group.expectedObjectGroup.childCount, 2);
+  assert.equal(JSON.parse(session.doc.getShapeProperties(
+    group.target.sectionIndex, group.target.paragraphIndex, group.target.controlIndex,
+  )).objectType, 'group');
+  const ungroup = session.commandsBatch([{
+    op: 'object.manage', action: 'ungroup', kind: 'object',
+    target: { native: { section: group.target.sectionIndex, para: group.target.paragraphIndex, control: group.target.controlIndex } },
+  }]).results[0];
+  assert.equal(ungroup.expectedUngroupedChildCount, 2);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const objects = JSON.parse(reopened.doc.getObjects());
+  assert.ok(objects.filter(item => item.para === 0).length >= 2);
+});
+
+test('HWPX API groups an inspected picture and shape through the native mixed-object path', async () => {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync('editor_hwpx/samples/test-image.hwpx'));
+  const shape = session.commandsBatch([{
+    op: 'object.create', kind: 'shape', shapeType: 'rectangle', width: 12000, height: 6000,
+    target: { native: { section: 0, para: 0, offset: 0, length: 0 } },
+  }]).results[0].target;
+  const group = session.commandsBatch([{
+    op: 'object.manage', action: 'group', kind: 'object', targets: [
+      { native: { section: 0, para: 0, control: 2 } },
+      { native: { section: shape.sectionIndex, para: shape.paragraphIndex, control: shape.controlIndex } },
+    ],
+  }]).results[0].target;
+  const grouped = JSON.parse(session.doc.getShapeProperties(group.sectionIndex, group.paragraphIndex, group.controlIndex));
+  assert.deepEqual({ objectType: grouped.objectType, childCount: grouped.childCount }, { objectType: 'group', childCount: 2 });
+  session.commandsBatch([{
+    op: 'object.manage', action: 'ungroup', kind: 'object',
+    target: { native: { section: group.sectionIndex, para: group.paragraphIndex, control: group.controlIndex } },
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  assert.ok(JSON.parse(reopened.doc.getObjects()).some(item => item.kind === 'picture'));
+});
+
+test('HWPX API table.transform transpose, calculation, and equalization survive qualification and reopen', async () => {
+  await initHwpxRuntime();
+  const input = readFileSync('editor_hwpx/samples/hwpx/basic-table-01.hwpx');
+  for (const command of [
+    { action: 'transpose' },
+    { action: 'calculate', row: 0, column: 0, formula: '=1+2', writeResult: true },
+    { action: 'equalizeRowHeight' },
+    { action: 'equalizeColumnWidth' },
+  ]) {
+    const session = new HwpxApiSession(input);
+    const table = session.readJson().tables[0];
+    const result = session.commandsBatch([{
+      op: 'table.transform', target: { tableId: table.id, native: table.native }, ...command,
+    }]).results[0];
+    const reopened = new HwpxApiSession(session.save().bytes);
+    assert.equal(reopened.qualityCheck().ok, true, command.action);
+    if (command.action === 'calculate') assert.equal(result.expectedCellText, '3');
+    if (command.action === 'transpose') {
+      assert.equal(JSON.parse(reopened.doc.getTableDimensions(
+        result.target.sectionIndex, result.target.paragraphIndex, result.target.controlIndex,
+      )).rowCount, result.expectedTableDimensions.rowCount);
+    }
+  }
 });
 
 test('setRunStyle verifier checks both paragraph range boundaries after reopen', () => {

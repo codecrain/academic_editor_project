@@ -97,6 +97,23 @@ test('public proposal accepts a native HWP signature spatially anchored inside i
   assert.equal(result.counts.riskyFloatingImages, 0);
 });
 
+test('public proposal accepts a safe inline signature paragraph immediately after the labelled field', () => {
+  const value = fixture();
+  value.editableTargets.cells = [];
+  value.editableTargets.paragraphs = [{
+    id: 'seal-label', kind: 'paragraph', text: '법인명 : 코드크레인 유한회사 (인)',
+    pageHint: 13, native: { section: 0, paragraph: 138 },
+    location: { paragraph: { section: 0, number: 138 } },
+  }];
+  value.objectGraph.pictures = [{
+    id: 'inline-seal', pageHint: 13, native: { section: 0, paragraph: 139, control: 0 },
+    properties: { treatAsChar: true, textWrap: 'TopAndBottom', vertRelTo: 'Para', horzRelTo: 'Para' },
+  }];
+  const result = analyzeHwpxSemanticEvidence(value, { profile: 'public-proposal' });
+  assert.equal(result.counts.missingExecutionObjectTargets, 0);
+  assert.equal(result.counts.riskyFloatingImages, 0);
+});
+
 test('public proposal rejects a native picture that does not overlap the signature cell', () => {
   const value = fixture();
   value.editableTargets.paragraphs = [];

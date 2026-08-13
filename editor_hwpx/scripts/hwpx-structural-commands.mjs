@@ -2,6 +2,15 @@ import { createHash } from 'node:crypto';
 
 import { normalizeFormatProperties } from './hwpx-format-contract.mjs';
 
+const CELL_BORDER_FILL_FIELDS = Object.freeze([
+  'borderFillId',
+  'borderLeft', 'borderRight', 'borderTop', 'borderBottom',
+  'fillType', 'fillColor', 'patternColor', 'patternType',
+  'diagonalLine', 'diagonalSlash', 'diagonalBackSlash',
+  'diagonalWidth', 'diagonalColor', 'centerLine',
+]);
+const CELL_BORDER_FILL_PATCH_FIELDS = new Set(CELL_BORDER_FILL_FIELDS.filter(field => field !== 'borderFillId'));
+
 function structuralError(code, message, details = {}) {
   const error = new Error(message);
   error.code = code;
@@ -45,6 +54,21 @@ function parseNativeObject(value, method) {
     throw structuralError(
       'HWPX_ENGINE_RESULT_INVALID',
       `${method} returned an invalid RHWP result.`,
+      { method, value: String(value), cause: cause.message },
+    );
+  }
+  return parsed;
+}
+
+function parseNativeArray(value, method) {
+  let parsed;
+  try {
+    parsed = value && typeof value === 'object' ? value : JSON.parse(String(value));
+    if (!Array.isArray(parsed)) throw new Error('result is not an array');
+  } catch (cause) {
+    throw structuralError(
+      'HWPX_ENGINE_RESULT_INVALID',
+      `${method} returned an invalid RHWP array result.`,
       { method, value: String(value), cause: cause.message },
     );
   }
@@ -1402,6 +1426,34 @@ const HEADER_FOOTER_APPLY_TO = new Map([
   ['odd', 2],
 ]);
 
+const HEADER_FOOTER_FIELD_TYPES = new Map([
+  ['pageNumber', 1],
+  ['totalPages', 2],
+  ['fileName', 3],
+]);
+
+function normalizeHeaderFooterFields(command, textLength) {
+  if (command.fields === undefined) return [];
+  if (!Array.isArray(command.fields)) {
+    throw structuralError('HWPX_HEADER_FOOTER_FIELDS_INVALID', 'setHeaderFooter fields must be an array.');
+  }
+  return command.fields.map((field, index) => {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) {
+      throw structuralError('HWPX_HEADER_FOOTER_FIELD_INVALID', 'Each header/footer field must be an object.', { index });
+    }
+    const nativeType = HEADER_FOOTER_FIELD_TYPES.get(field.type);
+    if (nativeType === undefined) {
+      throw structuralError('HWPX_HEADER_FOOTER_FIELD_TYPE_INVALID', 'Header/footer field type must be pageNumber, totalPages, or fileName.', { index, type: field.type });
+    }
+    if (!Number.isInteger(field.charOffset) || field.charOffset < 0 || field.charOffset > textLength) {
+      throw structuralError('HWPX_HEADER_FOOTER_FIELD_OFFSET_INVALID', 'Header/footer field charOffset must be within the supplied text.', {
+        index, charOffset: field.charOffset, textLength,
+      });
+    }
+    return { type: field.type, nativeType, charOffset: field.charOffset, index };
+  });
+}
+
 function applyHeaderFooter(doc, command) {
   if (!['header', 'footer'].includes(command.type)) {
     throw structuralError(
@@ -1410,10 +1462,14 @@ function applyHeaderFooter(doc, command) {
       { type: command.type },
     );
   }
-  if (typeof command.text !== 'string') {
+  const hasTemplate = command.templateId !== undefined;
+  if (hasTemplate && (!Number.isInteger(command.templateId) || command.templateId < 0 || command.templateId > 10)) {
+    throw structuralError('HWPX_HEADER_FOOTER_TEMPLATE_INVALID', 'setHeaderFooter templateId must be an integer from 0 through 10.');
+  }
+  if (!hasTemplate && typeof command.text !== 'string') {
     throw structuralError(
       'HWPX_HEADER_FOOTER_TEXT_REQUIRED',
-      'setHeaderFooter requires a text string.',
+      'setHeaderFooter requires a text string unless templateId is supplied.',
     );
   }
   const applyToName = command.applyTo ?? 'both';
@@ -1433,6 +1489,38 @@ function applyHeaderFooter(doc, command) {
   }
   const sectionIndex = resolveSectionIndex(doc, command.target?.sectionIndex);
   const isHeader = command.type === 'header';
+  const fields = hasTemplate ? [] : normalizeHeaderFooterFields(command, command.text.length);
+  if (hasTemplate) {
+    const getHeaderFooter = requireMethod(doc, 'getHeaderFooter');
+    const existing = parseNativeResult(
+      getHeaderFooter(sectionIndex, isHeader, applyTo),
+      'getHeaderFooter',
+    );
+    const template = parseNativeResult(
+      requireMethod(doc, 'applyHfTemplate')(sectionIndex, isHeader, applyTo, command.templateId),
+      'applyHfTemplate',
+    );
+    const headerFooter = parseNativeResult(
+      getHeaderFooter(sectionIndex, isHeader, applyTo),
+      'getHeaderFooter',
+      ['paraIndex', 'controlIndex'],
+    );
+    const paragraphProperties = parseNativeObject(
+      requireMethod(doc, 'getParaPropertiesInHf')(sectionIndex, isHeader, applyTo, 0),
+      'getParaPropertiesInHf',
+    );
+    return {
+      ...structuralResult(command, { replaced: existing.exists === true ? existing : null, template }, {
+        kind: 'headerFooter', sectionIndex, paragraphIndex: headerFooter.paraIndex,
+        controlIndex: headerFooter.controlIndex, type: command.type, applyTo: applyToName,
+      }),
+      expectedHeaderFooterText: (headerFooter.dynamicFields?.length ?? 0) === 0
+        ? headerFooter.text
+        : undefined,
+      expectedHeaderFooterAlign: paragraphProperties.alignment,
+      expectedHeaderFooterFields: headerFooter.dynamicFields ?? [],
+    };
+  }
   const createHeaderFooter = requireMethod(doc, 'createHeaderFooter');
   const insertTextInHeaderFooter = requireMethod(doc, 'insertTextInHeaderFooter');
   const applyParaFormatInHf = requireMethod(doc, 'applyParaFormatInHf');
@@ -1470,12 +1558,25 @@ function applyHeaderFooter(doc, command) {
     ),
     'applyParaFormatInHf',
   );
+  const insertFieldInHf = fields.length > 0 ? requireMethod(doc, 'insertFieldInHf') : null;
+  const fieldNative = [...fields]
+    .sort((left, right) => right.charOffset - left.charOffset || right.index - left.index)
+    .map((field) => parseNativeResult(
+      insertFieldInHf(sectionIndex, isHeader, applyTo, 0, field.charOffset, field.nativeType),
+      'insertFieldInHf',
+      ['charOffset', 'insertedAt', 'insertedLength'],
+    ));
+  const headerFooter = parseNativeResult(
+    requireMethod(doc, 'getHeaderFooter')(sectionIndex, isHeader, applyTo),
+    'getHeaderFooter',
+  );
   return {
     ...structuralResult(command, {
       replaced,
       control: controlNative,
       text: textNative,
       alignment: alignNative,
+      fields: fieldNative,
     }, {
       kind: 'headerFooter',
       sectionIndex,
@@ -1484,16 +1585,28 @@ function applyHeaderFooter(doc, command) {
       type: command.type,
       applyTo: applyToName,
     }),
-    expectedHeaderFooterText: command.text,
+    // Native HWPX reparse materializes auto-number placeholders as text slots.
+    // Dynamic-field integrity is verified independently below; raw placeholder
+    // spacing is not a stable user-text representation across the round trip.
+    expectedHeaderFooterText: fields.length === 0 ? headerFooter.text : undefined,
+    expectedHeaderFooterStaticText: command.text,
     expectedHeaderFooterAlign: align,
+    expectedHeaderFooterFields: headerFooter.dynamicFields ?? [],
   };
 }
 
 function applyInsertFootnote(doc, command, context) {
+  return applyNoteInsert(doc, { ...command, kind: 'footnote' }, context, 'insertFootnote');
+}
+
+function applyNoteInsert(doc, command, context, operationName = 'note.insert') {
+  if (!['footnote', 'endnote'].includes(command.kind)) {
+    throw structuralError('HWPX_NOTE_KIND_INVALID', `${operationName} kind must be footnote or endnote.`);
+  }
   if (typeof command.text !== 'string' || command.text.trim().length === 0) {
     throw structuralError(
-      'HWPX_FOOTNOTE_TEXT_REQUIRED',
-      'insertFootnote requires a nonblank footnote body.',
+      operationName === 'insertFootnote' ? 'HWPX_FOOTNOTE_TEXT_REQUIRED' : 'HWPX_NOTE_TEXT_REQUIRED',
+      `${operationName} requires a nonblank note body.`,
     );
   }
   const target = resolveHwpxTextTarget(command);
@@ -1501,16 +1614,19 @@ function applyInsertFootnote(doc, command, context) {
   if (target.offset > paragraphLength) {
     throw structuralError(
       'HWPX_TARGET_INVALID',
-      'insertFootnote offset exceeds the inspected HWPX paragraph length.',
+      `${operationName} offset exceeds the inspected HWPX paragraph length.`,
       { target, paragraphLength },
     );
   }
-  const insertFootnote = requireMethod(doc, 'insertFootnote');
+  const methodName = command.kind === 'endnote' ? 'insertEndnote' : 'insertFootnote';
+  const insertNote = requireMethod(doc, methodName);
   const insertTextInFootnote = requireMethod(doc, 'insertTextInFootnote');
   const controlNative = parseNativeResult(
-    insertFootnote(target.sectionIndex, target.paragraphIndex, target.offset),
-    'insertFootnote',
-    ['paraIdx', 'controlIdx', 'footnoteNumber'],
+    insertNote(target.sectionIndex, target.paragraphIndex, target.offset),
+    methodName,
+    command.kind === 'endnote'
+      ? ['paraIdx', 'controlIdx', 'endnoteNumber']
+      : ['paraIdx', 'controlIdx', 'footnoteNumber'],
   );
   const textNative = parseNativeResult(
     insertTextInFootnote(
@@ -1524,20 +1640,440 @@ function applyInsertFootnote(doc, command, context) {
     'insertTextInFootnote',
     ['charOffset'],
   );
-  const createdTarget = {
-    kind: 'footnote',
-    sectionIndex: target.sectionIndex,
-    paragraphIndex: controlNative.paraIdx,
-    controlIndex: controlNative.controlIdx,
-    footnoteNumber: controlNative.footnoteNumber,
-  };
+  const createdTarget = command.op === 'insertFootnote'
+    ? {
+      // Keep the pre-existing insertFootnote target shape stable for callers.
+      kind: 'footnote',
+      sectionIndex: target.sectionIndex,
+      paragraphIndex: controlNative.paraIdx,
+      controlIndex: controlNative.controlIdx,
+      footnoteNumber: controlNative.footnoteNumber,
+    }
+    : {
+      kind: 'note',
+      noteKind: command.kind,
+      sectionIndex: target.sectionIndex,
+      paragraphIndex: controlNative.paraIdx,
+      controlIndex: controlNative.controlIdx,
+      noteNumber: command.kind === 'endnote' ? controlNative.endnoteNumber : controlNative.footnoteNumber,
+    };
   return {
     ...structuralResult(command, {
       control: controlNative,
       text: textNative,
     }, createdTarget, [createdTarget]),
-    expectedFootnoteText: command.text,
+    expectedNoteText: command.text,
+    ...(command.op === 'insertFootnote' ? { expectedFootnoteText: command.text } : {}),
   };
+}
+
+function resolveNoteTarget(doc, command) {
+  const target = resolveObjectTarget(command, 'note');
+  if (Array.isArray(target.cellPath)) {
+    throw structuralError('HWPX_NOTE_TARGET_INVALID', 'A note target cannot be nested inside a table cell path.', { target });
+  }
+  const info = parseNativeObject(requireMethod(doc, 'getFootnoteInfo')(
+    target.sectionIndex, target.paragraphIndex, target.controlIndex,
+  ), 'getFootnoteInfo');
+  if (info.ok !== true || !Array.isArray(info.texts) || !Number.isInteger(info.paraCount)) {
+    throw structuralError('HWPX_NOTE_TARGET_INVALID', 'The exact inspected target is not a readable footnote or endnote control.', { target, info });
+  }
+  return { ...target, noteInfo: info };
+}
+
+function replaceNoteText(doc, target, nextText) {
+  const getInfo = requireMethod(doc, 'getFootnoteInfo');
+  const deleteText = requireMethod(doc, 'deleteTextInFootnote');
+  const mergeParagraph = requireMethod(doc, 'mergeParagraphInFootnote');
+  const splitParagraph = requireMethod(doc, 'splitParagraphInFootnote');
+  const insertText = requireMethod(doc, 'insertTextInFootnote');
+  const args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+  let info = parseNativeObject(getInfo(...args), 'getFootnoteInfo');
+  for (let paragraphIndex = Number(info.paraCount) - 1; paragraphIndex >= 1; paragraphIndex -= 1) {
+    const currentText = String(info.texts[paragraphIndex] ?? '');
+    if (currentText.length > 0) {
+      parseNativeResult(deleteText(...args, paragraphIndex, 0, [...currentText].length), 'deleteTextInFootnote');
+    }
+    parseNativeResult(mergeParagraph(...args, paragraphIndex), 'mergeParagraphInFootnote');
+    info = parseNativeObject(getInfo(...args), 'getFootnoteInfo');
+  }
+  const firstText = String(info.texts[0] ?? '');
+  const bodyOffset = firstText.startsWith('  ') ? 2 : 0;
+  const bodyLength = [...firstText].length - bodyOffset;
+  if (bodyLength > 0) {
+    parseNativeResult(deleteText(...args, 0, bodyOffset, bodyLength), 'deleteTextInFootnote');
+  }
+  const lines = nextText.split('\n');
+  let lastNative = { ok: true, charOffset: bodyOffset };
+  for (const [index, line] of lines.entries()) {
+    if (index > 0) {
+      // The first note paragraph has an inline note-number control before its
+      // visible two-character body prefix. Native split offsets are logical
+      // (text plus inline controls), whereas getFootnoteInfo exposes visible
+      // text only. Later note paragraphs have no marker control.
+      const splitOffset = index === 1
+        ? bodyOffset + [...lines[0]].length + 1
+        : [...lines[index - 1]].length;
+      lastNative = parseNativeResult(splitParagraph(...args, index - 1, splitOffset, undefined), 'splitParagraphInFootnote');
+    }
+    if (line.length > 0) {
+      lastNative = parseNativeResult(insertText(...args, index, index === 0 ? bodyOffset : 0, line), 'insertTextInFootnote', ['charOffset']);
+    }
+  }
+  return lastNative;
+}
+
+function applyNoteManage(doc, command) {
+  const action = String(command.action ?? '');
+  const target = resolveNoteTarget(doc, command);
+  if (action === 'replaceText') {
+    if (typeof command.text !== 'string' || command.text.length > 100_000) {
+      throw structuralError('HWPX_NOTE_TEXT_INVALID', 'note.manage replaceText requires text up to 100000 characters.', { target });
+    }
+    const native = replaceNoteText(doc, target, command.text);
+    return {
+      ...structuralResult(command, native, { ...target, kind: 'note' }),
+      expectedNoteText: command.text,
+    };
+  }
+  if (action === 'formatParagraph') {
+    const paragraphIndex = nonNegativeInteger(command.paragraphIndex);
+    if (paragraphIndex === null || paragraphIndex >= target.noteInfo.paraCount || !command.properties || typeof command.properties !== 'object') {
+      throw structuralError('HWPX_NOTE_FORMAT_INVALID', 'note.manage formatParagraph requires an existing paragraphIndex and paragraph-format properties.', { target });
+    }
+    const properties = normalizeParagraphStyle(command.properties);
+    const native = parseNativeResult(requireMethod(doc, 'applyParaFormatInFootnote')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, paragraphIndex, JSON.stringify(properties),
+    ), 'applyParaFormatInFootnote');
+    return {
+      ...structuralResult(command, native, { ...target, kind: 'note', noteParagraphIndex: paragraphIndex }),
+      expectedFormat: { scope: 'noteParagraph', properties },
+    };
+  }
+  if (action === 'delete') {
+    const native = parseNativeResult(requireMethod(doc, 'deleteFootnote')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'deleteFootnote');
+    return structuralResult(command, native, { ...target, kind: 'deletedNote' });
+  }
+  throw structuralError('HWPX_NOTE_ACTION_INVALID', `Unsupported note.manage action: ${action}.`);
+}
+
+function commandTargetOffset(command) {
+  const target = command.target ?? command.location ?? {};
+  const native = target.native && typeof target.native === 'object' ? target.native : {};
+  return firstSpecifiedInteger(target.offset, target.charOffset, native.offset, native.charOffset, 0);
+}
+
+function applyFieldInsert(doc, command, context) {
+  const targetValue = command.target ?? command.location ?? {};
+  const guide = typeof command.guide === 'string' ? command.guide : '';
+  const memo = typeof command.memo === 'string' ? command.memo : '';
+  const name = typeof command.name === 'string' ? command.name : '';
+  const editable = command.editable ?? true;
+  if (![guide, memo, name].every(value => value.length <= 4096) || typeof editable !== 'boolean') {
+    throw structuralError('HWPX_FIELD_INSERT_INVALID', 'field.insert guide, memo, and name must be strings up to 4096 characters and editable must be a boolean.');
+  }
+  if (isCellStyleTarget({ target: targetValue })) {
+    const target = resolveHwpxCellTarget(command, context);
+    const offset = commandTargetOffset(command);
+    const paragraphLength = inspectedCellParagraphLength(doc, context, target);
+    if (offset === null || offset > paragraphLength) {
+      throw structuralError('HWPX_TARGET_INVALID', 'field.insert offset exceeds the inspected cell or text-box paragraph length.', { target, offset, paragraphLength });
+    }
+    const targetNative = targetValue.native && typeof targetValue.native === 'object' ? targetValue.native : {};
+    const native = parseNativeResult(requireMethod(doc, 'insertClickHereFieldInCell')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+      target.cellIndex, target.cellParagraphIndex, offset,
+      targetValue.inTextBox === true || targetNative.inTextBox === true,
+      guide, memo, name, editable,
+    ), 'insertClickHereFieldInCell', ['fieldId', 'charOffset']);
+    const createdTarget = { ...target, kind: 'field', fieldId: native.fieldId };
+    return {
+      ...structuralResult(command, native, createdTarget, [createdTarget]),
+      expectedField: { fieldId: native.fieldId, name, guide, memo, editableInForm: editable },
+    };
+  }
+  const target = resolveHwpxTextTarget(command);
+  const paragraphLength = inspectedParagraphLength(doc, context, target);
+  if (target.offset > paragraphLength) {
+    throw structuralError('HWPX_TARGET_INVALID', 'field.insert offset exceeds the inspected body paragraph length.', { target, paragraphLength });
+  }
+  const native = parseNativeResult(requireMethod(doc, 'insertClickHereField')(
+    target.sectionIndex, target.paragraphIndex, target.offset, guide, memo, name, editable,
+  ), 'insertClickHereField', ['fieldId', 'charOffset']);
+  const createdTarget = {
+    kind: 'field', sectionIndex: target.sectionIndex, paragraphIndex: target.paragraphIndex,
+    fieldId: native.fieldId,
+  };
+  return {
+    ...structuralResult(command, native, createdTarget, [createdTarget]),
+    expectedField: { fieldId: native.fieldId, name, guide, memo, editableInForm: editable },
+  };
+}
+
+function fieldById(doc, fieldId) {
+  const fields = parseNativeArray(requireMethod(doc, 'getFieldList')(), 'getFieldList');
+  const field = fields.find(item => Number(item.fieldId) === fieldId);
+  if (!field) {
+    throw structuralError('HWPX_FIELD_NOT_FOUND', 'The requested ClickHere field was not found in the current document revision.', { fieldId, fields });
+  }
+  return field;
+}
+
+function applyFieldManage(doc, command) {
+  const action = String(command.action ?? '');
+  const fieldId = nonNegativeInteger(command.fieldId);
+  if (fieldId === null) {
+    throw structuralError('HWPX_FIELD_MANAGE_INVALID', 'field.manage requires a nonnegative fieldId returned by the current field inventory.');
+  }
+  const field = fieldById(doc, fieldId);
+  if (action === 'update') {
+    const guide = command.guide ?? field.guide ?? '';
+    const memo = command.memo ?? field.memo ?? '';
+    const name = command.name ?? field.name ?? '';
+    const editable = command.editable ?? field.editableInForm ?? true;
+    if (![guide, memo, name].every(value => typeof value === 'string' && value.length <= 4096)
+      || typeof editable !== 'boolean') {
+      throw structuralError('HWPX_FIELD_MANAGE_INVALID', 'field.manage update guide, memo, and name must be strings up to 4096 characters and editable must be boolean.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'updateClickHereProps')(
+      fieldId, guide, memo, name, editable,
+    ), 'updateClickHereProps');
+    return {
+      ...structuralResult(command, native, {
+        kind: 'field', sectionIndex: field.location?.sectionIndex, paragraphIndex: field.location?.paraIndex, fieldId,
+      }),
+      expectedField: { fieldId, name, guide, memo, editableInForm: editable },
+    };
+  }
+  if (action === 'delete') {
+    if (field.cellField === true) {
+      throw structuralError('HWPX_CELL_FIELD_DELETE_UNSUPPORTED', 'field.manage delete currently requires a top-level ClickHere field because nested field deletion uses a different native coordinate contract.', { field });
+    }
+    const sectionIndex = nonNegativeInteger(field.location?.sectionIndex);
+    const paragraphIndex = nonNegativeInteger(field.location?.paraIndex);
+    const offset = nonNegativeInteger(field.startCharIdx);
+    if (sectionIndex === null || paragraphIndex === null || offset === null || field.location?.path?.length) {
+      throw structuralError('HWPX_FIELD_DELETE_LOCATION_UNSUPPORTED', 'field.manage delete requires a top-level ClickHere field with native section, paragraph, and character coordinates.', { field });
+    }
+    const native = parseNativeResult(requireMethod(doc, 'removeFieldAt')(
+      sectionIndex, paragraphIndex, offset,
+    ), 'removeFieldAt');
+    return {
+      ...structuralResult(command, native, {
+        kind: 'deletedField', sectionIndex, paragraphIndex, fieldId,
+      }),
+      expectedDeletedFieldId: fieldId,
+    };
+  }
+  throw structuralError('HWPX_FIELD_MANAGE_ACTION_INVALID', `Unsupported field.manage action: ${action}.`);
+}
+
+const SECTION_DEFINITION_FIELDS = new Set([
+  'pageNum', 'pageNumType', 'pictureNum', 'tableNum', 'equationNum',
+  'columnSpacing', 'defaultTabSpacing', 'hideHeader', 'hideFooter',
+  'hideMasterPage', 'hideBorder', 'hideFill', 'hideEmptyLine',
+]);
+
+const PAGE_BORDER_FIELDS = new Set([
+  'basis', 'spacingLeft', 'spacingRight', 'spacingTop', 'spacingBottom',
+  'headerInside', 'footerInside', 'fillArea', 'hideBorder', 'hideFill', 'applyPage',
+  'borderLeft', 'borderRight', 'borderTop', 'borderBottom',
+  'fillType', 'fillColor', 'patternColor', 'patternType',
+]);
+
+const ENDNOTE_SHAPE_FIELDS = new Set([
+  'numberFormat', 'userChar', 'prefixChar', 'suffixChar', 'startNumber',
+  'separatorEnabled', 'separatorLength', 'separatorMarginTop', 'separatorMarginBottom',
+  'noteSpacing', 'separatorLineType', 'separatorLineWidth', 'separatorColor',
+  'numberCodeSuperscript', 'printInlineAfterText', 'numbering', 'placement',
+]);
+
+function completeEndnoteShapePatch(doc, sectionIndexValue, properties) {
+  const current = parseNativeObject(requireMethod(doc, 'getEndnoteShape')(sectionIndexValue), 'getEndnoteShape');
+  return {
+    ...Object.fromEntries(Object.entries(current).filter(([field]) => ENDNOTE_SHAPE_FIELDS.has(field))),
+    ...properties,
+  };
+}
+
+function sectionIndex(command) {
+  const value = boundedIndex(command.sectionIndex, 'sectionIndex');
+  return value;
+}
+
+function requiredSectionProperties(command, action, fields) {
+  const properties = command.properties;
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+    throw structuralError('HWPX_SECTION_PROPERTIES_INVALID', `section.configure ${action} requires a properties object.`);
+  }
+  const unknown = Object.keys(properties).filter(field => !fields.has(field));
+  if (unknown.length) {
+    throw structuralError('HWPX_SECTION_PROPERTIES_INVALID', `section.configure ${action} received unsupported properties: ${unknown.join(', ')}.`, { unknown });
+  }
+  if (Object.keys(properties).length === 0) {
+    throw structuralError('HWPX_SECTION_PROPERTIES_INVALID', `section.configure ${action} requires at least one property.`);
+  }
+  return properties;
+}
+
+function completePageBorderPatch(doc, sectionIndexValue, properties) {
+  const current = parseNativeObject(requireMethod(doc, 'getPageBorderFill')(sectionIndexValue), 'getPageBorderFill');
+  const inherited = Object.fromEntries(Object.entries(current)
+    .filter(([field]) => PAGE_BORDER_FIELDS.has(field)));
+  return { ...inherited, ...properties };
+}
+
+function applySectionConfigure(doc, command) {
+  const sectionIndexValue = sectionIndex(command);
+  const action = String(command.action ?? '');
+  if (action === 'pageBorder') {
+    const properties = requiredSectionProperties(command, action, PAGE_BORDER_FIELDS);
+    const nativeProperties = completePageBorderPatch(doc, sectionIndexValue, properties);
+    const native = parseNativeResult(requireMethod(doc, 'setPageBorderFill')(
+      sectionIndexValue, JSON.stringify(nativeProperties),
+    ), 'setPageBorderFill');
+    return {
+      ...structuralResult(command, native, { kind: 'section', sectionIndex: sectionIndexValue }),
+      expectedSection: { action, properties },
+    };
+  }
+  if (action === 'columns') {
+    const properties = requiredSectionProperties(command, action, new Set(['count', 'type', 'sameWidth', 'spacing']));
+    const current = parseNativeObject(requireMethod(doc, 'getColumnDef')(sectionIndexValue), 'getColumnDef');
+    const count = positiveInteger(properties.count ?? current.columnCount);
+    const typeName = properties.type ?? ({ 0: 'normal', 1: 'distribute', 2: 'parallel' }[Number(current.columnType)]);
+    const type = { normal: 0, distribute: 1, parallel: 2 }[typeName];
+    const sameWidth = properties.sameWidth ?? current.sameWidth;
+    const spacing = Number(properties.spacing ?? current.spacing);
+    if (count === null || type === undefined || typeof sameWidth !== 'boolean'
+      || !Number.isInteger(spacing) || spacing < -32768 || spacing > 32767) {
+      throw structuralError('HWPX_SECTION_COLUMNS_INVALID', 'section.configure columns requires a positive count, type normal/distribute/parallel, boolean sameWidth, and i16 spacing.', { properties, current });
+    }
+    const native = parseNativeResult(requireMethod(doc, 'setColumnDef')(
+      sectionIndexValue, count, type, sameWidth ? 1 : 0, spacing,
+    ), 'setColumnDef');
+    return {
+      ...structuralResult(command, native, { kind: 'section', sectionIndex: sectionIndexValue }),
+      expectedSection: { action, properties: { columnCount: count, columnType: type, sameWidth, spacing } },
+    };
+  }
+  if (action === 'properties') {
+    const properties = requiredSectionProperties(command, action, SECTION_DEFINITION_FIELDS);
+    for (const [field, value] of Object.entries(properties)) {
+      if (['hideHeader', 'hideFooter', 'hideMasterPage', 'hideBorder', 'hideFill', 'hideEmptyLine'].includes(field)) {
+        if (typeof value !== 'boolean') throw structuralError('HWPX_SECTION_PROPERTIES_INVALID', `${field} must be boolean.`);
+      } else if (!Number.isInteger(value) || value < 0 || value > 0xFFFF_FFFF) {
+        throw structuralError('HWPX_SECTION_PROPERTIES_INVALID', `${field} must be a nonnegative integer.`);
+      }
+    }
+    const native = parseNativeResult(requireMethod(doc, 'setSectionDef')(
+      sectionIndexValue, JSON.stringify(properties),
+    ), 'setSectionDef');
+    return {
+      ...structuralResult(command, native, { kind: 'section', sectionIndex: sectionIndexValue }),
+      expectedSection: { action, properties },
+    };
+  }
+  if (action === 'endnoteShape') {
+    const properties = requiredSectionProperties(command, action, ENDNOTE_SHAPE_FIELDS);
+    const nativeProperties = completeEndnoteShapePatch(doc, sectionIndexValue, properties);
+    const native = parseNativeResult(requireMethod(doc, 'applyEndnoteShape')(
+      sectionIndexValue, JSON.stringify(nativeProperties),
+    ), 'applyEndnoteShape');
+    return {
+      ...structuralResult(command, native, { kind: 'endnoteShape', sectionIndex: sectionIndexValue }),
+      expectedSection: { action, properties },
+    };
+  }
+  const paragraphIndex = boundedIndex(command.paragraphIndex, 'paragraphIndex');
+  if (action === 'pageHide') {
+    const properties = requiredSectionProperties(command, action, new Set([
+      'hideHeader', 'hideFooter', 'hideMasterPage', 'hideBorder', 'hideFill', 'hidePageNum',
+    ]));
+    if (Object.values(properties).some(value => typeof value !== 'boolean')) {
+      throw structuralError('HWPX_SECTION_PAGE_HIDE_INVALID', 'section.configure pageHide values must all be booleans.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'setPageHide')(
+      sectionIndexValue, paragraphIndex,
+      properties.hideHeader ?? false, properties.hideFooter ?? false, properties.hideMasterPage ?? false,
+      properties.hideBorder ?? false, properties.hideFill ?? false, properties.hidePageNum ?? false,
+    ), 'setPageHide');
+    return {
+      ...structuralResult(command, native, { kind: 'pageHide', sectionIndex: sectionIndexValue, paragraphIndex }),
+      expectedSection: { action, properties },
+    };
+  }
+  if (action === 'pageNumberStart') {
+    const offset = boundedIndex(command.offset, 'offset', 0xFFFF_FFFF);
+    const startNumber = positiveInteger(command.startNumber);
+    if (startNumber === null || startNumber > 65535) {
+      throw structuralError('HWPX_SECTION_PAGE_NUMBER_INVALID', 'section.configure pageNumberStart requires a startNumber from 1 through 65535.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'insertNewNumber')(
+      sectionIndexValue, paragraphIndex, offset, startNumber,
+    ), 'insertNewNumber');
+    return {
+      ...structuralResult(command, native, { kind: 'newNumber', sectionIndex: sectionIndexValue, paragraphIndex, startNumber }),
+      expectedSection: { action, properties: { startNumber } },
+    };
+  }
+  throw structuralError('HWPX_SECTION_ACTION_INVALID', `Unsupported section.configure action: ${action}.`);
+}
+
+function bookmarkControlTarget(command) {
+  const target = resolveObjectTarget(command, 'bookmark');
+  if (Array.isArray(target.cellPath)) {
+    throw structuralError('HWPX_NESTED_BOOKMARK_UNSUPPORTED', 'bookmark.manage rename/delete currently requires a top-level bookmark control.');
+  }
+  return target;
+}
+
+function applyBookmarkManage(doc, command, context) {
+  const action = String(command.action ?? '');
+  if (action === 'create') {
+    const name = typeof command.name === 'string' ? command.name.trim() : '';
+    if (!name || name.length > 512) {
+      throw structuralError('HWPX_BOOKMARK_NAME_INVALID', 'bookmark.manage create requires a nonblank name up to 512 characters.');
+    }
+    const target = resolveHwpxTextTarget(command);
+    const paragraphLength = inspectedParagraphLength(doc, context, target);
+    if (target.offset > paragraphLength) {
+      throw structuralError('HWPX_TARGET_INVALID', 'bookmark.manage create offset exceeds the inspected paragraph length.', { target, paragraphLength });
+    }
+    const native = parseNativeResult(requireMethod(doc, 'addBookmark')(
+      target.sectionIndex, target.paragraphIndex, target.offset, name,
+    ), 'addBookmark');
+    return {
+      ...structuralResult(command, native, { kind: 'bookmark', sectionIndex: target.sectionIndex, paragraphIndex: target.paragraphIndex, name }),
+      expectedBookmark: { action, name, sectionIndex: target.sectionIndex, paragraphIndex: target.paragraphIndex },
+    };
+  }
+  const target = bookmarkControlTarget(command);
+  if (action === 'rename') {
+    const newName = typeof command.newName === 'string' ? command.newName.trim() : '';
+    if (!newName || newName.length > 512) {
+      throw structuralError('HWPX_BOOKMARK_NAME_INVALID', 'bookmark.manage rename requires a nonblank newName up to 512 characters.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'renameBookmark')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, newName,
+    ), 'renameBookmark');
+    return {
+      ...structuralResult(command, native, { kind: 'bookmark', ...target, name: newName }),
+      expectedBookmark: { action, name: newName, sectionIndex: target.sectionIndex, paragraphIndex: target.paragraphIndex },
+    };
+  }
+  if (action === 'delete') {
+    const native = parseNativeResult(requireMethod(doc, 'deleteBookmark')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'deleteBookmark');
+    return {
+      ...structuralResult(command, native, { ...target, kind: 'deletedBookmark' }),
+      expectedBookmark: { action, sectionIndex: target.sectionIndex, paragraphIndex: target.paragraphIndex, controlIndex: target.controlIndex },
+    };
+  }
+  throw structuralError('HWPX_BOOKMARK_ACTION_INVALID', `Unsupported bookmark.manage action: ${action}.`);
 }
 
 function normalizeCharacterStyle(doc, style) {
@@ -1960,6 +2496,34 @@ function applyObjectProperties(doc, command, scope, methodName) {
   };
 }
 
+function completeCellBorderFillPatch(doc, target, properties) {
+  if (!Object.keys(properties).some(field => CELL_BORDER_FILL_PATCH_FIELDS.has(field))) {
+    return properties;
+  }
+  const current = parseNativeObject(requireMethod(doc, 'getCellProperties')(
+    target.sectionIndex,
+    target.paragraphIndex,
+    target.controlIndex,
+    target.cellIndex,
+  ), 'getCellProperties');
+  const inherited = Object.fromEntries(CELL_BORDER_FILL_FIELDS
+    .filter(field => current[field] !== undefined)
+    .map(field => [field, current[field]]));
+  if (!Number.isInteger(inherited.borderFillId) || inherited.borderFillId < 0) {
+    throw structuralError(
+      'HWPX_ENGINE_RESULT_INVALID',
+      'getCellProperties omitted the current border/fill identity required for a sparse cell format patch.',
+      { target, current },
+    );
+  }
+  const changesFillAppearance = ['fillColor', 'patternColor', 'patternType']
+    .some(field => properties[field] !== undefined);
+  if (changesFillAppearance && properties.fillType === undefined && inherited.fillType !== 'solid') {
+    inherited.fillType = 'solid';
+  }
+  return { ...inherited, ...properties };
+}
+
 function applyFormat(doc, command, context) {
   const scope = String(command.scope ?? '');
   if (scope === 'character') {
@@ -1971,12 +2535,13 @@ function applyFormat(doc, command, context) {
   if (scope === 'cell') {
     const target = resolveHwpxCellTarget(command, context);
     const properties = normalizeFormatProperties(scope, command.properties);
+    const nativeProperties = completeCellBorderFillPatch(doc, target, properties);
     const native = parseNativeResult(requireMethod(doc, 'setCellProperties')(
       target.sectionIndex,
       target.paragraphIndex,
       target.controlIndex,
       target.cellIndex,
-      JSON.stringify(properties),
+      JSON.stringify(nativeProperties),
     ), 'setCellProperties');
     return {
       ...structuralResult(command, native, target),
@@ -2047,6 +2612,34 @@ function applyTableStructure(doc, command, context) {
       command.equalRowHeight !== false,
       command.mergeFirst === true,
     ), 'splitTableCellInto');
+  } else if (action === 'splitTable') {
+    native = parseNativeResult(requireMethod(doc, 'splitTable')(
+      ...args, boundedIndex(command.atRow, 'atRow'),
+    ), 'splitTable', ['frontRows', 'backParaIdx']);
+    const objects = parseNativeArray(requireMethod(doc, 'getObjects')(), 'getObjects');
+    const backControl = objects.find(item =>
+      Number(item.para) === Number(native.backParaIdx) && item.kind === 'table');
+    if (!backControl || nonNegativeInteger(backControl.controlIndex) === null) {
+      throw structuralError('HWPX_TABLE_SPLIT_TARGET_MISSING', 'splitTable did not return an inspectable second table control.', { native, objects });
+    }
+    const created = {
+      kind: 'table', sectionIndex: target.sectionIndex, paragraphIndex: native.backParaIdx,
+      controlIndex: backControl.controlIndex,
+    };
+    const backDimensions = parseNativeObject(requireMethod(doc, 'getTableDimensions')(
+      created.sectionIndex, created.paragraphIndex, created.controlIndex,
+    ), 'getTableDimensions');
+    return {
+      ...structuralResult(command, native, target, [created]),
+      expectedTableDimensions: parseNativeObject(requireMethod(doc, 'getTableDimensions')(...args), 'getTableDimensions'),
+      expectedCreatedTableDimensions: { ...created, ...backDimensions },
+    };
+  } else if (action === 'attachNextTable') {
+    native = parseNativeResult(requireMethod(doc, 'mergeTableWithNext')(...args), 'mergeTableWithNext', ['rowCount']);
+    return {
+      ...structuralResult(command, native, target),
+      expectedTableDimensions: parseNativeObject(requireMethod(doc, 'getTableDimensions')(...args), 'getTableDimensions'),
+    };
   } else if (action === 'deleteTable') {
     native = parseNativeResult(requireMethod(doc, 'deleteTableControl')(...args), 'deleteTableControl');
     return structuralResult(command, native, { ...target, kind: 'deletedTable' });
@@ -2061,6 +2654,124 @@ function applyTableStructure(doc, command, context) {
       cellCount: native.cellCount,
     },
   };
+}
+
+function tableCellsInRequestedRange(doc, target, command) {
+  const dimensions = parseNativeObject(requireMethod(doc, 'getTableDimensions')(
+    target.sectionIndex, target.paragraphIndex, target.controlIndex,
+  ), 'getTableDimensions');
+  const startRow = boundedIndex(command.startRow ?? 0, 'startRow');
+  const startColumn = boundedIndex(command.startColumn ?? 0, 'startColumn');
+  const endRow = boundedIndex(command.endRow ?? Math.max(0, Number(dimensions.rowCount) - 1), 'endRow');
+  const endColumn = boundedIndex(command.endColumn ?? Math.max(0, Number(dimensions.colCount) - 1), 'endColumn');
+  if (startRow > endRow || startColumn > endColumn
+    || endRow >= Number(dimensions.rowCount) || endColumn >= Number(dimensions.colCount)) {
+    throw structuralError('HWPX_TABLE_RANGE_INVALID', 'The requested table range is outside the inspected table.', {
+      dimensions, startRow, startColumn, endRow, endColumn,
+    });
+  }
+  const cells = [];
+  for (let cellIndex = 0; cellIndex < Number(dimensions.cellCount); cellIndex += 1) {
+    const info = parseNativeObject(requireMethod(doc, 'getCellInfo')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, cellIndex,
+    ), 'getCellInfo');
+    const lastRow = Number(info.row) + Math.max(1, Number(info.rowSpan || 1)) - 1;
+    const lastColumn = Number(info.col) + Math.max(1, Number(info.colSpan || 1)) - 1;
+    if (Number(info.row) >= startRow && lastRow <= endRow
+      && Number(info.col) >= startColumn && lastColumn <= endColumn) {
+      cells.push({ cellIndex, info });
+    }
+  }
+  return { dimensions, startRow, startColumn, endRow, endColumn, cells };
+}
+
+function findTableCellIndex(doc, target, row, column) {
+  const dimensions = parseNativeObject(requireMethod(doc, 'getTableDimensions')(
+    target.sectionIndex, target.paragraphIndex, target.controlIndex,
+  ), 'getTableDimensions');
+  for (let cellIndex = 0; cellIndex < Number(dimensions.cellCount); cellIndex += 1) {
+    const info = parseNativeObject(requireMethod(doc, 'getCellInfo')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, cellIndex,
+    ), 'getCellInfo');
+    if (Number(info.row) === row && Number(info.col) === column) return cellIndex;
+  }
+  throw structuralError('HWPX_TABLE_RANGE_INVALID', 'The requested row and column do not identify a table cell.', { target, row, column });
+}
+
+function applyTableTransform(doc, command, context) {
+  const target = resolveHwpxTableTarget(command, context);
+  const action = String(command.action ?? '');
+  const args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+  if (action === 'transpose') {
+    const native = parseNativeResult(requireMethod(doc, 'transposeTableCellsInPlace')(...args), 'transposeTableCellsInPlace');
+    return {
+      ...structuralResult(command, native, target),
+      expectedTableDimensions: {
+        rowCount: native.targetRows,
+        colCount: native.targetCols,
+        cellCount: Number(native.targetRows) * Number(native.targetCols),
+      },
+    };
+  }
+  if (action === 'calculate') {
+    const row = boundedIndex(command.row, 'row');
+    const column = boundedIndex(command.column, 'column');
+    const formula = String(command.formula ?? '').trim();
+    if (!formula || formula.length > 2048) {
+      throw structuralError('HWPX_TABLE_FORMULA_INVALID', 'table.transform calculate requires a formula up to 2048 characters.');
+    }
+    const writeResult = command.writeResult !== false;
+    const native = parseNativeResult(requireMethod(doc, 'evaluateTableFormula')(
+      ...args, row, column, formula, writeResult,
+    ), 'evaluateTableFormula');
+    const cellIndex = findTableCellIndex(doc, target, row, column);
+    const formulaTarget = {
+      kind: 'cell', ...target, cellIndex, cellParagraphIndex: 0,
+    };
+    return {
+      ...structuralResult(command, native, formulaTarget),
+      ...(writeResult ? { expectedCellText: String(native.result ?? '') } : {}),
+    };
+  }
+  if (!['equalizeRowHeight', 'equalizeColumnWidth'].includes(action)) {
+    throw structuralError('HWPX_TABLE_TRANSFORM_ACTION_INVALID', `Unsupported table.transform action: ${action}.`);
+  }
+  const range = tableCellsInRequestedRange(doc, target, command);
+  if (range.cells.length < 2) {
+    throw structuralError('HWPX_TABLE_RANGE_INVALID', `${action} requires at least two unmerged cells in the requested range.`);
+  }
+  if (range.cells.some(({ info }) => Number(info.rowSpan || 1) > 1 || Number(info.colSpan || 1) > 1)) {
+    throw structuralError(
+      'HWPX_TABLE_TRANSFORM_MERGED_RANGE_UNSUPPORTED',
+      `${action} currently requires an unmerged rectangular cell range.`,
+      { range: { startRow: range.startRow, startColumn: range.startColumn, endRow: range.endRow, endColumn: range.endColumn } },
+    );
+  }
+  const bboxes = parseNativeArray(requireMethod(doc, 'getTableCellBboxes')(...args, 0), 'getTableCellBboxes');
+  const bboxByCell = new Map(bboxes.map(item => [Number(item.cellIdx), item]));
+  const propertiesByCell = new Map(range.cells.map(({ cellIndex }) => [cellIndex, parseNativeObject(
+    requireMethod(doc, 'getCellProperties')(...args, cellIndex), 'getCellProperties',
+  )]));
+  const boxField = action === 'equalizeRowHeight' ? 'h' : 'w';
+  const renderSizes = range.cells.map(({ cellIndex }) => Number(bboxByCell.get(cellIndex)?.[boxField]) * 75);
+  if (renderSizes.some(size => !Number.isFinite(size) || size <= 0)) {
+    throw structuralError('HWPX_TABLE_RENDER_MEASUREMENT_INVALID', `${action} could not obtain a positive rendered cell measurement.`, { range, bboxes });
+  }
+  const average = Math.round(renderSizes.reduce((sum, size) => sum + size, 0) / renderSizes.length);
+  const updates = range.cells.map(({ cellIndex }, index) => action === 'equalizeRowHeight'
+    ? { cellIdx: cellIndex, heightDelta: 0, localResize: true, renderHeight: average }
+    : {
+      cellIdx: cellIndex,
+      widthDelta: average - Number(propertiesByCell.get(cellIndex)?.width || 0),
+      localResize: true,
+      renderWidth: average,
+    });
+  const native = parseNativeResult(requireMethod(doc, 'resizeTableCells')(
+    ...args, JSON.stringify(updates),
+  ), 'resizeTableCells');
+  return structuralResult(command, native, target, [], {
+    equalizedRange: { startRow: range.startRow, startColumn: range.startColumn, endRow: range.endRow, endColumn: range.endColumn, average },
+  });
 }
 
 function applyParagraphStructure(doc, command) {
@@ -2099,7 +2810,274 @@ function applyObjectFormat(doc, command) {
   const scope = String(command.scope ?? '');
   if (scope === 'image') return applyObjectProperties(doc, command, scope, 'setPictureProperties');
   if (scope === 'shape') return applyObjectProperties(doc, command, scope, 'setShapeProperties');
+  if (scope === 'equation') {
+    const target = resolveObjectTarget(command, scope);
+    const properties = normalizeFormatProperties(scope, command.properties);
+    if (Array.isArray(target.cellPath)) {
+      throw structuralError('HWPX_NESTED_EQUATION_UNSUPPORTED', 'object.format equation does not yet support an equation nested in a table or text box.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'setEquationProperties')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, -1, -1, JSON.stringify(properties),
+    ), 'setEquationProperties');
+    return {
+      ...structuralResult(command, native, target),
+      expectedFormat: { scope, properties },
+    };
+  }
   throw structuralError('HWPX_FORMAT_SCOPE_INVALID', `Unsupported object.format scope: ${scope}.`);
+}
+
+const SHAPE_TYPES = new Set([
+  'line', 'rectangle', 'ellipse', 'polygon', 'arc',
+  'connector-straight', 'connector-stroke', 'connector-arc',
+  'connector-straight-arrow', 'connector-stroke-arrow', 'connector-arc-arrow',
+]);
+
+function applyObjectCreate(doc, command, context) {
+  const target = resolveHwpxTextTarget(command);
+  const paragraphLength = inspectedParagraphLength(doc, context, target);
+  if (target.offset > paragraphLength) {
+    throw structuralError('HWPX_TARGET_INVALID', 'object.create offset exceeds the inspected body paragraph length.', { target, paragraphLength });
+  }
+  const kind = String(command.kind ?? '');
+  if (kind === 'equation') {
+    const script = String(command.script ?? '').trim();
+    const fontSize = positiveInteger(command.fontSize ?? 1000);
+    const color = nonNegativeInteger(command.color ?? 0);
+    if (!script || script.length > 4096 || fontSize === null || color === null) {
+      throw structuralError('HWPX_EQUATION_CREATE_INVALID', 'object.create equation requires a nonblank script up to 4096 characters, positive fontSize, and packed color.');
+    }
+    const native = parseNativeResult(requireMethod(doc, 'insertEquation')(
+      target.sectionIndex, target.paragraphIndex, target.offset, script, fontSize, color,
+    ), 'insertEquation', ['paraIdx', 'controlIdx']);
+    const createdTarget = {
+      kind: 'equation', sectionIndex: target.sectionIndex,
+      paragraphIndex: native.paraIdx, controlIndex: native.controlIdx,
+    };
+    return {
+      ...structuralResult(command, native, createdTarget, [createdTarget]),
+      expectedFormat: { scope: 'equation', properties: { script, fontSize, color } },
+    };
+  }
+  if (!['shape', 'textBox'].includes(kind)) {
+    throw structuralError('HWPX_OBJECT_KIND_INVALID', 'object.create kind must be shape, textBox, or equation.');
+  }
+  const shapeType = kind === 'textBox' ? 'textbox' : String(command.shapeType ?? 'rectangle');
+  if (!SHAPE_TYPES.has(shapeType) && shapeType !== 'textbox') {
+    throw structuralError('HWPX_SHAPE_TYPE_INVALID', `Unsupported shape type: ${shapeType}.`, { supported: [...SHAPE_TYPES] });
+  }
+  const width = positiveInteger(command.width ?? 18000);
+  const height = positiveInteger(command.height ?? 9000);
+  const horzOffset = nonNegativeInteger(command.horzOffset ?? 0);
+  const vertOffset = nonNegativeInteger(command.vertOffset ?? 0);
+  const treatAsChar = command.treatAsChar ?? kind === 'textBox';
+  const textWrap = command.textWrap ?? 'InFrontOfText';
+  if ([width, height, horzOffset, vertOffset].some(value => value === null)
+    || typeof treatAsChar !== 'boolean'
+    || !['Square', 'Tight', 'Through', 'TopAndBottom', 'BehindText', 'InFrontOfText'].includes(textWrap)
+    || (command.lineFlipX !== undefined && typeof command.lineFlipX !== 'boolean')
+    || (command.lineFlipY !== undefined && typeof command.lineFlipY !== 'boolean')) {
+    throw structuralError('HWPX_SHAPE_CREATE_INVALID', 'object.create shape dimensions, offsets, wrapping, and flip flags are invalid.');
+  }
+  if (shapeType === 'polygon' && command.polygonPoints !== undefined
+    && (!Array.isArray(command.polygonPoints) || command.polygonPoints.length < 3
+      || command.polygonPoints.some(point => nonNegativeInteger(point?.x) === null || nonNegativeInteger(point?.y) === null))) {
+    throw structuralError('HWPX_SHAPE_CREATE_INVALID', 'polygonPoints must contain at least three nonnegative {x,y} points.');
+  }
+  const native = parseNativeResult(requireMethod(doc, 'createShapeControl')(JSON.stringify({
+    sectionIdx: target.sectionIndex, paraIdx: target.paragraphIndex, charOffset: target.offset,
+    width, height, horzOffset, vertOffset, treatAsChar, textWrap, shapeType,
+    lineFlipX: command.lineFlipX === true, lineFlipY: command.lineFlipY === true,
+    ...(command.polygonPoints === undefined ? {} : { polygonPoints: command.polygonPoints }),
+  })), 'createShapeControl', ['paraIdx', 'controlIdx']);
+  const createdTarget = {
+    kind: 'shape', sectionIndex: target.sectionIndex,
+    paragraphIndex: native.paraIdx, controlIndex: native.controlIdx,
+  };
+  if (kind !== 'textBox' || command.text === undefined) {
+    return structuralResult(command, native, createdTarget, [createdTarget]);
+  }
+  if (typeof command.text !== 'string' || command.text.length > 100_000) {
+    throw structuralError('HWPX_TEXTBOX_TEXT_INVALID', 'object.create textBox text must be a string up to 100000 characters.');
+  }
+  const textNative = setTextBoxText(doc, createdTarget, command.text);
+  return {
+    ...structuralResult(command, { control: native, text: textNative }, createdTarget, [createdTarget]),
+    expectedTextBoxText: command.text,
+  };
+}
+
+function setTextBoxText(doc, target, text) {
+  const getCount = requireMethod(doc, 'getCellParagraphCount');
+  const getLength = requireMethod(doc, 'getCellParagraphLength');
+  const deleteText = requireMethod(doc, 'deleteTextInCell');
+  const mergeParagraph = requireMethod(doc, 'mergeParagraphInCell');
+  const splitParagraph = requireMethod(doc, 'splitParagraphInCell');
+  const insertText = requireMethod(doc, 'insertTextInCell');
+  const args = [target.sectionIndex, target.paragraphIndex, target.controlIndex, 0];
+  const paragraphCount = nonNegativeInteger(getCount(...args));
+  if (paragraphCount === null || paragraphCount < 1) {
+    throw structuralError('HWPX_TEXTBOX_TARGET_INVALID', 'The exact object target is not an editable text box.', { target });
+  }
+  for (let paragraphIndex = paragraphCount - 1; paragraphIndex >= 0; paragraphIndex -= 1) {
+    const length = nonNegativeInteger(getLength(...args, paragraphIndex));
+    if (length === null) throw structuralError('HWPX_ENGINE_RESULT_INVALID', 'The text box did not return a valid paragraph length.', { target, paragraphIndex });
+    if (length > 0) parseNativeResult(deleteText(...args, paragraphIndex, 0, length), 'deleteTextInCell');
+    if (paragraphIndex > 0) parseNativeResult(mergeParagraph(...args, paragraphIndex), 'mergeParagraphInCell');
+  }
+  const lines = text.split('\n');
+  let lastNative = { ok: true, charOffset: 0 };
+  for (const [index, line] of lines.entries()) {
+    if (index > 0) {
+      const previousLength = nonNegativeInteger(getLength(...args, index - 1));
+      lastNative = parseNativeResult(splitParagraph(...args, index - 1, previousLength), 'splitParagraphInCell');
+    }
+    if (line) lastNative = parseNativeResult(insertText(...args, index, 0, line), 'insertTextInCell', ['charOffset']);
+  }
+  return lastNative;
+}
+
+function applyObjectManage(doc, command) {
+  const kind = String(command.kind ?? '');
+  const action = String(command.action ?? '');
+  if (action === 'group') {
+    if (!['shape', 'object'].includes(kind) || !Array.isArray(command.targets) || command.targets.length < 2) {
+      throw structuralError(
+        'HWPX_OBJECT_GROUP_INVALID',
+        'object.manage group requires kind=object (or legacy shape) and at least two exact inspected drawing targets.',
+      );
+    }
+    const targets = command.targets.map((candidate, index) => {
+      const target = resolveObjectTarget({ target: candidate }, 'object');
+      if (Array.isArray(target.cellPath)) {
+        throw structuralError('HWPX_NESTED_SHAPE_GROUP_UNSUPPORTED', 'Grouping shapes nested inside a table is not yet exposed by the native engine.', { index, target });
+      }
+      return target;
+    });
+    const sectionIndex = targets[0].sectionIndex;
+    if (targets.some(target => target.sectionIndex !== sectionIndex)) {
+      throw structuralError('HWPX_OBJECT_GROUP_INVALID', 'All grouped shapes must belong to the same inspected section.', { targets });
+    }
+    const native = parseNativeResult(requireMethod(doc, 'groupShapes')(JSON.stringify({
+      sectionIdx: sectionIndex,
+      targets: targets.map(target => ({ paraIdx: target.paragraphIndex, controlIdx: target.controlIndex })),
+    })), 'groupShapes', ['paraIdx', 'controlIdx']);
+    const createdTarget = {
+      kind: 'shape', sectionIndex, paragraphIndex: native.paraIdx, controlIndex: native.controlIdx,
+    };
+    const properties = parseNativeObject(requireMethod(doc, 'getShapeProperties')(
+      sectionIndex, native.paraIdx, native.controlIdx,
+    ), 'getShapeProperties');
+    if (properties.objectType !== 'group' || properties.childCount !== targets.length) {
+      throw structuralError(
+        'HWPX_OBJECT_GROUP_RESULT_INVALID',
+        'RHWP grouping did not produce the expected native group object.',
+        { targets, native, properties },
+      );
+    }
+    return structuralResult(command, native, createdTarget, [createdTarget], {
+      expectedObjectGroup: { childCount: targets.length },
+    });
+  }
+  if (action === 'ungroup') {
+    if (!['shape', 'object'].includes(kind)) {
+      throw structuralError('HWPX_OBJECT_UNGROUP_INVALID', 'object.manage ungroup requires kind=object (or legacy shape) and one inspected native group target.');
+    }
+    const target = resolveObjectTarget(command, kind);
+    if (Array.isArray(target.cellPath)) {
+      throw structuralError('HWPX_NESTED_SHAPE_UNGROUP_UNSUPPORTED', 'Ungrouping a shape nested inside a table is not yet exposed by the native engine.', { target });
+    }
+    const before = parseNativeObject(requireMethod(doc, 'getShapeProperties')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'getShapeProperties');
+    if (before.objectType !== 'group' || !Number.isInteger(before.childCount) || before.childCount < 2) {
+      throw structuralError('HWPX_OBJECT_UNGROUP_INVALID', 'The exact object target is not a native group containing at least two children.', { target, before });
+    }
+    const native = parseNativeResult(requireMethod(doc, 'ungroupShape')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'ungroupShape');
+    const objects = parseNativeArray(requireMethod(doc, 'getObjects')(), 'getObjects');
+    const restored = objects.filter(item => Number(item.para) === target.paragraphIndex).length;
+    if (restored < before.childCount) {
+      throw structuralError(
+        'HWPX_OBJECT_UNGROUP_RESULT_INVALID',
+        'RHWP ungrouping did not restore the expected number of visible child controls.',
+        { target, before, objects },
+      );
+    }
+    return structuralResult(command, native, { ...target, kind: 'ungroupedObject' }, [], {
+      expectedUngroupedChildCount: before.childCount,
+    });
+  }
+  const target = resolveObjectTarget(command, kind === 'textBox' ? 'shape' : kind);
+  if (action === 'setText') {
+    if (kind !== 'textBox' || typeof command.text !== 'string' || command.text.length > 100_000) {
+      throw structuralError('HWPX_TEXTBOX_TEXT_INVALID', 'object.manage setText requires kind=textBox and a text string up to 100000 characters.');
+    }
+    if (Array.isArray(target.cellPath)) {
+      throw structuralError('HWPX_NESTED_TEXTBOX_UNSUPPORTED', 'object.manage setText does not yet support a text box nested inside a table.');
+    }
+    const native = setTextBoxText(doc, target, command.text);
+    return { ...structuralResult(command, native, target), expectedTextBoxText: command.text };
+  }
+  if (action === 'arrange') {
+    if (!['shape', 'textBox'].includes(kind) || Array.isArray(target.cellPath) || !['front', 'back', 'forward', 'backward'].includes(command.order)) {
+      throw structuralError('HWPX_OBJECT_ARRANGE_INVALID', 'object.manage arrange requires a top-level shape or textBox and a valid order.');
+    }
+    const getShapeProperties = requireMethod(doc, 'getShapeProperties');
+    const before = parseNativeObject(getShapeProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'getShapeProperties');
+    const native = parseNativeResult(requireMethod(doc, 'changeShapeZOrder')(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, command.order,
+    ), 'changeShapeZOrder');
+    const after = parseNativeObject(getShapeProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex,
+    ), 'getShapeProperties');
+    if (before.zOrder !== undefined && before.zOrder === after.zOrder) {
+      throw structuralError(
+        'HWPX_OBJECT_ARRANGE_NOOP',
+        'The requested object arrangement did not change the target z-order; choose a non-noop order or another target.',
+        { target, order: command.order, beforeZOrder: before.zOrder, afterZOrder: after.zOrder },
+      );
+    }
+    return {
+      ...structuralResult(command, native, target),
+      ...(after.zOrder === undefined ? {} : { expectedObjectZOrder: after.zOrder }),
+    };
+  }
+  if (action === 'delete') {
+    let methodName;
+    let args;
+    if (kind === 'image') {
+      if (Array.isArray(target.cellPath)) {
+        methodName = 'deleteCellPictureControlByPath';
+        args = [target.sectionIndex, target.paragraphIndex, JSON.stringify(target.cellPath), target.controlIndex];
+      } else {
+        methodName = 'deletePictureControl';
+        args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+      }
+    } else if (['shape', 'textBox'].includes(kind)) {
+      if (Array.isArray(target.cellPath)) throw structuralError('HWPX_NESTED_SHAPE_DELETE_UNSUPPORTED', 'Deleting a shape nested in a table is not yet exposed by the native engine.');
+      methodName = 'deleteShapeControl';
+      args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+    } else if (kind === 'equation') {
+      if (Array.isArray(target.cellPath)) throw structuralError('HWPX_NESTED_EQUATION_UNSUPPORTED', 'Deleting an equation nested in a table or text box is not yet exposed by this command.');
+      methodName = 'deleteEquationControl';
+      args = [target.sectionIndex, target.paragraphIndex, target.controlIndex];
+    } else {
+      throw structuralError('HWPX_OBJECT_KIND_INVALID', 'object.manage delete requires image, shape, textBox, or equation kind.');
+    }
+    const objectsBefore = parseNativeArray(requireMethod(doc, 'getObjects')(), 'getObjects');
+    const objectKind = kind === 'textBox' ? 'shape' : kind;
+    const expectedObjectCount = objectsBefore.filter(item => item.kind === objectKind).length - 1;
+    const native = parseNativeResult(requireMethod(doc, methodName)(...args), methodName);
+    return {
+      ...structuralResult(command, native, { ...target, kind: 'deletedObject', objectKind }),
+      expectedObjectCount,
+    };
+  }
+  throw structuralError('HWPX_OBJECT_MANAGE_ACTION_INVALID', `Unsupported object.manage action: ${action}.`);
 }
 
 function applyAutoFitTableCell(doc, command, context) {
@@ -2308,6 +3286,14 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyHeaderFooter(doc, command);
     case 'insertFootnote':
       return applyInsertFootnote(doc, command, context);
+    case 'note.insert':
+      return applyNoteInsert(doc, command, context);
+    case 'note.manage':
+      return applyNoteManage(doc, command);
+    case 'field.insert':
+      return applyFieldInsert(doc, command, context);
+    case 'field.manage':
+      return applyFieldManage(doc, command);
     case 'defineStyle':
       return applyDefineStyle(doc, command);
     case 'applyStyle':
@@ -2322,8 +3308,18 @@ function applyHwpxStructuralCommand(doc, command, context = {}) {
       return applyObjectFormat(doc, command);
     case 'table.structure':
       return applyTableStructure(doc, command, context);
+    case 'table.transform':
+      return applyTableTransform(doc, command, context);
     case 'paragraph.structure':
       return applyParagraphStructure(doc, command);
+    case 'section.configure':
+      return applySectionConfigure(doc, command);
+    case 'bookmark.manage':
+      return applyBookmarkManage(doc, command, context);
+    case 'object.create':
+      return applyObjectCreate(doc, command, context);
+    case 'object.manage':
+      return applyObjectManage(doc, command);
     case 'table.autoFit':
       return applyAutoFitTableCell(doc, command, context);
     case 'setDocumentMetadata':

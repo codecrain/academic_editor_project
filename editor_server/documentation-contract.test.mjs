@@ -84,7 +84,7 @@ test('documented command lists match executable catalogs exactly', () => {
     PDF_COMMAND_OPS,
   );
   assert.equal(PDF_COMMAND_OPS.length, 46);
-  assert.match(canonical.get('API.md'), /31 DOCX commands, 38 HWPX commands, and 46 PDF commands/);
+  assert.match(canonical.get('API.md'), /31 DOCX commands, 48 HWPX commands, and 46 PDF commands/);
   assert.match(canonical.get('docs/DOCUMENTATION_INDEX.md'), /17 DOCX, 9 HWPX, 16 PDF, and 7 Image Studio/);
 });
 

@@ -118,6 +118,7 @@ let rendererInitialized = false;
 let extensionViewerSettings: ExtensionViewerSettings = {
   disableExternalWebFonts: false,
 };
+const isReadOnlyPreview = new URLSearchParams(window.location.search).get('readonly') === '1';
 
 
 // ─── 커맨드 시스템 ─────────────────────────────
@@ -138,7 +139,7 @@ function getContext(): EditorContext {
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !isFormMode || canEditFormField,
+    isEditable: !isReadOnlyPreview && (!isFormMode || canEditFormField),
     editMode,
     isFormMode,
     canEditFormField,
@@ -176,6 +177,27 @@ const commandServices: CommandServices = {
 };
 
 const dispatcher = new CommandDispatcher(registry, commandServices, eventBus);
+
+function installReadOnlyPreviewGuard(): void {
+  if (!isReadOnlyPreview) return;
+  document.documentElement.dataset.readOnlyPreview = 'true';
+  const blockMutation = (event: Event) => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of ['beforeinput', 'paste', 'cut', 'drop']) {
+    document.addEventListener(type, blockMutation, true);
+  }
+  document.addEventListener('keydown', (event) => {
+    const key = event.key.toLowerCase();
+    const canNavigateOrCopy = event.key.startsWith('Arrow')
+      || ['home', 'end', 'pageup', 'pagedown', 'escape', 'tab'].includes(key)
+      || ((event.ctrlKey || event.metaKey) && ['c', 'a', 'f', 'g', 'p'].includes(key));
+    if (!canNavigateOrCopy) blockMutation(event);
+  }, true);
+}
+
+installReadOnlyPreviewGuard();
 
 // 모든 내장 커맨드 등록
 registry.registerAll(fileCommands);

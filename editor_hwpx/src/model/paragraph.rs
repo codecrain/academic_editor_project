@@ -1,6 +1,6 @@
 //! 문단 (Paragraph, CharRun, LineSeg, RangeTag)
 
-use super::control::Control;
+use super::control::{AutoNumber, AutoNumberType, Control};
 use serde::{Deserialize, Serialize};
 
 /// 문단 (HWPTAG_PARA_HEADER + 하위 레코드)
@@ -805,6 +805,74 @@ impl Paragraph {
     /// char_offset은 Rust 문자(char) 인덱스이다 (바이트 인덱스가 아님).
     /// 삭제 후 char_offsets, char_shapes, line_segs, char_count가 자동 갱신된다.
     /// 반환값: 실제 삭제된 문자 수.
+    /// Inserts an HWPX auto-number control with its single visible placeholder.
+    /// The control owns an eight-unit stream slot, so following raw offsets
+    /// advance by seven additional units beyond normal text insertion.
+    pub fn insert_auto_number_at(
+        &mut self,
+        char_offset: usize,
+        number_type: AutoNumberType,
+    ) -> usize {
+        // Newly-created header/footer paragraphs may not yet carry their
+        // paragraph-end unit in char_count. Normalize the baseline before
+        // adding the eight-unit number slot so serialization sees every slot.
+        let text_units: u32 = self.text.chars().map(Self::char_utf16_len).sum();
+        self.char_count = self.char_count.max(text_units.saturating_add(1));
+        let text_index = char_offset.min(self.text.chars().count());
+        let control_index = self
+            .control_text_positions()
+            .iter()
+            .filter(|position| **position < text_index)
+            .count();
+        let inserted_at = self.insert_text_at(text_index, " ");
+        let slot_position = self.char_offsets.get(inserted_at).copied().unwrap_or(0);
+
+        for offset in self.char_offsets.iter_mut().skip(inserted_at.saturating_add(1)) {
+            *offset = offset.saturating_add(7);
+        }
+        for shape in &mut self.char_shapes {
+            if shape.start_pos > slot_position {
+                shape.start_pos = shape.start_pos.saturating_add(7);
+            }
+        }
+        for segment in &mut self.line_segs {
+            if segment.text_start > slot_position {
+                segment.text_start = segment.text_start.saturating_add(7);
+            }
+        }
+        for tag in &mut self.range_tags {
+            if tag.start > slot_position {
+                tag.start = tag.start.saturating_add(7);
+            }
+            if tag.end > slot_position {
+                tag.end = tag.end.saturating_add(7);
+            }
+        }
+        for range in &mut self.field_ranges {
+            if range.control_idx >= control_index {
+                range.control_idx += 1;
+            }
+        }
+        self.controls.insert(
+            control_index,
+            Control::AutoNumber(AutoNumber {
+                number_type,
+                ..Default::default()
+            }),
+        );
+        if self.ctrl_data_records.len() < control_index {
+            self.ctrl_data_records.resize(control_index, None);
+        }
+        self.ctrl_data_records.insert(control_index, None);
+        self.char_count = self.char_count.saturating_add(7);
+        self.control_mask = Self::compute_control_mask_for(
+            &self.text,
+            &self.controls,
+            &self.field_ranges,
+        );
+        inserted_at
+    }
+
     pub fn delete_text_at(&mut self, char_offset: usize, count: usize) -> usize {
         if count == 0 {
             return 0;

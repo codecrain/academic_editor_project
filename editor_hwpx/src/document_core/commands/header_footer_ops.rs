@@ -5,12 +5,14 @@ use crate::document_core::helpers::{
     build_tab_def_from_json, json_has_border_keys, json_has_tab_keys, parse_json_i16_array,
     parse_para_shape_mods,
 };
+use crate::document_core::queries::field_query::insert_field_in_para;
 use crate::document_core::DocumentCore;
 use crate::error::HwpError;
-use crate::model::control::Control;
+use crate::model::control::{AutoNumberType, Control, Field, FieldType};
 use crate::model::event::DocumentEvent;
 use crate::model::header_footer::{Footer, Header, HeaderFooterApply};
 use crate::model::paragraph::{ParaMeta, Paragraph};
+use crate::parser::tags;
 use crate::renderer::composer::reflow_line_segs;
 use crate::renderer::style_resolver::resolve_styles;
 
@@ -98,12 +100,54 @@ impl DocumentCore {
                 .map(|p| p.text.clone())
                 .collect::<Vec<_>>()
                 .join("\n");
+            let mut dynamic_fields = paragraphs
+                .iter()
+                .enumerate()
+                .flat_map(|(para_index, para)| {
+                    let positions = para.control_text_positions();
+                    para.controls.iter().enumerate().filter_map(move |(control_index, control)| {
+                        let field_type = match control {
+                            Control::AutoNumber(number)
+                                if number.number_type == AutoNumberType::Page =>
+                            {
+                                Some("pageNumber")
+                            }
+                            Control::AutoNumber(number)
+                                if number.number_type == AutoNumberType::TotalPage =>
+                            {
+                                Some("totalPages")
+                            }
+                            Control::Field(field) if field.field_type == FieldType::Path => {
+                                Some("fileName")
+                            }
+                            _ => None,
+                        }?;
+                        Some((
+                            para_index,
+                            positions.get(control_index).copied().unwrap_or(usize::MAX),
+                            control_index,
+                            field_type,
+                        ))
+                    })
+                })
+                .collect::<Vec<_>>();
+            dynamic_fields.sort_by_key(|(para_index, char_offset, control_index, _)| {
+                (*para_index, *char_offset, *control_index)
+            });
+            let dynamic_fields = dynamic_fields
+                .into_iter()
+                .map(|(para_index, char_offset, _, field_type)| format!(
+                    "{{\"type\":\"{}\",\"paraIndex\":{},\"charOffset\":{}}}",
+                    field_type, para_index, char_offset
+                ))
+                .collect::<Vec<_>>()
+                .join(",");
             let kind = if is_header { "header" } else { "footer" };
             let label = apply_label(at);
             Ok(format!(
-                "{{\"ok\":true,\"exists\":true,\"kind\":\"{}\",\"applyTo\":{},\"label\":\"{}\",\"paraIndex\":{},\"controlIndex\":{},\"paraCount\":{},\"text\":\"{}\"}}",
+                "{{\"ok\":true,\"exists\":true,\"kind\":\"{}\",\"applyTo\":{},\"label\":\"{}\",\"paraIndex\":{},\"controlIndex\":{},\"paraCount\":{},\"text\":\"{}\",\"dynamicFields\":[{}]}}",
                 kind, apply_to_u8(at), label, pi, ci, paragraphs.len(),
-                super::super::helpers::json_escape(&text)
+                super::super::helpers::json_escape(&text), dynamic_fields
             ))
         } else {
             Ok(format!("{{\"ok\":true,\"exists\":false}}"))
@@ -903,10 +947,58 @@ impl DocumentCore {
                 )))
             }
         };
+        if marker == "\u{0017}" {
+            let field_id = self.next_field_id();
+            let inserted_at = {
+                let hf_para = self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?;
+                let inserted_at = insert_field_in_para(
+                    hf_para,
+                    char_offset,
+                    Field {
+                        field_type: FieldType::Path,
+                        command: String::new(),
+                        properties: 0,
+                        extra_properties: 0,
+                        field_id,
+                        ctrl_id: tags::FIELD_PATH,
+                        instance_id: None,
+                        ctrl_data_name: None,
+                        memo_index: 0,
+                        memo_paragraphs: Vec::new(),
+                        memo_text_direction: None,
+                        raw_parameters_xml: None,
+                        parameters: Default::default(),
+                        guide_residue: None,
+                    },
+                )?;
+                inserted_at
+            };
+            self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
+            self.document.sections[section_idx].raw_stream = None;
+            self.mark_section_dirty(section_idx);
+            self.paginate_if_needed();
+            self.event_log.push(DocumentEvent::TextInserted {
+                section: section_idx,
+                para: 0,
+                offset: inserted_at,
+                len: 1,
+            });
+            return Ok(super::super::helpers::json_ok_with(&format!(
+                "\"charOffset\":{},\"insertedAt\":{},\"insertedLength\":0",
+                inserted_at,
+                inserted_at
+            )));
+        }
+
+        let number_type = match marker {
+            "\u{0015}" => AutoNumberType::Page,
+            "\u{0016}" => AutoNumberType::TotalPage,
+            _ => unreachable!(),
+        };
 
         let hf_para = self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?;
         // 반환·이벤트는 실제로 삽입된 위치를 쓴다 — 요청 값과 다를 수 있다.
-        let inserted_at = hf_para.insert_text_at(char_offset, marker);
+        let inserted_at = hf_para.insert_auto_number_at(char_offset, number_type);
 
         self.reflow_hf_paragraph(section_idx, is_header, apply_to, hf_para_idx);
 
@@ -985,19 +1077,17 @@ impl DocumentCore {
         };
         let styled = template_id > 5; // bold + underline
 
-        // 4) 텍스트 내용 결정
-        let text = match layout {
-            1 => "\u{0015}".to_string(),           // 왼쪽 쪽번호
-            2 => "\u{0015}".to_string(),           // 가운데 쪽번호
-            3 => "\u{0015}".to_string(),           // 오른쪽 쪽번호
-            4 => "\u{0015}\t\u{0017}".to_string(), // 쪽번호(왼) + 탭 + 파일이름(오)
-            5 => "\u{0017}\t\u{0015}".to_string(), // 파일이름(왼) + 탭 + 쪽번호(오)
-            _ => String::new(),
-        };
-
-        // 5) 정렬 결정
+        // 4) 정렬 결정
         use crate::model::style::{
             Alignment, CharShapeMods, ParaShapeMods, TabDef, TabItem, UnderlineType,
+        };
+
+        // Dynamic header/footer values are model controls. Keeping only the
+        // static tab separator here prevents serializer loss of control chars.
+        let text = match layout {
+            1 | 2 | 3 => String::new(),
+            4 | 5 => "\t".to_string(),
+            _ => String::new(),
         };
 
         let alignment = match layout {
@@ -1008,7 +1098,7 @@ impl DocumentCore {
             _ => Alignment::Left,
         };
 
-        // 6) 텍스트 삽입
+        // 5) 정적 텍스트 삽입
         {
             let hf_para = self.get_hf_paragraph_mut(section_idx, is_header, apply_to, 0)?;
             hf_para.text = text;
@@ -1021,6 +1111,21 @@ impl DocumentCore {
         }
 
         // 7) 문단 정렬 적용
+        match layout {
+            1 | 2 | 3 => {
+                self.insert_field_in_hf_native(section_idx, is_header, apply_to, 0, 0, 1)?;
+            }
+            4 => {
+                self.insert_field_in_hf_native(section_idx, is_header, apply_to, 0, 0, 1)?;
+                self.insert_field_in_hf_native(section_idx, is_header, apply_to, 0, 2, 3)?;
+            }
+            5 => {
+                self.insert_field_in_hf_native(section_idx, is_header, apply_to, 0, 0, 3)?;
+                self.insert_field_in_hf_native(section_idx, is_header, apply_to, 0, 2, 1)?;
+            }
+            _ => {}
+        }
+
         let base_para_id = {
             let para = self
                 .get_hf_paragraph_ref(section_idx, is_header, apply_to, 0)
@@ -1192,14 +1297,14 @@ mod tests {
         let result = core
             .insert_field_in_hf_native(0, true, 0, 0, 1, 1)
             .expect("page-number field after the file-name marker");
-        assert!(result.contains("\"charOffset\":2"), "{result}");
-        assert!(result.contains("\"insertedAt\":1"), "{result}");
+        assert!(result.contains("\"charOffset\":1"), "{result}");
+        assert!(result.contains("\"insertedAt\":0"), "{result}");
         assert!(result.contains("\"insertedLength\":1"), "{result}");
 
         let info = core
             .get_header_footer_para_info_native(0, true, 0, 0)
             .unwrap();
-        assert!(info.contains("\"charCount\":2"), "{info}");
+        assert!(info.contains("\"charCount\":1"), "{info}");
     }
 
     /// 커서 좌표와 실제 텍스트 삽입 좌표가 다를 때에도 history가 지울 위치를

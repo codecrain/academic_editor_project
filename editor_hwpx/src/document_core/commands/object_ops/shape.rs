@@ -266,6 +266,12 @@ impl DocumentCore {
 
         let c = shape.common();
         let common_json = Self::common_obj_attr_to_json(c);
+        let object_json = match shape {
+            crate::model::shape::ShapeObject::Group(group) => {
+                format!("\"objectType\":\"group\",\"childCount\":{}", group.children.len())
+            }
+            _ => "\"objectType\":\"shape\"".to_string(),
+        };
 
         // TextBox 속성
         let tb_json = if let Some(tb) = get_textbox_from_shape(shape) {
@@ -375,8 +381,7 @@ impl DocumentCore {
 
         let caption_json = Self::format_shape_caption_props_json(shape);
         Ok(format!(
-            "{{{}{}{}{}{}{}}}",
-            common_json, tb_json, extra_json, round_json, connector_json, caption_json
+            "{{{object_json},{common_json}{tb_json}{extra_json}{round_json}{connector_json}{caption_json}}}"
         ))
     }
     /// 글상자(Shape) 속성 변경 (네이티브).
@@ -656,6 +661,12 @@ impl DocumentCore {
     ) -> Result<String, HwpError> {
         let c = shape.common();
         let common_json = Self::common_obj_attr_to_json(c);
+        let object_json = match shape {
+            crate::model::shape::ShapeObject::Group(group) => {
+                format!("\"objectType\":\"group\",\"childCount\":{}", group.children.len())
+            }
+            _ => "\"objectType\":\"shape\"".to_string(),
+        };
 
         // TextBox 속성
         let tb_json = if let Some(tb) = get_textbox_from_shape(shape) {
@@ -758,8 +769,7 @@ impl DocumentCore {
 
         let caption_json = Self::format_shape_caption_props_json(shape);
         Ok(format!(
-            "{{{}{}{}{}{}{}}}",
-            common_json, tb_json, extra_json, round_json, connector_json, caption_json
+            "{{{object_json},{common_json}{tb_json}{extra_json}{round_json}{connector_json}{caption_json}}}"
         ))
     }
     /// [Task #1138] Shape 속성 JSON 적용 (mutation only). 후처리 (recompose /
@@ -2330,8 +2340,16 @@ impl DocumentCore {
             // 문단에 삽입
             // [#3214] controls 기준 인덱스를 ctrl_data_records 에 그대로 쓰기 전에 정렬한다.
             para.align_ctrl_data_records();
-            para.controls
-                .insert(insert_idx, Control::Shape(Box::new(child)));
+            let restored_control = match child {
+                // Picture controls have their own top-level control arm. Keeping
+                // them as ShapeObject::Picture makes the saved HWPX reparse
+                // classify the object as a generic shape and loses the picture
+                // inventory/binary relationship after an otherwise valid
+                // group → ungroup operation.
+                ShapeObject::Picture(picture) => Control::Picture(picture),
+                other => Control::Shape(Box::new(other)),
+            };
+            para.controls.insert(insert_idx, restored_control);
             para.ctrl_data_records.insert(insert_idx, None);
             para.char_count += 8;
             para.control_mask |= 0x00000800;

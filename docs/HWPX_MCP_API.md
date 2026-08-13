@@ -2,7 +2,7 @@
 
 Academic Editor exposes one revision-bound HWP/HWPX lifecycle through Streamable HTTP at `/mcp` and through the canonical HTTP actions under `/v1/hwpx/documents/{documentId}`. The `hwpx` route/tool prefix identifies the editor module; verified output preserves the opened source format.
 
-Contract version: `3.1.0`
+Contract version: `3.2.0`
 
 The executable identity is `academic-editor-mcp`. It supports MCP protocol
 versions `2025-06-18` and `2025-03-26`, preferring `2025-06-18`. The canonical
@@ -25,7 +25,7 @@ editor_hwpx_artifact_read
 editor_hwpx_artifact_delete
 ```
 
-Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. Version 3.1.0 contains 39 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
+Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. Version 3.2.0 contains 48 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
 
 `image.insertInCell` fills a previously blank signature, seal, or evidence-image cell from either `bytesBase64` or a cross-document `assetRef`. HWPX persists the image inline in the exact cell paragraph. Legacy binary HWP persists a bounded overlay whose center lies inside the inspected cell, and returns `placementMode="cell-anchored-overlay"`; semantic review accepts that HWP-native representation only when the saved/reopened picture spatially overlaps the intended execution cell.
 
@@ -95,7 +95,7 @@ and an `op` from the live catalog. Unknown top-level tool arguments are rejected
 
 Binary HWP uses native structural operations and is never silently converted to HWPX. Commands that depend on HWPX package XML (existing-image byte replacement, package-level picture cloning, tracked-change XML, and XML-only convenience style cloning) fail explicitly with `HWP_COMMAND_REQUIRES_HWPX_PACKAGE`. Native `setRunStyle`, `setParagraphStyle`, `applyStyle`, table resize/row insertion, paragraph insertion, and new-image insertion remain available for HWP.
 
-7. Reload the returned `browserPresentation.url`; after verified save the same URL serves immutable bytes whose `X-Editor-Sha256` and ETag match the artifact. Read the opaque artifact, verify its SHA-256 and package signature independently, then delete it. The final preview remains read-only until the configured artifact TTL expires.
+7. Reload the returned `browserPresentation.url`; after verified save it includes `readonly=1&finalized=1` and serves immutable bytes whose `X-Editor-Sha256` and ETag match the artifact. Read the opaque artifact, verify its SHA-256 and package signature independently, then delete it. The final preview remains read-only until the configured artifact TTL expires.
 
 On cancellation or failed validation, call `editor_hwpx_discard`.
 
@@ -170,7 +170,7 @@ surface area:
   vertical alignment, text direction, header/protection, borders, and fill; and
   table padding/spacing, page-break/header behavior, anchor/wrap/position,
   margins, borders/fill, and existing native caption properties.
-- `object.format` accepts `image` or `shape` scope. It covers size,
+- `object.format` accepts `image`, `shape`, or `equation` scope. It covers size,
   treat-as-character, wrapping, anchor/offset, crop, inner/outer spacing and
   border for images; and those controls plus rotation/flip, solid/gradient fill,
   shadow, text-box margins/alignment, rounding, and connector endpoints for
@@ -179,6 +179,12 @@ surface area:
   split, or table deletion. `paragraph.structure` performs split,
   merge-with-previous, page break, or column break. Location-invalidating
   structure commands run alone.
+- `setHeaderFooter` inserts native page, total-page, and file-name controls
+  rather than raw control characters; all dynamic fields are independently
+  checked after save/reopen. `note.manage` replaces a complete note body,
+  formats one exact note paragraph, or deletes one exact note. `object.manage`
+  groups/ungroups exact top-level shape and picture controls through the same
+  native engine path used by the studio.
 
 Unknown properties, invalid ranges, unsupported source-format fields, and
 unproven serializer behavior fail before mutation. For example, HWPX does not

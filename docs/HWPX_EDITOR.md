@@ -20,7 +20,7 @@ Canonical entrypoints:
 
 ## Capability status
 
-The HWPX catalog exposes 39 canonical commands and every HWPX entry currently
+The HWPX catalog exposes 48 canonical commands and every HWPX entry currently
 reports `readiness=available`. `execution` still identifies the actual path
 used by an operation, such as the native RHWP path, structural adapter, or
 preserve-package adapter. It is evidence about implementation, not a readiness
@@ -33,6 +33,8 @@ text.insertAfterParagraph
 text.replace
 text.replaceTracked
 insertText
+field.manage
+field.insert
 deleteRange
 appendParagraph
 text.deleteParagraphs
@@ -46,6 +48,7 @@ table.autoFit
 table.create
 table.insertCaption
 table.structure
+table.transform
 style.applyText
 applyStyle
 setRunStyle
@@ -61,10 +64,16 @@ image.generateAndReplace
 setDocumentMetadata
 defineStyle
 setPageSetup
+section.configure
 setHeaderFooter
 insertFootnote
+note.insert
+note.manage
+bookmark.manage
 object.deleteTextBoxByText
 object.format
+object.create
+object.manage
 object.replaceTextBoxText
 ```
 
@@ -92,8 +101,8 @@ name is shared; query the format's command schema first.
    `profile="public-proposal"` for completed proposals), or recovery-only
    checkpoint mode; read the opaque artifact, verify hashes and reopen it, then
    delete the artifact. After verified save the mutable session is closed, but
-   the same `browserPresentation.url` serves an immutable hash-bound final
-   preview until the artifact TTL expires.
+   the returned `browserPresentation.url` (`readonly=1&finalized=1`) serves an
+   immutable hash-bound final preview until the artifact TTL expires.
 8. If the workflow is cancelled, call `discard` with `documentId` and the
    current `baseRevision`.
 

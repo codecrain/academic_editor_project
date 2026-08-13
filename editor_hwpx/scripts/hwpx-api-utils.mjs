@@ -20,6 +20,7 @@ import {
 } from '../../editor_common/document-api-core.mjs';
 import {
   classifyHwpxCommands,
+  inspectHwpxPackage,
   inspectHwpxStructuralReferencesXml,
   overlayPreservedEntries,
   qualifyHwpxCandidate,
@@ -1010,6 +1011,62 @@ function readNativeFootnotes(doc) {
     }
   }
   return footnotes;
+}
+
+function readNativeDocumentControls(doc) {
+  const controls = tryJson(() => doc.getControls());
+  if (!Array.isArray(controls)) return [];
+  return controls.map((control) => ({
+    ctrlId: control?.ctrlId ?? null,
+    list: control?.list ?? null,
+    para: control?.para ?? null,
+    pos: control?.pos ?? null,
+    controlIndex: control?.controlIndex ?? null,
+    props: control?.props ?? null,
+  }));
+}
+
+function readNativeSectionState(doc) {
+  const sectionCount = Number(doc.getSectionCount()) || 0;
+  return Array.from({ length: sectionCount }, (_, section) => ({
+    section,
+    pageDef: tryJson(() => doc.getPageDef(section)),
+    sectionDef: tryJson(() => doc.getSectionDef(section)),
+    pageBorderFill: tryJson(() => doc.getPageBorderFill(section)),
+    columnDef: tryJson(() => doc.getColumnDef(section)),
+    endnoteShape: tryJson(() => doc.getEndnoteShape(section)),
+  }));
+}
+
+function readNativePageHides(doc, controls) {
+  return controls
+    .filter((control) => String(control.ctrlId || '').toLowerCase() === 'pghd')
+    .map((control) => ({
+      section: control.list,
+      paragraph: control.para,
+      value: tryJson(() => doc.getPageHide(control.list, control.para)),
+    }));
+}
+
+function readNativeBookmarks(doc) {
+  const bookmarks = tryJson(() => doc.getBookmarks());
+  return Array.isArray(bookmarks) ? bookmarks : [];
+}
+
+function readNativeObjectState(doc, controls) {
+  return controls
+    .filter((control) => ['gso', 'eqed'].includes(String(control.ctrlId || '').toLowerCase()))
+    .map((control) => ({
+      section: control.list,
+      paragraph: control.para,
+      controlIndex: control.controlIndex,
+      ctrlId: control.ctrlId,
+      shape: tryJson(() => doc.getShapeProperties(control.list, control.para, control.controlIndex)),
+      picture: tryJson(() => doc.getPictureProperties(control.list, control.para, control.controlIndex)),
+      equation: String(control.ctrlId || '').toLowerCase() === 'eqed'
+        ? tryJson(() => doc.getEquationProperties(control.list, control.para, control.controlIndex, -1, -1))
+        : null,
+    }));
 }
 
 function stableStringify(value) {
@@ -2836,6 +2893,10 @@ function verifyExpectedFormat(session, target, result) {
     properties = tryJson(() => session.doc.getShapeProperties(
       target.sectionIndex, target.paragraphIndex, target.controlIndex,
     ));
+  } else if (expected.scope === 'equation' && target.kind === 'equation') {
+    properties = tryJson(() => session.doc.getEquationProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, -1, -1,
+    ));
   }
   const mismatch = !properties || Object.entries(expected.properties)
     .find(([field, value]) => !equivalentFormatValue(properties[field], value, expected.scope, field));
@@ -2944,6 +3005,19 @@ export function verifyStructuralTarget(session, target, result = null) {
       if (mismatch) {
         throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Table structure dimensions did not survive reopening.', {
           target, expected: result.expectedTableDimensions, dimensions, mismatch,
+        });
+      }
+    }
+    if (result?.expectedCreatedTableDimensions) {
+      const created = result.expectedCreatedTableDimensions;
+      const dimensions = tryJson(() => session.doc.getTableDimensions(
+        created.sectionIndex, created.paragraphIndex, created.controlIndex,
+      ));
+      const mismatch = ['rowCount', 'colCount', 'cellCount']
+        .find(field => Number(dimensions?.[field]) !== Number(created[field]));
+      if (mismatch) {
+        throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'The second table created by splitTable did not survive reopening.', {
+          target, created, dimensions, mismatch,
         });
       }
     }
@@ -3090,6 +3164,51 @@ export function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
+    if (result?.expectedObjectZOrder !== undefined
+      && !equivalentExactValue(properties.zOrder, result.expectedObjectZOrder)) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISMATCH',
+        'A structural shape z-order did not survive reopening exactly.',
+        { target, expectedObjectZOrder: result.expectedObjectZOrder, actualObjectZOrder: properties.zOrder },
+      );
+    }
+    if (result?.expectedTextBoxText !== undefined) {
+      const paragraphCount = session.doc.getCellParagraphCount(
+        target.sectionIndex, target.paragraphIndex, target.controlIndex, 0,
+      );
+      const paragraphs = [];
+      for (let paragraphIndex = 0; paragraphIndex < paragraphCount; paragraphIndex += 1) {
+        const length = session.doc.getCellParagraphLength(
+          target.sectionIndex, target.paragraphIndex, target.controlIndex, 0, paragraphIndex,
+        );
+        paragraphs.push(session.doc.getTextInCell(
+          target.sectionIndex, target.paragraphIndex, target.controlIndex, 0,
+          paragraphIndex, 0, length,
+        ));
+      }
+      const text = paragraphs.join('\n');
+      if (text !== result.expectedTextBoxText) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural text-box body did not survive reopening exactly.',
+          { target, expectedTextBoxText: result.expectedTextBoxText, text },
+        );
+      }
+    }
+    verifyExpectedFormat(session, target, result);
+    return;
+  }
+  if (target.kind === 'equation') {
+    const properties = tryJson(() => session.doc.getEquationProperties(
+      target.sectionIndex, target.paragraphIndex, target.controlIndex, -1, -1,
+    ));
+    if (!properties) {
+      throw structuralBatchError(
+        'HWPX_CREATED_TARGET_MISSING',
+        'A structural equation target was not found after reopening the candidate.',
+        { target },
+      );
+    }
     verifyExpectedFormat(session, target, result);
     return;
   }
@@ -3102,6 +3221,31 @@ export function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
+    const expected = result?.expectedSection;
+    if (expected?.action === 'pageBorder') {
+      const actual = tryJson(() => session.doc.getPageBorderFill(target.sectionIndex));
+      const mismatch = !actual || Object.entries(expected.properties)
+        .find(([field, value]) => !equivalentExactValue(actual[field], value));
+      if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Page border settings did not survive reopening exactly.', { target, expected, actual, mismatch });
+    } else if (expected?.action === 'columns') {
+      const actual = tryJson(() => session.doc.getColumnDef(target.sectionIndex));
+      const mismatch = !actual || Object.entries(expected.properties)
+        .find(([field, value]) => !equivalentExactValue(actual[field], value));
+      if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Column settings did not survive reopening exactly.', { target, expected, actual, mismatch });
+    } else if (expected?.action === 'properties') {
+      const actual = tryJson(() => session.doc.getSectionDef(target.sectionIndex));
+      const mismatch = !actual || Object.entries(expected.properties)
+        .find(([field, value]) => !equivalentExactValue(actual[field], value));
+      if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Section-definition properties did not survive reopening exactly.', { target, expected, actual, mismatch });
+    }
+    return;
+  }
+  if (target.kind === 'endnoteShape') {
+    const actual = tryJson(() => session.doc.getEndnoteShape(target.sectionIndex));
+    const expected = result?.expectedSection?.properties;
+    const mismatch = !actual || Object.entries(expected ?? {})
+      .find(([field, value]) => !equivalentExactValue(actual[field], value));
+    if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Endnote-shape properties did not survive reopening exactly.', { target, expected, actual, mismatch });
     return;
   }
   if (target.kind === 'headerFooter') {
@@ -3150,9 +3294,28 @@ export function verifyStructuralTarget(session, target, result = null) {
         );
       }
     }
+    if (result?.expectedHeaderFooterFields !== undefined) {
+      const actualFields = headerFooter.dynamicFields ?? [];
+      const sameDynamicFields = actualFields.length === result.expectedHeaderFooterFields.length
+        && actualFields.every((actual, index) => (
+          actual.type === result.expectedHeaderFooterFields[index]?.type
+          && actual.paraIndex === result.expectedHeaderFooterFields[index]?.paraIndex
+        ));
+      if (!sameDynamicFields) {
+        throw structuralBatchError(
+          'HWPX_CREATED_TARGET_MISMATCH',
+          'A structural header or footer dynamic field set did not survive reopening exactly.',
+          {
+            target,
+            expectedHeaderFooterFields: result.expectedHeaderFooterFields,
+            headerFooterFields: actualFields,
+          },
+        );
+      }
+    }
     return;
   }
-  if (target.kind === 'footnote') {
+  if (target.kind === 'footnote' || target.kind === 'note') {
     const footnote = tryJson(() => session.doc.getFootnoteInfo(
       target.sectionIndex,
       target.paragraphIndex,
@@ -3170,18 +3333,106 @@ export function verifyStructuralTarget(session, target, result = null) {
       && footnote.texts[0].startsWith('  ')
       ? [footnote.texts[0].slice(2), ...footnote.texts.slice(1)].join('\n')
       : null;
-    if (result?.expectedFootnoteText !== undefined
-      && logicalFootnoteText !== result.expectedFootnoteText) {
+    const expectedNoteText = result?.expectedNoteText ?? result?.expectedFootnoteText;
+    if (expectedNoteText !== undefined
+      && logicalFootnoteText !== expectedNoteText) {
       throw structuralBatchError(
         'HWPX_CREATED_TARGET_MISMATCH',
         'A structural footnote body did not survive reopening exactly.',
         {
           target,
-          expectedFootnoteText: result.expectedFootnoteText,
+          expectedNoteText,
           footnoteTexts: footnote.texts,
           logicalFootnoteText,
         },
       );
+    }
+    return;
+  }
+  if (target.kind === 'field') {
+    const fields = tryJson(() => session.doc.getFieldList());
+    const field = Array.isArray(fields)
+      ? fields.find(item => Number(item.fieldId) === Number(target.fieldId))
+      : null;
+    if (!field) {
+      throw structuralBatchError('HWPX_CREATED_TARGET_MISSING', 'A structural ClickHere field was not found after reopening the candidate.', { target, fields });
+    }
+    const expected = result?.expectedField;
+    const mismatch = expected && Object.entries(expected)
+      .find(([fieldName, value]) => value !== undefined && !equivalentExactValue(field[fieldName], value));
+    if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'ClickHere field properties did not survive reopening exactly.', { target, expected, field, mismatch });
+    return;
+  }
+  if (target.kind === 'deletedField') {
+    const fields = tryJson(() => session.doc.getFieldList());
+    const stillPresent = Array.isArray(fields) && fields.some(item => Number(item.fieldId) === Number(result?.expectedDeletedFieldId ?? target.fieldId));
+    if (stillPresent) {
+      throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'A deleted ClickHere field still exists after reopening.', { target, fields });
+    }
+    return;
+  }
+  if (target.kind === 'bookmark' || target.kind === 'deletedBookmark') {
+    const bookmarks = tryJson(() => session.doc.getBookmarks());
+    const expected = result?.expectedBookmark;
+    const matches = Array.isArray(bookmarks) && bookmarks.filter(item =>
+      Number(item.sec) === Number(expected?.sectionIndex ?? target.sectionIndex)
+      && Number(item.para) === Number(expected?.paragraphIndex ?? target.paragraphIndex)
+      && (expected?.name === undefined || item.name === expected.name));
+    if (target.kind === 'deletedBookmark') {
+      const stillPresent = Array.isArray(bookmarks) && bookmarks.some(item =>
+        Number(item.sec) === Number(target.sectionIndex)
+        && Number(item.para) === Number(target.paragraphIndex)
+        && Number(item.ctrlIdx) === Number(target.controlIndex));
+      if (stillPresent) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Deleted bookmark still exists after reopening.', { target, bookmarks });
+    } else if (!matches?.length) {
+      throw structuralBatchError('HWPX_CREATED_TARGET_MISSING', 'A structural bookmark was not found after reopening the candidate.', { target, expected, bookmarks });
+    }
+    return;
+  }
+  if (target.kind === 'pageHide') {
+    const actual = tryJson(() => session.doc.getPageHide(target.sectionIndex, target.paragraphIndex));
+    const expected = result?.expectedSection?.properties;
+    const mismatch = !actual || !expected || Object.entries(expected)
+      .find(([field, value]) => !equivalentExactValue(actual[field], value));
+    if (mismatch) throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Page-hide settings did not survive reopening exactly.', { target, expected, actual, mismatch });
+    return;
+  }
+  if (target.kind === 'newNumber') {
+    const controls = tryJson(() => session.doc.getControls());
+    const present = Array.isArray(controls) && controls.some(item =>
+      Number(item.list) === 0 && Number(item.para) === Number(target.paragraphIndex)
+      && String(item.ctrlId).toLowerCase() === 'nwno');
+    if (!present) throw structuralBatchError('HWPX_CREATED_TARGET_MISSING', 'A page-number-start control was not found after reopening the candidate.', { target, controls });
+    return;
+  }
+  if (target.kind === 'deletedObject') {
+    const objects = tryJson(() => session.doc.getObjects());
+    const actualObjectCount = Array.isArray(objects)
+      ? objects.filter(item => item.kind === target.objectKind).length
+      : null;
+    if (!Number.isInteger(result?.expectedObjectCount)
+      || actualObjectCount !== result.expectedObjectCount) {
+      throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Deleted object count did not survive reopening exactly.', {
+        target,
+        expectedObjectCount: result?.expectedObjectCount,
+        actualObjectCount,
+      });
+    }
+    return;
+  }
+  if (target.kind === 'ungroupedObject') {
+    const objects = tryJson(() => session.doc.getObjects());
+    const restored = Array.isArray(objects)
+      ? objects.filter(item => Number(item.para) === Number(target.paragraphIndex)).length
+      : 0;
+    if (!Number.isInteger(result?.expectedUngroupedChildCount)
+      || restored < result.expectedUngroupedChildCount) {
+      throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Ungrouped object children did not survive reopening.', {
+        target,
+        expectedUngroupedChildCount: result?.expectedUngroupedChildCount,
+        restored,
+        objects,
+      });
     }
     return;
   }
@@ -3244,6 +3495,19 @@ export function verifyStructuralTarget(session, target, result = null) {
         );
       }
     }
+    if (result?.expectedCellText !== undefined) {
+      const length = session.doc.getCellParagraphLength(
+        target.sectionIndex, target.paragraphIndex, target.controlIndex,
+        target.cellIndex, target.cellParagraphIndex,
+      );
+      const text = session.doc.getTextInCell(
+        target.sectionIndex, target.paragraphIndex, target.controlIndex,
+        target.cellIndex, target.cellParagraphIndex, 0, length,
+      );
+      if (text !== result.expectedCellText) {
+        throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'A calculated table cell did not preserve its result after reopening.', { target, expectedCellText: result.expectedCellText, text });
+      }
+    }
     if (result?.expectedPictureCount !== undefined) {
       const table = session.readJson().tables.find((item) => item.section === target.sectionIndex
         && item.para === target.paragraphIndex
@@ -3303,6 +3567,67 @@ function verifyStructuralCommit(session, results) {
       verifyStructuralTarget(session, target, result);
     }
   }
+}
+
+function countReferenceLosses(source, candidate, field) {
+  const sourceCounts = source.structuralReferences[field] ?? {};
+  const candidateCounts = candidate.structuralReferences[field] ?? {};
+  return Object.fromEntries(Object.entries(sourceCounts)
+    .map(([key, sourceCount]) => [key, Math.max(0, Number(sourceCount) - Number(candidateCounts[key] ?? 0))])
+    .filter(([, lost]) => lost > 0));
+}
+
+function intentionalObjectDeletionLosses(sourceBytes, candidateBytes, kind) {
+  const source = inspectHwpxPackage(sourceBytes);
+  const candidate = inspectHwpxPackage(candidateBytes);
+  const objectCounts = countReferenceLosses(source, candidate, 'objectCounts');
+  const binaryReferenceCounts = countReferenceLosses(source, candidate, 'binaryReferenceCounts');
+  const totalObjectLoss = Object.values(objectCounts).reduce((sum, count) => sum + Number(count), 0);
+  const totalBinaryLoss = Object.values(binaryReferenceCounts).reduce((sum, count) => sum + Number(count), 0);
+  const nonParagraphKinds = Object.keys(objectCounts).filter(name => name !== 'p');
+  const isShape = kind === 'shape' || kind === 'textBox';
+  const exactExpected = kind === 'equation' ? 'equation'
+    : kind === 'image' ? 'pic'
+      : kind === 'bookmark' ? 'bookmark'
+        : null;
+  const expectedFieldBoundaryLoss = kind === 'field'
+    && totalObjectLoss === 2
+    && objectCounts.fieldbegin === 1
+    && objectCounts.fieldend === 1
+    && nonParagraphKinds.length === 2;
+  const valid = expectedFieldBoundaryLoss || (exactExpected
+    ? totalObjectLoss === 1 && objectCounts[exactExpected] === 1 && nonParagraphKinds.length === 1
+    : isShape
+      ? nonParagraphKinds.length === 1 && objectCounts[nonParagraphKinds[0]] === 1
+        && totalBinaryLoss === 0
+      : false);
+  if (!valid || (kind !== 'image' && totalBinaryLoss !== 0)) {
+    throw structuralBatchError(
+      'HWPX_OBJECT_DELETE_REFERENCE_MISMATCH',
+      'The requested native object deletion did not correspond to one allowed package-reference loss.',
+      { kind, objectCounts, binaryReferenceCounts },
+    );
+  }
+  return { objectCounts, binaryReferenceCounts };
+}
+
+function intentionalTableAttachLosses(sourceBytes, candidateBytes) {
+  const source = inspectHwpxPackage(sourceBytes);
+  const candidate = inspectHwpxPackage(candidateBytes);
+  const objectCounts = countReferenceLosses(source, candidate, 'objectCounts');
+  const binaryReferenceCounts = countReferenceLosses(source, candidate, 'binaryReferenceCounts');
+  const valid = objectCounts.tbl === 1
+    && objectCounts.p === 2
+    && Object.keys(objectCounts).length === 2
+    && Object.keys(binaryReferenceCounts).length === 0;
+  if (!valid) {
+    throw structuralBatchError(
+      'HWPX_TABLE_ATTACH_REFERENCE_MISMATCH',
+      'The requested table attachment did not correspond to exactly one adjacent table and its two structural wrapper paragraphs.',
+      { objectCounts, binaryReferenceCounts },
+    );
+  }
+  return { objectCounts, binaryReferenceCounts };
 }
 
 function materializeStructuralTrial(session, allowedStructuralReferenceLosses = null) {
@@ -3483,11 +3808,9 @@ export class HwpxApiSession {
 
   semanticSnapshot() {
     const json = this.exportJson();
-    const sectionCount = this.doc.getSectionCount();
-    const pageDefinitions = Array.from({ length: sectionCount }, (_, section) => ({
-      section,
-      pageDef: tryJson(() => this.doc.getPageDef(section)),
-    }));
+    const sectionState = readNativeSectionState(this.doc);
+    const sectionCount = sectionState.length;
+    const controls = readNativeDocumentControls(this.doc);
     const headerFooters = Array.from({ length: sectionCount }, (_, section) => (
       [true, false].flatMap((isHeader) => [0, 1, 2].map((applyTo) => ({
         section,
@@ -3500,9 +3823,14 @@ export class HwpxApiSession {
       ...json,
       layoutGraph: {
         ...json.layoutGraph,
-        pageDefinitions,
+        pageDefinitions: sectionState.map(({ section, pageDef }) => ({ section, pageDef })),
         headerFooters,
         footnotes: readNativeFootnotes(this.doc),
+        sectionState,
+        pageHides: readNativePageHides(this.doc, controls),
+        bookmarks: readNativeBookmarks(this.doc),
+        controls,
+        objects: readNativeObjectState(this.doc, controls),
       },
     };
   }
@@ -4233,7 +4561,15 @@ export class HwpxApiSession {
       'text.deleteParagraphs',
       'table.insertRows',
       'table.structure',
+      'table.transform',
       'paragraph.structure',
+      'field.insert',
+      'field.manage',
+      'note.insert',
+      'note.manage',
+      'bookmark.manage',
+      'object.create',
+      'object.manage',
     ].includes(resolveHwpxCommand(op)?.op));
     if (locationChangingOps.length > 0 && ops.length !== 1) {
       const error = new Error('Location-changing paragraph and table structure commands must run alone because they invalidate inspected targets.');
@@ -4453,6 +4789,36 @@ export class HwpxApiSession {
         const result = applyHwpxStructuralCommand(working.doc, structuralOp, {
           before,
         });
+        const deletionKind = entry.op === 'object.manage' && sourceOp.action === 'delete'
+          ? sourceOp.kind
+          : entry.op === 'bookmark.manage' && sourceOp.action === 'delete'
+            ? 'bookmark'
+            : entry.op === 'field.manage' && sourceOp.action === 'delete'
+              ? 'field'
+            : null;
+        if (isZipPackage(working.inputBytes) && deletionKind) {
+          allowedStructuralReferenceLosses = intentionalObjectDeletionLosses(
+            working.inputBytes,
+            Buffer.from(working.doc.exportHwpx()),
+            deletionKind,
+          );
+        }
+        if (isZipPackage(working.inputBytes)
+          && entry.op === 'table.structure'
+          && sourceOp.action === 'attachNextTable') {
+          allowedStructuralReferenceLosses = intentionalTableAttachLosses(
+            working.inputBytes,
+            Buffer.from(working.doc.exportHwpx()),
+          );
+        }
+        if (isZipPackage(working.inputBytes)
+          && entry.op === 'object.manage'
+          && sourceOp.action === 'ungroup') {
+          allowedStructuralReferenceLosses = {
+            objectCounts: { container: 1 },
+            binaryReferenceCounts: {},
+          };
+        }
         working.invalidateAnalysisCache();
         results.push({ ...result, opId: structuralOp.opId });
         structuralDirty = true;

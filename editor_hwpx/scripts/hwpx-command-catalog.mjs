@@ -135,6 +135,46 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'field.manage',
+    category: 'field',
+    description: 'Update any inventoried ClickHere field guide/memo/name/editability, or delete one top-level ClickHere field by stable field ID.',
+    required: ['action', 'fieldId'],
+    optional: ['guide', 'memo', 'name', 'editable'],
+    precondition: 'field_inventory',
+    execution: 'structural-adapter',
+    nativeMethods: ['getFieldList', 'updateClickHereProps', 'removeFieldAt'],
+    enum: { action: ['update', 'delete'] },
+    fields: {
+      action: 'update or delete.', fieldId: 'Stable field ID returned by editor_hwpx_inspect(view="fields").',
+      guide: 'Optional replacement guide for action=update.', memo: 'Optional replacement memo for action=update.',
+      name: 'Optional replacement name for action=update.', editable: 'Optional replacement form editability for action=update.',
+    },
+    example: { op: 'field.manage', action: 'update', fieldId: 7, guide: '신청인 성명', name: 'applicant_name', editable: true },
+    notes: ['Update accepts body, table-cell, and text-box ClickHere fields. Delete is intentionally rejected for virtual table-cell field regions because their native deletion coordinates differ from top-level ClickHere controls.'],
+  }),
+  command({
+    op: 'field.insert',
+    category: 'field',
+    description: 'Insert one ClickHere form field at an inspected body paragraph, table cell, or text-box paragraph.',
+    required: ['target'],
+    optional: ['guide', 'memo', 'name', 'editable'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['insertClickHereField', 'insertClickHereFieldInCell'],
+    fields: {
+      target: locationField,
+      guide: 'Optional visible guide text.',
+      memo: 'Optional field memo.',
+      name: 'Optional unique field name.',
+      editable: 'Optional editability flag; defaults to true.',
+    },
+    example: {
+      op: 'field.insert',
+      target: { native: { section: 0, para: 1, offset: 4 } },
+      guide: '신청인 성명', name: 'applicant_name', editable: true,
+    },
+  }),
+  command({
     op: 'deleteRange',
     category: 'text',
     description: 'Delete one inspected HWPX text range.',
@@ -395,16 +435,16 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
   command({
     op: 'table.structure',
     category: 'table',
-    description: 'Insert/delete rows or columns, merge/split cells, or delete one inspected table through one location-changing command.',
+    description: 'Insert/delete rows or columns, merge/split cells, split/attach a table, or delete one inspected table through one location-changing command.',
     required: ['target', 'action'],
     precondition: 'target_inspect',
     execution: 'structural-adapter',
     nativeMethods: [
       'insertTableRow', 'insertTableColumn', 'deleteTableRow', 'deleteTableColumn',
-      'mergeTableCells', 'splitTableCellInto', 'deleteTableControl',
+      'mergeTableCells', 'splitTableCellInto', 'splitTable', 'mergeTableWithNext', 'deleteTableControl',
     ],
     enum: {
-      action: ['insertRow', 'insertColumn', 'deleteRow', 'deleteColumn', 'mergeCells', 'splitCell', 'deleteTable'],
+      action: ['insertRow', 'insertColumn', 'deleteRow', 'deleteColumn', 'mergeCells', 'splitCell', 'splitTable', 'attachNextTable', 'deleteTable'],
       side: ['before', 'after'],
     },
     fields: {
@@ -416,9 +456,30 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       endRow: 'Inclusive merge end row.', endColumn: 'Inclusive merge end column.',
       rows: 'Split row count.', columns: 'Split column count.',
       side: 'before or after for insertion.', equalRowHeight: 'Use equal split row heights.', mergeFirst: 'Merge an existing span before splitting.',
+      atRow: 'First zero-based row to move into the second table for splitTable. Must not be the first row.',
     },
     example: { op: 'table.structure', target: { tableId: 'tbl_0', cell: { number: 0 } }, action: 'mergeCells', startRow: 0, startColumn: 0, endRow: 0, endColumn: 2 },
     notes: ['Runs alone because it invalidates table-cell locations.'],
+  }),
+  command({
+    op: 'table.transform',
+    category: 'table',
+    description: 'Transpose an inspected whole table, calculate one target cell, or equalize the selected table range without reconstructing the table.',
+    required: ['target', 'action'],
+    optional: ['row', 'column', 'formula', 'writeResult', 'startRow', 'startColumn', 'endRow', 'endColumn'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['transposeTableCellsInPlace', 'evaluateTableFormula', 'resizeTableCells'],
+    enum: { action: ['transpose', 'calculate', 'equalizeRowHeight', 'equalizeColumnWidth'] },
+    fields: {
+      target: 'Exact inspected table target.', action: 'Whole-table transpose, formula calculation, or equalization action.',
+      row: 'Zero-based formula target row.', column: 'Zero-based formula target column.',
+      formula: 'Formula such as =SUM(A1:A5).', writeResult: 'Write the formula result into the target cell; defaults to true.',
+      startRow: 'Optional inclusive range start row.', startColumn: 'Optional inclusive range start column.',
+      endRow: 'Optional inclusive range end row.', endColumn: 'Optional inclusive range end column.',
+    },
+    example: { op: 'table.transform', target: { tableId: 'tbl_0', cell: { number: 0 } }, action: 'transpose' },
+    notes: ['Runs alone because transpose changes table dimensions and all cell locations.'],
   }),
   command({
     op: 'style.applyText',
@@ -504,6 +565,7 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     notes: [
       'Unknown properties and out-of-range values fail the whole atomic batch; they are never silently ignored.',
       'Character or paragraph scope on a multi-paragraph cell requires target.cellParagraphIndex; the first cell paragraph is never selected implicitly.',
+      'A cell border or fill patch starts from the inspected cell border/fill state, so unspecified sides, diagonals, and fill attributes are preserved.',
     ],
   }),
   command({
@@ -703,21 +765,40 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     example: { op: 'setPageSetup', sectionIndex: 0, width: 59528, height: 84189, margins: { top: 5669, right: 5669, bottom: 5669, left: 5669 } },
   }),
   command({
+    op: 'section.configure',
+    category: 'layout',
+    description: 'Apply one explicit section-level page-border, column, section-definition, endnote-shape, page-hide, or page-number-start setting through the same native controls used by the editor UI.',
+    required: ['sectionIndex', 'action'],
+    optional: ['properties', 'paragraphIndex', 'offset', 'startNumber'],
+    execution: 'structural-adapter',
+    nativeMethods: ['setPageBorderFill', 'setColumnDef', 'setSectionDef', 'getEndnoteShape', 'applyEndnoteShape', 'setPageHide', 'insertNewNumber'],
+    enum: { action: ['pageBorder', 'columns', 'properties', 'endnoteShape', 'pageHide', 'pageNumberStart'] },
+    fields: {
+      sectionIndex: 'Zero-based section index.', action: 'One section configuration action.',
+      properties: 'Validated properties for pageBorder, columns, properties, endnoteShape, or pageHide; endnoteShape includes numbering, separator, placement, and note-spacing controls; pageHide uses hideHeader, hideFooter, hideMasterPage, hideBorder, hideFill, and hidePageNum.',
+      paragraphIndex: 'Required body paragraph index for pageHide and pageNumberStart.',
+      offset: 'Required body character offset for pageNumberStart.', startNumber: 'Required starting page number from 1 through 65535.',
+    },
+    example: { op: 'section.configure', sectionIndex: 0, action: 'columns', properties: { count: 2, type: 'normal', sameWidth: true, spacing: 2268 } },
+  }),
+  command({
     op: 'setHeaderFooter',
     category: 'package',
-    description: 'Create or replace an HWPX header or footer in one section.',
-    required: ['target', 'type', 'text'],
-    optional: ['applyTo', 'align'],
+    description: 'Create or replace an HWPX header or footer, including page, total-page, file-name fields and built-in templates.',
+    required: ['target', 'type'],
+    optional: ['text', 'fields', 'templateId', 'applyTo', 'align'],
     readiness: 'available',
     execution: 'structural-adapter',
     nativeMethods: [
       'createHeaderFooter',
       'insertTextInHeaderFooter',
+      'insertFieldInHf',
+      'applyHfTemplate',
       'applyParaFormatInHf',
       'deleteHeaderFooter',
     ],
     notes: [
-      'Requires the repository source-built RHWP runtime and header/footer text verification after reopen.',
+      'Supply text with optional fields, or templateId 0 through 10; every dynamic field is checked after save and reopen.',
     ],
     enum: {
       type: ['header', 'footer'],
@@ -728,10 +809,12 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       target: 'Section target such as { sectionIndex: 0 }.',
       type: 'header or footer.',
       text: 'Header or footer text.',
+      fields: 'Optional [{ type: pageNumber|totalPages|fileName, charOffset }] inserted into text offsets.',
+      templateId: 'Optional native header/footer template id from 0 through 10; mutually exclusive with text and fields.',
       applyTo: 'both, odd, or even pages.',
       align: 'left, center, or right.',
     },
-    example: { op: 'setHeaderFooter', target: { sectionIndex: 0 }, type: 'footer', text: '공공기관 내부검토용', align: 'center' },
+    example: { op: 'setHeaderFooter', target: { sectionIndex: 0 }, type: 'footer', text: 'Page  of ', fields: [{ type: 'pageNumber', charOffset: 5 }, { type: 'totalPages', charOffset: 9 }], align: 'center' },
   }),
   command({
     op: 'insertFootnote',
@@ -753,6 +836,53 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
     },
   }),
   command({
+    op: 'note.insert',
+    category: 'note',
+    description: 'Insert a footnote or endnote reference at an inspected text target and populate its note body.',
+    required: ['target', 'kind', 'text'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['insertFootnote', 'insertEndnote', 'insertTextInFootnote'],
+    enum: { kind: ['footnote', 'endnote'] },
+    fields: { target: locationField, kind: 'footnote or endnote.', text: 'Complete note body text.' },
+    example: { op: 'note.insert', target: { native: { section: 0, para: 1, offset: 5 } }, kind: 'endnote', text: '근거 자료: 2026년 6월 기준.' },
+  }),
+  command({
+    op: 'note.manage',
+    category: 'note',
+    description: 'Replace a complete footnote/endnote body, apply one note-paragraph format, or delete one exact inspected note control.',
+    required: ['action', 'target'],
+    optional: ['text', 'paragraphIndex', 'properties'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['getFootnoteInfo', 'deleteTextInFootnote', 'insertTextInFootnote', 'splitParagraphInFootnote', 'mergeParagraphInFootnote', 'applyParaFormatInFootnote', 'deleteFootnote'],
+    enum: { action: ['replaceText', 'formatParagraph', 'delete'] },
+    fields: {
+      action: 'replaceText, formatParagraph, or delete.',
+      target: 'Exact inspected note control coordinates { native: { section, para, control } }.',
+      text: 'Required complete replacement body for replaceText; use newline for note paragraphs.',
+      paragraphIndex: 'Required zero-based note paragraph index for formatParagraph.',
+      properties: 'Required validated paragraph-format patch for formatParagraph.',
+    },
+    example: { op: 'note.manage', action: 'replaceText', target: { native: { section: 0, para: 1, control: 0 } }, text: 'Updated evidence\nSecond note paragraph' },
+  }),
+  command({
+    op: 'bookmark.manage',
+    category: 'bookmark',
+    description: 'Create, rename, or delete one native bookmark using its exact inspected anchor or control coordinates.',
+    required: ['action', 'target'],
+    optional: ['name', 'newName'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['addBookmark', 'renameBookmark', 'deleteBookmark'],
+    enum: { action: ['create', 'rename', 'delete'] },
+    fields: {
+      action: 'Bookmark mutation action.', target: 'Text anchor for create or native bookmark control coordinates for rename/delete.',
+      name: 'Required bookmark name for create.', newName: 'Required replacement name for rename.',
+    },
+    example: { op: 'bookmark.manage', action: 'create', target: { native: { section: 0, para: 1, offset: 0 } }, name: 'summary_start' },
+  }),
+  command({
     op: 'object.deleteTextBoxByText',
     category: 'object',
     description: 'Delete text-box shapes in one section whose visible text matches any supplied string.',
@@ -764,14 +894,14 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
   command({
     op: 'object.format',
     category: 'object',
-    description: 'Apply validated positioning, wrapping, size, crop, caption, border, fill, rotation, or text-box properties to one inventoried image or shape.',
+    description: 'Apply validated positioning, wrapping, size, crop, caption, border, fill, rotation, text-box, or equation properties to one inventoried object.',
     required: ['scope', 'target', 'properties'],
     precondition: 'object_inventory',
     execution: 'structural-adapter',
-    nativeMethods: ['setPictureProperties', 'setShapeProperties'],
-    enum: { scope: ['image', 'shape'] },
+    nativeMethods: ['setPictureProperties', 'setShapeProperties', 'setEquationProperties'],
+    enum: { scope: ['image', 'shape', 'equation'] },
     fields: {
-      scope: 'image or shape.',
+      scope: 'image, shape, or equation.',
       target: 'Native section, paragraph, and control indices returned by object inventory.',
       properties: formatCatalogFields(),
     },
@@ -782,6 +912,38 @@ const HWPX_COMMAND_CATALOG = Object.freeze([
       properties: { treatAsChar: true, width: 18000, height: 12000, hasCaption: true, captionDirection: 'Bottom' },
     },
     notes: ['Unknown properties and out-of-range values fail the whole atomic batch.'],
+  }),
+  command({
+    op: 'object.create',
+    category: 'object',
+    description: 'Insert a shape, text box, or equation at an inspected body text position; text-box content is written through the exact native text-box path.',
+    required: ['target', 'kind'],
+    optional: ['shapeType', 'width', 'height', 'horzOffset', 'vertOffset', 'treatAsChar', 'textWrap', 'lineFlipX', 'lineFlipY', 'polygonPoints', 'text', 'script', 'fontSize', 'color'],
+    precondition: 'target_inspect',
+    execution: 'structural-adapter',
+    nativeMethods: ['createShapeControl', 'insertTextInCell', 'insertEquation'],
+    enum: { kind: ['shape', 'textBox', 'equation'] },
+    fields: {
+      target: locationField, kind: 'shape, textBox, or equation.', shapeType: 'Shape subtype for kind=shape.',
+      width: 'Positive object width in HWP units.', height: 'Positive object height in HWP units.',
+      horzOffset: 'Horizontal HWP-unit offset.', vertOffset: 'Vertical HWP-unit offset.',
+      treatAsChar: 'Inline placement flag.', textWrap: 'Native text-wrap mode.', lineFlipX: 'Line flip flag.', lineFlipY: 'Line flip flag.', polygonPoints: 'Polygon points for shapeType=polygon.',
+      text: 'Initial text-box content.', script: 'Equation script.', fontSize: 'Equation font size in HWP units.', color: 'Equation packed color.',
+    },
+    example: { op: 'object.create', target: { native: { section: 0, para: 1, offset: 3 } }, kind: 'textBox', width: 18000, height: 9000, text: '검토 요약' },
+  }),
+  command({
+    op: 'object.manage',
+    category: 'object',
+    description: 'Set exact text-box content, arrange a shape z-order, group or ungroup exact inspected drawing controls (shapes and pictures), or delete one exact image, shape, or equation control.',
+    required: ['action', 'kind'],
+    optional: ['text', 'order', 'targets'],
+    precondition: 'object_inventory',
+    execution: 'structural-adapter',
+    nativeMethods: ['deletePictureControl', 'deleteShapeControl', 'deleteEquationControl', 'changeShapeZOrder', 'groupShapes', 'ungroupShape', 'deleteTextInCell', 'insertTextInCell'],
+    enum: { action: ['setText', 'arrange', 'group', 'ungroup', 'delete'], kind: ['image', 'shape', 'textBox', 'equation', 'object'], order: ['front', 'back', 'forward', 'backward'] },
+    fields: { action: 'Object management action.', kind: 'Exact object kind. Use object (or the legacy shape alias) for group or ungroup.', target: 'Native object coordinates returned by object inventory; required for every action except group.', targets: 'For action=group only: at least two exact inspected native shape or picture targets in one section.', text: 'Required replacement text for action=setText.', order: 'Required z-order operation for action=arrange.' },
+    example: { op: 'object.manage', action: 'arrange', kind: 'shape', target: { native: { section: 0, para: 2, control: 0 } }, order: 'front' },
   }),
   command({
     op: 'object.replaceTextBoxText',
@@ -869,7 +1031,14 @@ const SINGLE_TARGET_INSPECTION_OPS = new Set([
   'table.autoFit',
   'format.apply',
   'table.structure',
+  'table.transform',
   'paragraph.structure',
+  'field.insert',
+  'note.insert',
+  'note.manage',
+  'bookmark.manage',
+  'object.create',
+  'object.manage',
 ]);
 
 function nonNegativeInteger(value) {
@@ -937,6 +1106,10 @@ function commandInspectionTargets(commandValue, entry, commandIndex = 0) {
   } else if (['text.replaceParagraph', 'text.insertAfterParagraph'].includes(entry.op)) {
     add(commandValue.location ?? commandValue.target, 'location');
     optional(commandValue.styleSource, 'styleSource');
+  } else if (entry.op === 'object.manage' && commandValue.action === 'group') {
+    for (const [index, target] of (commandValue.targets ?? []).entries()) {
+      add(target, `targets[${index}]`);
+    }
   } else if (SINGLE_TARGET_INSPECTION_OPS.has(entry.op)) {
     add(commandValue.target ?? commandValue.location, 'target');
     if (entry.op === 'appendParagraph') optional(commandValue.styleSource, 'styleSource');
@@ -1099,6 +1272,20 @@ function validateHwpxCommands(commands) {
         selectors.add(selector);
       });
     }
+    if (entry.op === 'field.manage') {
+      if (!['update', 'delete'].includes(value.action)
+        || !Number.isInteger(value.fieldId) || value.fieldId < 0) {
+        throw new Error('field.manage requires action update/delete and a nonnegative fieldId.');
+      }
+      const unsupported = unsupportedFields(value, ['op', 'commandId', 'action', 'fieldId', 'guide', 'memo', 'name', 'editable']);
+      if (unsupported.length) throw new Error(`field.manage has unsupported field(s): ${unsupported.join(', ')}.`);
+      if (value.action === 'delete' && ['guide', 'memo', 'name', 'editable'].some(field => value[field] !== undefined)) {
+        throw new Error('field.manage delete does not accept update properties.');
+      }
+      if (value.action === 'update' && !['guide', 'memo', 'name', 'editable'].some(field => value[field] !== undefined)) {
+        throw new Error('field.manage update requires at least one replacement property.');
+      }
+    }
     if (entry.op === 'table.writeCell' && value.paragraphStyleIds !== undefined) {
       validateParagraphStyleIds(value.paragraphStyleIds, String(value.text ?? '').split('\n').length, entry.op);
     }
@@ -1169,7 +1356,7 @@ function validateHwpxCommands(commands) {
       const requiredByAction = {
         insertRow: ['row'], insertColumn: ['column'], deleteRow: ['row'], deleteColumn: ['column'],
         mergeCells: ['startRow', 'startColumn', 'endRow', 'endColumn'],
-        splitCell: ['row', 'column'], deleteTable: [],
+        splitCell: ['row', 'column'], splitTable: ['atRow'], attachNextTable: [], deleteTable: [],
       }[value.action] ?? [];
       const missingArguments = requiredByAction.filter(field => nonNegativeInteger(value[field]) === null);
       if (missingArguments.length) throw new Error(`table.structure ${value.action} requires nonnegative integer field(s): ${missingArguments.join(', ')}.`);
@@ -1177,6 +1364,78 @@ function validateHwpxCommands(commands) {
         if (value[field] !== undefined && (nonNegativeInteger(value[field]) === null || Number(value[field]) < 1)) {
           throw new Error(`table.structure ${field} must be a positive integer.`);
         }
+      }
+    }
+    if (entry.op === 'table.transform') {
+      const requiredByAction = {
+        transpose: [],
+        calculate: ['row', 'column', 'formula'],
+        equalizeRowHeight: [],
+        equalizeColumnWidth: [],
+      }[value.action] ?? [];
+      const missingArguments = requiredByAction.filter((field) => {
+        if (field === 'formula') return typeof value.formula !== 'string' || !value.formula.trim();
+        return nonNegativeInteger(value[field]) === null;
+      });
+      if (missingArguments.length) throw new Error(`table.transform ${value.action} requires: ${missingArguments.join(', ')}.`);
+      for (const field of ['startRow', 'startColumn', 'endRow', 'endColumn']) {
+        if (value[field] !== undefined && nonNegativeInteger(value[field]) === null) {
+          throw new Error(`table.transform ${field} must be a nonnegative integer.`);
+        }
+      }
+      if (value.writeResult !== undefined && typeof value.writeResult !== 'boolean') {
+        throw new Error('table.transform writeResult must be a boolean.');
+      }
+    }
+    if (entry.op === 'field.insert') {
+      for (const field of ['guide', 'memo', 'name']) {
+        if (value[field] !== undefined && (typeof value[field] !== 'string' || value[field].length > 4096)) {
+          throw new Error(`field.insert ${field} must be a string up to 4096 characters.`);
+        }
+      }
+      if (value.editable !== undefined && typeof value.editable !== 'boolean') throw new Error('field.insert editable must be a boolean.');
+    }
+    if (entry.op === 'note.insert' && (typeof value.text !== 'string' || !value.text.trim() || value.text.length > 100_000)) {
+      throw new Error('note.insert text must be a nonblank string up to 100000 characters.');
+    }
+    if (entry.op === 'section.configure') {
+      if (nonNegativeInteger(value.sectionIndex) === null) throw new Error('section.configure sectionIndex must be a nonnegative integer.');
+      const needsProperties = ['pageBorder', 'columns', 'properties', 'endnoteShape', 'pageHide'].includes(value.action);
+      if (needsProperties && (!value.properties || typeof value.properties !== 'object' || Array.isArray(value.properties) || Object.keys(value.properties).length === 0)) {
+        throw new Error(`section.configure ${value.action} requires a nonempty properties object.`);
+      }
+      if (['pageHide', 'pageNumberStart'].includes(value.action) && nonNegativeInteger(value.paragraphIndex) === null) {
+        throw new Error(`section.configure ${value.action} requires a nonnegative paragraphIndex.`);
+      }
+      if (value.action === 'pageNumberStart') {
+        if (nonNegativeInteger(value.offset) === null) throw new Error('section.configure pageNumberStart requires a nonnegative offset.');
+        if (!Number.isInteger(value.startNumber) || value.startNumber < 1 || value.startNumber > 65535) {
+          throw new Error('section.configure pageNumberStart requires startNumber from 1 through 65535.');
+        }
+      }
+    }
+    if (entry.op === 'bookmark.manage') {
+      if (value.action === 'create' && (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 512)) {
+        throw new Error('bookmark.manage create requires a nonblank name up to 512 characters.');
+      }
+      if (value.action === 'rename' && (typeof value.newName !== 'string' || !value.newName.trim() || value.newName.length > 512)) {
+        throw new Error('bookmark.manage rename requires a nonblank newName up to 512 characters.');
+      }
+    }
+    if (entry.op === 'object.create') {
+      if (value.kind === 'equation' && (typeof value.script !== 'string' || !value.script.trim())) {
+        throw new Error('object.create equation requires a nonblank script.');
+      }
+      if (value.kind === 'textBox' && value.text !== undefined && typeof value.text !== 'string') {
+        throw new Error('object.create textBox text must be a string.');
+      }
+    }
+    if (entry.op === 'object.manage') {
+      if (value.action === 'setText' && (value.kind !== 'textBox' || typeof value.text !== 'string')) {
+        throw new Error('object.manage setText requires kind=textBox and a text string.');
+      }
+      if (value.action === 'arrange' && (!['shape', 'textBox'].includes(value.kind) || !['front', 'back', 'forward', 'backward'].includes(value.order))) {
+        throw new Error('object.manage arrange requires a shape/textBox and a valid order.');
       }
     }
     if (entry.op === 'paragraph.structure' && value.action !== 'mergePrevious'
@@ -1272,7 +1531,7 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
     };
   });
   return {
-    version: '3.1.0',
+    version: '3.2.0',
     sourceFormat: normalizedSourceFormat,
     categories: HWPX_COMMAND_CATEGORIES,
     commandCount: sourceAwareCommands.length,

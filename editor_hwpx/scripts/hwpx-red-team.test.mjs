@@ -11,6 +11,7 @@ const sample = (...parts) => path.join(PROJECT_ROOT, 'samples', ...parts);
 const BODY_HWP = sample('re-align-left-hancom.hwp');
 const TABLE_HWP = sample('table-001.hwp');
 const SIMPLE_TABLE_HWP = sample('table-ipc.hwp');
+const BASIC_TABLE_HWPX = sample('hwpx', 'basic-table-01.hwpx');
 const IMAGE_HWPX = sample('test-image.hwpx');
 const SHAPE_HWP = sample('shape-001.hwp');
 
@@ -41,6 +42,23 @@ async function simpleTableSession() {
   const table = session.readJson().tables[0];
   assert.ok(table?.cells?.length);
   return { session, table, tableTarget: { tableId: table.id, native: table.native } };
+}
+
+async function basicHwpxTableSession() {
+  await initHwpxRuntime();
+  const session = new HwpxApiSession(readFileSync(BASIC_TABLE_HWPX));
+  const table = session.readJson().tables[0];
+  assert.ok(table?.cells?.length);
+  return {
+    session,
+    table,
+    cellTarget: { tableId: table.id, cell: { number: 0 }, native: table.cells[0].native },
+  };
+}
+
+function readCellProperties(session, cellTarget) {
+  const { section, paragraph, control, cellIndex } = cellTarget.native;
+  return JSON.parse(session.doc.getCellProperties(section, paragraph, control, cellIndex));
 }
 
 function firstPageControl(session, predicate) {
@@ -119,6 +137,54 @@ for (const [name, properties] of cellCases) {
     assert.equal(reopened.qualityCheck().ok, true);
   });
 }
+
+test('red-team actual cell advanced properties and sparse fill preserve the inspected border/fill state', async () => {
+  const { session, cellTarget } = await basicHwpxTableSession();
+  const before = readCellProperties(session, cellTarget);
+  session.commandsBatch([{
+    op: 'format.apply', scope: 'cell', target: cellTarget,
+    properties: { applyInnerMargin: true, fieldName: 'audit-field', editableInForm: true },
+  }]);
+  let reopened = new HwpxApiSession(session.save().bytes);
+  let properties = readCellProperties(reopened, cellTarget);
+  assert.equal(properties.applyInnerMargin, true);
+  assert.equal(properties.fieldName, 'audit-field');
+  assert.equal(properties.editableInForm, true);
+
+  reopened.commandsBatch([{
+    op: 'format.apply', scope: 'cell', target: cellTarget,
+    properties: { fillColor: '#fff2cc' },
+  }]);
+  reopened = new HwpxApiSession(reopened.save().bytes);
+  properties = readCellProperties(reopened, cellTarget);
+  assert.equal(properties.fillType, 'solid');
+  assert.equal(properties.fillColor, '#fff2cc');
+  assert.deepEqual(properties.borderLeft, before.borderLeft);
+  assert.deepEqual(properties.borderRight, before.borderRight);
+  assert.deepEqual(properties.borderTop, before.borderTop);
+  assert.deepEqual(properties.borderBottom, before.borderBottom);
+  assert.equal(reopened.qualityCheck().ok, true);
+});
+
+test('red-team actual cell diagonal format round-trips exactly', async () => {
+  const { session, cellTarget } = await basicHwpxTableSession();
+  session.commandsBatch([{
+    op: 'format.apply', scope: 'cell', target: cellTarget,
+    properties: {
+      diagonalLine: 1, diagonalSlash: 2, diagonalBackSlash: 0,
+      diagonalWidth: 3, diagonalColor: '#123456', centerLine: 'NONE',
+    },
+  }]);
+  const reopened = new HwpxApiSession(session.save().bytes);
+  const properties = readCellProperties(reopened, cellTarget);
+  assert.equal(properties.diagonalLine, 1);
+  assert.equal(properties.diagonalSlash, 2);
+  assert.equal(properties.diagonalBackSlash, 0);
+  assert.equal(properties.diagonalWidth, 3);
+  assert.equal(properties.diagonalColor, '#123456');
+  assert.equal(properties.centerLine, 'NONE');
+  assert.equal(reopened.qualityCheck().ok, true);
+});
 
 const tableCases = [
   ['cell spacing', { cellSpacing: 120 }],

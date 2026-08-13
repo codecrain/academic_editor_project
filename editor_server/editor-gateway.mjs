@@ -3044,11 +3044,28 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   const body = await readJsonBody(req);
   const { session } = record;
 
-  if (fmt === 'hwpx' && !new Set(['inspect', 'edit', 'review', 'save', 'export-pdf', 'discard']).has(actionPath)) {
+  if (fmt === 'hwpx' && !new Set(['inspect', 'markdown', 'edit', 'review', 'save', 'export-pdf', 'discard']).has(actionPath)) {
     sendJson(res, 404, {
       ok: false,
       code: 'unsupported_hwpx_action',
-      message: 'Supported HWPX actions are inspect, edit, review, save, export-pdf, and discard.',
+      message: 'Supported HWPX actions are inspect, markdown, edit, review, save, export-pdf, and discard.',
+    });
+    return true;
+  }
+
+  if (fmt === 'hwpx' && actionPath === 'markdown') {
+    if (body.baseRevision !== undefined) {
+      assertCurrentRevision({ revision: session.revision }, Number(body.baseRevision));
+    }
+    const document = await session.readJson();
+    sendJson(res, 200, {
+      ok: true,
+      revision: session.revision,
+      sourceFormat: document.sourceFormat,
+      markdown: hwpxDocumentToMarkdown(document),
+      sectionCount: Array.isArray(document.sections) ? document.sections.length : 0,
+      tableCount: Array.isArray(document.tables) ? document.tables.length : 0,
+      pageCount: Number(document.pageCount || 0),
     });
     return true;
   }
@@ -4851,6 +4868,77 @@ function qualityAllowsFinalization(quality, fmt) {
   return quality.issues.every((issue) => issue?.severity === 'info');
 }
 
+function hwpxDocumentToMarkdown(document) {
+  const tablesByAnchor = new Map();
+  for (const table of Array.isArray(document?.tables) ? document.tables : []) {
+    const section = Number(table?.section);
+    const paragraph = Number(table?.para ?? table?.paragraph);
+    if (!Number.isInteger(section) || !Number.isInteger(paragraph)) continue;
+    const key = `${section}:${paragraph}`;
+    const anchored = tablesByAnchor.get(key) || [];
+    anchored.push(table);
+    tablesByAnchor.set(key, anchored);
+  }
+
+  const lines = [];
+  const emittedTables = new Set();
+  for (const section of Array.isArray(document?.sections) ? document.sections : []) {
+    for (const paragraph of Array.isArray(section?.paragraphs) ? section.paragraphs : []) {
+      const key = `${Number(paragraph?.section)}:${Number(paragraph?.para)}`;
+      const anchoredTables = tablesByAnchor.get(key) || [];
+      if (anchoredTables.length) {
+        for (const table of anchoredTables) {
+          lines.push(...hwpxTableToMarkdown(table), '');
+          emittedTables.add(table);
+        }
+        continue;
+      }
+      const text = String(paragraph?.text || '').trim();
+      if (text) lines.push(text, '');
+    }
+  }
+  for (const table of Array.isArray(document?.tables) ? document.tables : []) {
+    if (emittedTables.has(table)) continue;
+    lines.push(...hwpxTableToMarkdown(table), '');
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function hwpxTableToMarkdown(table) {
+  const cells = Array.isArray(table?.cells) ? table.cells : [];
+  const rowCount = Math.max(0, Number(table?.dims?.rows ?? table?.dims?.rowCount ?? table?.rows ?? 0));
+  const columnCount = Math.max(0, Number(
+    table?.dims?.cols
+      ?? table?.dims?.columns
+      ?? table?.dims?.columnCount
+      ?? table?.dims?.colCount
+      ?? table?.columns
+      ?? 0,
+  ));
+  if (!rowCount || !columnCount) {
+    const values = cells.map((cell) => String(cell?.text || '').trim()).filter(Boolean);
+    return values.length ? values.map((value) => `| ${markdownTableCell(value)} |`) : [];
+  }
+  const rows = Array.from({ length: rowCount }, () => Array(columnCount).fill(''));
+  for (const cell of cells) {
+    const row = Number(cell?.row ?? cell?.rowIndex ?? cell?.address?.row);
+    const column = Number(cell?.col ?? cell?.column ?? cell?.columnIndex ?? cell?.address?.column);
+    if (!Number.isInteger(row) || !Number.isInteger(column)) continue;
+    if (row < 0 || row >= rowCount || column < 0 || column >= columnCount) continue;
+    rows[row][column] = String(cell?.text || '').trim();
+  }
+  const render = (row) => `| ${row.map(markdownTableCell).join(' | ')} |`;
+  return [
+    render(rows[0]),
+    render(Array(columnCount).fill('---')),
+    ...rows.slice(1).map(render),
+  ];
+}
+
+function markdownTableCell(value) {
+  return String(value || '').replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>').trim();
+}
+
 async function executeEditorMcpTool(req, config, state, name, args = {}) {
   if (name.startsWith('editor_image_')) {
     const store = config.imageSessionStore;
@@ -5197,6 +5285,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       const editorUrl = new URL(config.hwpxBasePath, config.publicOrigin);
       editorUrl.searchParams.set('url', `/v1/hwpx/documents/${documentId}/live-source`);
       editorUrl.searchParams.set('filename', args.filename);
+      editorUrl.searchParams.set('readonly', '1');
+      editorUrl.searchParams.set('finalized', '1');
       return {
         ...publicResult,
         artifactId,

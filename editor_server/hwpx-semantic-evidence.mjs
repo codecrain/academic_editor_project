@@ -117,7 +117,28 @@ function pictureInsideTargetCell(picture, target) {
 }
 
 function targetHasExecutionPicture(target, pictures) {
-  return targetPictureCount(target) > 0 || pictures.some((picture) => pictureInsideTargetCell(picture, target));
+  if (targetPictureCount(target) > 0 || pictures.some((picture) => pictureInsideTargetCell(picture, target))) return true;
+  // HWP's safe inline insertion creates a dedicated paragraph immediately after
+  // the labelled execution paragraph. Treat that adjacent inline object as the
+  // field's persisted signature/seal; do not broaden this to floating objects or
+  // arbitrary nearby paragraphs.
+  const targetParagraph = target?.native?.paragraph
+    ?? target?.location?.paragraph?.number
+    ?? target?.location?.native?.paragraph;
+  const targetSection = target?.native?.section
+    ?? target?.location?.paragraph?.section
+    ?? target?.location?.native?.section;
+  if (!Number.isInteger(Number(targetParagraph))) return false;
+  return pictures.some((picture) => {
+    const properties = picture?.properties ?? {};
+    const native = picture?.native ?? {};
+    if (properties.treatAsChar !== true) return false;
+    if (Number(native.section) !== Number(targetSection)) return false;
+    if (Number(native.paragraph) !== Number(targetParagraph) + 1) return false;
+    const targetPage = Number(target?.pageHint);
+    const picturePage = Number(picture?.pageHint);
+    return !Number.isFinite(targetPage) || !Number.isFinite(picturePage) || targetPage === picturePage;
+  });
 }
 
 function normalizedPolicyLocations(policy, field) {

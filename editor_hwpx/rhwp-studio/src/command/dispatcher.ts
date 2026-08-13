@@ -21,6 +21,33 @@ const FORM_MODE_BLOCKED_PREFIXES = [
   'page:',
 ];
 
+/**
+ * A finalized HWPX preview is still rendered by the full studio surface so
+ * that selection, search, zoom, and printing remain available.  It must not,
+ * however, execute a document-changing command locally: the gateway has
+ * already closed the mutable API session and the browser URL is bound to the
+ * verified artifact.
+ */
+function isAllowedInReadOnlyPreview(commandId: string): boolean {
+  return commandId.startsWith('view:')
+    || [
+      'edit:copy',
+      'edit:select-all',
+      'edit:find',
+      'edit:find-again',
+      'edit:goto',
+      'edit:document-history',
+      'file:print',
+      'file:print-to-pdf',
+      'file:about',
+      'tool:options',
+    ].includes(commandId);
+}
+
+function isBlockedInReadOnlyPreview(commandId: string, ctx: EditorContext): boolean {
+  return !ctx.isEditable && !ctx.isFormMode && !isAllowedInReadOnlyPreview(commandId);
+}
+
 function isBlockedInFormMode(commandId: string, ctx: EditorContext): boolean {
   if (!ctx.isFormMode) return false;
   if (FORM_MODE_BLOCKED_IDS.has(commandId)) return true;
@@ -47,6 +74,9 @@ export class CommandDispatcher {
     }
 
     const ctx = this.services.getContext();
+    if (isBlockedInReadOnlyPreview(commandId, ctx)) {
+      return false;
+    }
     if (isBlockedInFormMode(commandId, ctx)) {
       return false;
     }
@@ -74,6 +104,7 @@ export class CommandDispatcher {
     const def = this.registry.get(commandId);
     if (!def) return false;
     const ctx = this.services.getContext();
+    if (isBlockedInReadOnlyPreview(commandId, ctx)) return false;
     if (isBlockedInFormMode(commandId, ctx)) return false;
     if (!def.canExecute) return true;
     return def.canExecute(ctx);

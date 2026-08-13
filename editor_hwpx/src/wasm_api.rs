@@ -5422,6 +5422,13 @@ impl HwpDocument {
                             // guide 또는 memo가 변경되었으므로 command 재구축
                             let new_command = Field::build_clickhere_command(guide, memo);
                             f.command = new_command;
+                            // Parsed HWPX fields retain both a verbatim parameter cache and
+                            // a structured parameter tree. Keeping either old Command value
+                            // would make export silently restore the pre-edit guide/memo.
+                            f.raw_parameters_xml = None;
+                            if !f.parameters.replace_named_string("Command", &f.command) {
+                                f.parameters = Default::default();
+                            }
                         }
                         // command가 변경되지 않았으면 원본 보존
 
