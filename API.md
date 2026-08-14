@@ -145,11 +145,12 @@ HWPX `view` is `summary`, `outline`, `styles`, `target`, `objects`, `template`,
 cursors and return exact locations plus measured style/layout facts. DOCX and
 PDF retain their format-specific paged read projections.
 
-For submission documents, call `editor_hwpx_review` with
-`profile="submission"`. This keeps the same nine-tool lifecycle while adding
-unresolved-field, instruction-region, dummy-identifier, required-blank,
-floating-image, sparse-page, content-bound, and occupancy evidence. Template
-suggestions are advisory; explicit `templatePolicy` roles remain authoritative.
+`editor_hwpx_review` performs structural and full rendered-layout verification.
+It returns measured page, font, color, image, content-bound, occupancy, target-flow,
+and clipping evidence without deciding whether the document is complete or ready
+for submission. Those semantic and editorial judgments belong to the caller.
+`preservationPolicy` protects only exact locations, tables, or images selected by
+the caller; unlisted content remains editable and no template role is inferred.
 
 Every read page has this envelope:
 

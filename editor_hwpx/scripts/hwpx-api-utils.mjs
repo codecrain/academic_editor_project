@@ -2921,17 +2921,21 @@ export function verifyStructuralTarget(session, target, result = null) {
         { target },
       );
     }
-    if (result?.expectedText !== undefined) {
+    const expectedText = Array.isArray(result?.expectedParagraphTexts)
+      ? result.expectedParagraphTexts[(result.createdTargets ?? []).findIndex(item =>
+        item.sectionIndex === target.sectionIndex && item.paragraphIndex === target.paragraphIndex)]
+      : result?.expectedText;
+    if (expectedText !== undefined) {
       const text = readBodyParagraphText(
         session.doc,
         target.sectionIndex,
         target.paragraphIndex,
       );
-      if (text !== result.expectedText) {
+      if (text !== expectedText) {
         throw structuralBatchError(
           'HWPX_CREATED_TARGET_MISMATCH',
           'A structural paragraph did not preserve its requested text after reopening.',
-          { target, expectedText: result.expectedText, text },
+          { target, expectedText, text },
         );
       }
     }
@@ -4599,11 +4603,11 @@ export class HwpxApiSession {
     const hwpSource = !isZipPackage(this.inputBytes);
     const structuralReasons = [...packageClassification.reasons];
     if (hwpSource && ops.some(op => (
-      ['image.insertAfterParagraph', 'image.insertInCell'].includes(resolveHwpxCommand(op)?.op ?? op?.op)
+      ['text.insertAfterParagraph', 'image.insertAfterParagraph', 'image.insertInCell'].includes(resolveHwpxCommand(op)?.op ?? op?.op)
     ))) {
       structuralReasons.push(...ops
         .map(op => resolveHwpxCommand(op)?.op ?? op?.op)
-        .filter(op => ['image.insertAfterParagraph', 'image.insertInCell'].includes(op)));
+        .filter(op => ['text.insertAfterParagraph', 'image.insertAfterParagraph', 'image.insertInCell'].includes(op)));
     }
     const classification = {
       mode: structuralReasons.length > 0 ? 'structural-export' : 'patch-safe',
@@ -4757,8 +4761,11 @@ export class HwpxApiSession {
       }
       const packageStructural = entry
         && classifyHwpxCommands([{ ...sourceOp, op: entry.op }]).mode === 'structural-export';
+      const hwpNativeParagraphInsertion = hwpSource
+        && ['text.insertAfterParagraph', 'appendParagraph'].includes(entry?.op);
       const useStructuralAdapter = entry && (
         (packageStructural && (entry.op !== 'appendParagraph' || hwpSource))
+        || hwpNativeParagraphInsertion
         || (hwpSource && ['image.insertAfterParagraph', 'image.insertInCell'].includes(entry.op))
       );
       if (useStructuralAdapter) {
@@ -4784,7 +4791,9 @@ export class HwpxApiSession {
         const structuralOp = {
           ...sourceOp,
           opId: commandId(sourceOp, opIndex),
-          op: entry.normalizeAs ?? entry.op,
+          op: hwpNativeParagraphInsertion && entry.op === 'text.insertAfterParagraph'
+            ? 'appendParagraph'
+            : entry.normalizeAs ?? entry.op,
         };
         const result = applyHwpxStructuralCommand(working.doc, structuralOp, {
           before,
@@ -5513,20 +5522,17 @@ export class HwpxApiSession {
       const baselineTables = options.baselineJson.tables ?? [];
       const deletedTableIds = new Set(options.deletedTableIds ?? []);
       const matchedTables = matchBaselineTables(baselineTables, json.tables ?? [], deletedTableIds);
-      const requiredTableIds = new Set(options.templatePolicy?.requiredTableIds || []);
-      const removableTableIds = new Set(options.templatePolicy?.removableTableIds || []);
+      const preserveTableIds = new Set(options.preservationPolicy?.preserveTableIds || []);
       for (const baselineTable of baselineTables) {
         const currentTable = deletedTableIds.has(baselineTable.id)
           ? null
           : matchedTables.get(baselineTable);
         if (!currentTable) {
-          if (!removableTableIds.has(baselineTable.id)) {
+          if (preserveTableIds.has(baselineTable.id)) {
             issues.push({
-              severity: requiredTableIds.has(baselineTable.id) ? 'error' : 'warning',
-              code: requiredTableIds.has(baselineTable.id) ? 'required-table-missing' : 'unclassified-table-missing',
-              message: requiredTableIds.has(baselineTable.id)
-                ? 'A table marked required by the template policy is missing.'
-                : 'An unclassified baseline table is missing; classify it as removable or required.',
+              severity: 'error',
+              code: 'preserved-table-missing',
+              message: 'A table explicitly selected for preservation is missing.',
               tableId: baselineTable.id,
             });
           }
@@ -5566,35 +5572,31 @@ export class HwpxApiSession {
       const currentImages = new Map((json.objectGraph?.images || []).map((image) => [image.name, image]));
       const baselinePictures = options.baselineJson.objectGraph?.pictures ?? [];
       const currentPictures = json.objectGraph?.pictures ?? [];
-      const requiredImageNames = new Set(options.templatePolicy?.requiredImageNames || []);
-      const replaceableImageNames = new Set(options.templatePolicy?.replaceableImageNames || []);
+      const preserveImageNames = new Set(options.preservationPolicy?.preserveImageNames || []);
       for (const baselineImage of options.baselineJson.objectGraph?.images ?? []) {
         const currentImage = currentImages.get(baselineImage.name);
         if (!currentImage) {
-          issues.push({
-            severity: requiredImageNames.has(baselineImage.name) ? 'error' : 'warning',
-            code: requiredImageNames.has(baselineImage.name) ? 'required-image-missing' : 'unclassified-image-missing',
-            message: requiredImageNames.has(baselineImage.name)
-              ? 'An embedded image marked required by the template policy is missing.'
-              : 'An unclassified baseline image is missing; classify it as replaceable or required.',
+          if (preserveImageNames.has(baselineImage.name)) issues.push({
+            severity: 'error',
+            code: 'preserved-image-missing',
+            message: 'An embedded image explicitly selected for preservation is missing.',
             imageName: baselineImage.name,
             beforeSha256: baselineImage.sha256,
           });
-        } else if (baselineImage.sha256 && currentImage.sha256 && baselineImage.sha256 !== currentImage.sha256
-          && !replaceableImageNames.has(baselineImage.name)) {
-          const required = requiredImageNames.has(baselineImage.name);
+        } else if (baselineImage.sha256 && currentImage.sha256 && baselineImage.sha256 !== currentImage.sha256) {
+          const preserved = preserveImageNames.has(baselineImage.name);
           issues.push({
-            severity: required ? 'error' : 'info',
-            code: required ? 'required-image-bytes-changed' : 'image-bytes-changed',
-            message: required
-              ? 'An embedded image marked required changed bytes from the opened source.'
+            severity: preserved ? 'error' : 'info',
+            code: preserved ? 'preserved-image-bytes-changed' : 'image-bytes-changed',
+            message: preserved
+              ? 'An embedded image explicitly selected for preservation changed bytes.'
               : 'Embedded image bytes changed from the opened source.',
             imageName: baselineImage.name,
             beforeSha256: baselineImage.sha256,
             afterSha256: currentImage.sha256,
           });
         }
-        if (requiredImageNames.has(baselineImage.name)) {
+        if (preserveImageNames.has(baselineImage.name)) {
           const logicalReference = imageLogicalReference(baselineImage.name);
           const beforePlacementCount = baselinePictures.filter(picture =>
             String(picture.binItemIDRef ?? picture.binaryItemIDRef ?? '') === logicalReference).length;
@@ -5603,8 +5605,8 @@ export class HwpxApiSession {
           if (afterPlacementCount < beforePlacementCount) {
             issues.push({
               severity: 'error',
-              code: 'required-image-placement-missing',
-              message: 'One or more placements of an image marked required disappeared.',
+              code: 'preserved-image-placement-missing',
+              message: 'One or more placements of an image explicitly selected for preservation disappeared.',
               imageName: baselineImage.name,
               before: beforePlacementCount,
               after: afterPlacementCount,

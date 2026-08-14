@@ -442,13 +442,19 @@ function applyAppendParagraph(doc, command, context) {
   const target = resolveHwpxTextTarget(command, { offsetRequired: false });
   const insertParagraph = requireMethod(doc, 'insertParagraph');
   const insertText = requireMethod(doc, 'insertText');
+  // Native HWP insertion already inherits the preceding paragraph's effective
+  // paragraph and character shapes. Reapplying the HWPX-shaped property object
+  // through applyParaFormat corrupts unit-scaled properties (notably indent).
+  // Keep the native inheritance, apply only the named style when requested, and
+  // verify the reopened result below.
+  const hwpSource = typeof doc.getSourceFormat === 'function' && doc.getSourceFormat() === 'hwp';
   const applyStyle = command.styleSource === undefined
     ? null
     : requireMethod(doc, 'applyStyle');
-  const applyParaFormat = command.styleSource === undefined
+  const applyParaFormat = command.styleSource === undefined || hwpSource
     ? null
     : requireMethod(doc, 'applyParaFormat');
-  const applyCharFormat = command.styleSource === undefined || command.text.length === 0
+  const applyCharFormat = command.styleSource === undefined || command.text.length === 0 || hwpSource
     ? null
     : requireMethod(doc, 'applyCharFormat');
   const requestedParagraphIndex = target.paragraphIndex + 1;
@@ -470,54 +476,51 @@ function applyAppendParagraph(doc, command, context) {
     ? null
     : { ...styleSource.characterProperties };
   if (characterStyle) delete characterStyle.charShapeId;
-  const paragraphNative = parseNativeResult(
-    insertParagraph(target.sectionIndex, requestedParagraphIndex),
-    'insertParagraph',
-    ['paraIdx'],
-  );
-  const paragraphIndex = paragraphNative.paraIdx;
-  const styleNative = styleSource === null
-    ? null
-    : parseNativeResult(
-      applyStyle(target.sectionIndex, paragraphIndex, styleSource.styleId),
-      'applyStyle',
+  const lines = command.text.split('\n');
+  const nativeParagraphs = [];
+  const createdTargets = [];
+  let nextParagraphIndex = requestedParagraphIndex;
+  for (const text of lines) {
+    const paragraphNative = parseNativeResult(
+      insertParagraph(target.sectionIndex, nextParagraphIndex),
+      'insertParagraph',
+      ['paraIdx'],
     );
-  const paragraphFormatNative = styleSource === null
-    ? null
-    : parseNativeResult(
-      applyParaFormat(
-        target.sectionIndex,
-        paragraphIndex,
-        JSON.stringify(paragraphStyle),
-      ),
-      'applyParaFormat',
+    const paragraphIndex = paragraphNative.paraIdx;
+    const styleNative = styleSource === null
+      ? null
+      : parseNativeResult(
+        applyStyle(target.sectionIndex, paragraphIndex, styleSource.styleId),
+        'applyStyle',
+      );
+    const paragraphFormatNative = applyParaFormat === null
+      ? null
+      : parseNativeResult(
+        applyParaFormat(
+          target.sectionIndex,
+          paragraphIndex,
+          JSON.stringify(paragraphStyle),
+        ),
+        'applyParaFormat',
+      );
+    const textNative = parseNativeResult(
+      insertText(target.sectionIndex, paragraphIndex, 0, text),
+      'insertText',
+      ['charOffset'],
     );
-  const textNative = parseNativeResult(
-    insertText(target.sectionIndex, paragraphIndex, 0, command.text),
-    'insertText',
-    ['charOffset'],
-  );
-  const characterFormatNative = characterStyle === null
-    ? null
-    : parseNativeResult(
-      applyCharFormat(
-        target.sectionIndex,
-        paragraphIndex,
-        0,
-        [...command.text].length,
-        JSON.stringify(characterStyle),
-      ),
-      'applyCharFormat',
-    );
-  const createdTarget = {
-    kind: 'paragraph',
-    sectionIndex: target.sectionIndex,
-    paragraphIndex,
-  };
-  return {
-    ...structuralResult(
-    command,
-    {
+    const characterFormatNative = applyCharFormat === null || text.length === 0
+      ? null
+      : parseNativeResult(
+        applyCharFormat(
+          target.sectionIndex,
+          paragraphIndex,
+          0,
+          [...text].length,
+          JSON.stringify(characterStyle),
+        ),
+        'applyCharFormat',
+      );
+    nativeParagraphs.push({
       paragraph: paragraphNative,
       ...(styleNative === null ? {} : {
         style: {
@@ -529,11 +532,29 @@ function applyAppendParagraph(doc, command, context) {
         },
       }),
       text: textNative,
+    });
+    createdTargets.push({
+      kind: 'paragraph',
+      sectionIndex: target.sectionIndex,
+      paragraphIndex,
+    });
+    nextParagraphIndex = paragraphIndex + 1;
+  }
+  const [firstNative] = nativeParagraphs;
+  const [firstTarget] = createdTargets;
+  return {
+    ...structuralResult(
+    command,
+    {
+      ...firstNative,
+      ...(nativeParagraphs.length === 1 ? {} : { paragraphs: nativeParagraphs }),
     },
-    { ...createdTarget, offset: textNative.charOffset },
-    [createdTarget],
+    { ...firstTarget, offset: firstNative.text.charOffset },
+    createdTargets,
     ),
-    expectedText: command.text,
+    ...(lines.length === 1
+      ? { expectedText: command.text }
+      : { expectedParagraphTexts: lines }),
     ...(styleSource === null ? {} : { expectedStyleId: styleSource.styleId }),
     ...(styleSource?.paragraphProperties?.paraShapeId === undefined
       ? {}

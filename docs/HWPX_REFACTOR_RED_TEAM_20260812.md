@@ -169,7 +169,7 @@ command categories.
    dimensions/cell fingerprints, object hashes, placed-picture identities, and
    fields. Quality can therefore detect required table/image loss and style
    drift instead of comparing page count alone.
-3. Template intent is caller-explicit through `templatePolicy`. Protected
+3. Exact preservation is caller-explicit through `preservationPolicy`. Protected
    locations reject writes before mutation; required/removable tables and
    required/replaceable images have distinct preservation semantics. No region
    is guessed protected from appearance, and failed edits do not commit policy.

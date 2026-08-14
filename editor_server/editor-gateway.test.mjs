@@ -2140,7 +2140,7 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       view: 'capabilities',
     });
     const capabilities = capabilitiesCall.result.structuredContent;
-    assert.equal(capabilities.contractVersion, '3.2.0');
+    assert.equal(capabilities.contractVersion, '3.3.0');
     assert.equal(capabilities.lifecycleTools.length, 9);
     assert.equal(capabilities.commandCatalog.commandCount, 48);
     assert.ok(capabilities.inspectViews.includes('fields'));
@@ -2244,14 +2244,13 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     });
     assert.equal(templateCall.result.isError, false, JSON.stringify(templateCall.result.structuredContent));
     assert.equal(templateCall.result.structuredContent.policy.protectedLocations.length, 0);
-    assert.match(templateCall.result.structuredContent.warning, /never silently protected or removed/i);
-    assert.equal(templateCall.result.structuredContent.suggestionPolicy, 'advisory-only; explicit templatePolicy remains authoritative');
-    assert.ok(Array.isArray(templateCall.result.structuredContent.suggestedRegions));
+    assert.equal(templateCall.result.structuredContent.policyRule, 'Only exact caller-selected locations, tables, and images are protected. No semantic role is inferred.');
+    assert.ok(templateCall.result.structuredContent.tables.every((item) => item.preservation === 'editable'));
 
     const protectedEditCall = await mcp('editor_hwpx_edit', {
       documentId: opened.documentId,
       baseRevision: opened.revision,
-      templatePolicy: { protectedLocations: [paragraph.location] },
+      preservationPolicy: { protectedLocations: [paragraph.location] },
       commands: [{
         commandId: 'reject-protected-edit',
         op: 'text.replaceParagraph',
@@ -2292,12 +2291,6 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     });
     assert.equal(targetCall.result.structuredContent.targets[0].currentText, 'Canonical HWPX MCP lifecycle verification');
 
-    const visualPolicy = {
-      allowedTextColors: ['#000000'],
-      failOnColoredText: false,
-      failOnImageFlow: false,
-      minVerticalOccupancy: 0.01,
-    };
     const expectations = {
       sourceFormat: 'hwpx',
       minPages: 1,
@@ -2315,7 +2308,6 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     const reviewCall = await mcp('editor_hwpx_review', {
       documentId: opened.documentId,
       baseRevision: revision,
-      visualPolicy,
       expectations,
       securityPolicy,
     });
@@ -2330,7 +2322,6 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       documentId: opened.documentId,
       baseRevision: revision,
       pages: [1, 999],
-      visualPolicy,
       expectations,
       securityPolicy,
     });
@@ -2341,7 +2332,6 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       documentId: opened.documentId,
       baseRevision: revision,
       includeSvg: true,
-      visualPolicy,
       expectations,
       securityPolicy,
     });
@@ -2349,33 +2339,20 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     assert.equal(Buffer.byteLength(reviewPageWithSvg.svg, 'utf8'), reviewPageWithSvg.svgByteLength);
     assert.equal(createHash('sha256').update(reviewPageWithSvg.svg).digest('hex'), reviewPageWithSvg.svgSha256);
 
-    const mismatchedPolicyExport = await mcp('editor_hwpx_export_pdf', {
-      documentId: opened.documentId,
-      baseRevision: revision,
-      filename: 'mismatched-policy.pdf',
-      visualPolicy: { ...visualPolicy, requireChapterPageBreak: true },
-      expectations,
-      securityPolicy,
-    });
-    assert.equal(mismatchedPolicyExport.result.isError, true);
-    assert.equal(mismatchedPolicyExport.result.structuredContent.code, 'quality_visual_policy_required');
-
     const mismatchedExpectationExport = await mcp('editor_hwpx_export_pdf', {
       documentId: opened.documentId,
       baseRevision: revision,
       filename: 'mismatched-expectation.pdf',
-      visualPolicy,
       expectations: { ...expectations, minPages: 2 },
       securityPolicy,
     });
     assert.equal(mismatchedExpectationExport.result.isError, true);
-    assert.equal(mismatchedExpectationExport.result.structuredContent.code, 'quality_agent_policy_required');
+    assert.equal(mismatchedExpectationExport.result.structuredContent.code, 'quality_verification_policy_required');
 
     const exportCall = await mcp('editor_hwpx_export_pdf', {
       documentId: opened.documentId,
       baseRevision: revision,
       filename: 'canonical-output.pdf',
-      visualPolicy: { ...visualPolicy, minVerticalOccupancy: 0.01 },
       expectations,
       securityPolicy,
     });
@@ -2388,7 +2365,6 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       baseRevision: revision,
       filename: 'canonical-output.hwpx',
       mode: 'verified',
-      visualPolicy,
       expectations,
       securityPolicy,
     });
@@ -2467,7 +2443,7 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     const failedPolicyCall = await mcp('editor_hwpx_edit', {
       documentId: fitOpened.documentId,
       baseRevision: fitOpened.revision,
-      templatePolicy: { requiredTableIds: ['must-not-persist'] },
+      preservationPolicy: { preserveTableIds: ['must-not-persist'] },
       commands: [{
         commandId: 'reject-lossy-fit',
         op: 'table.writeCell',
@@ -2483,7 +2459,7 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       documentId: fitOpened.documentId,
       view: 'template',
     });
-    assert.deepEqual(fitTemplateCall.result.structuredContent.policy.requiredTableIds, []);
+    assert.deepEqual(fitTemplateCall.result.structuredContent.policy.preserveTableIds, []);
     await mcp('editor_hwpx_discard', {
       documentId: fitOpened.documentId,
       baseRevision: fitOpened.revision,

@@ -31,7 +31,7 @@ superseded design notes are intentionally not published as documentation.
 
 - `editor_docx/scripts/docx-command-catalog.mjs`: 31 canonical DOCX commands, including stable reference controls.
 - `editor_hwpx/scripts/hwpx-command-catalog.mjs`: 48 canonical HWPX commands, including revision-bound field updates, dynamic headers/footers, note management, object grouping, and blank-cell image/signature insertion.
-- `docs/HWPX_MCP_API.md`: contract 3.2.0 lifecycle, inspection views, public-proposal/reference gates, immutable finalized preview, policy-bound finalization, and stable failure semantics.
+- `docs/HWPX_MCP_API.md`: contract 3.3.0 lifecycle, precise reading/editing views, objective rendered evidence, immutable finalized preview, and stable failure semantics.
 - `docs/HWPX_EDITOR.md`: current engine ownership, complete command inventory, safe workflow, and verification commands.
 - `editor_pdf/scripts/pdf-command-catalog.mjs`: 46 canonical PDF commands for
   PDFium browser tools and transactional advanced document operations.

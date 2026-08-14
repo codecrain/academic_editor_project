@@ -9,7 +9,6 @@ import {
   HWPX_MCP_SAVE_MODES,
   HWPX_MCP_TOOL_NAMES,
 } from './hwpx-mcp-contract.mjs';
-import { HWPX_REVIEW_PROFILES } from './hwpx-review-profile.mjs';
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(['2025-06-18', '2025-03-26']);
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
@@ -44,38 +43,6 @@ const HWPX_DOCUMENT_ID = { type: 'string', minLength: 1, description: 'Opaque se
 const HWPX_REVISION = { type: 'integer', minimum: 1, description: 'Exact current revision. Stale writes are rejected.' };
 const HWPX_READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const HWPX_STATE_CREATING = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
-const HWPX_VISUAL_POLICY = {
-  type: ['object', 'null'],
-  additionalProperties: false,
-  description: 'Optional explicit editorial visual policy. Defaults to black text and submission-time image/color enforcement.',
-  properties: {
-    allowedTextColors: {
-      type: 'array', maxItems: 16, uniqueItems: true,
-      items: { type: 'string', pattern: '^#?[0-9a-fA-F]{6}$' },
-    },
-    failOnColoredText: { type: 'boolean' },
-    failOnImageFlow: { type: 'boolean' },
-    failOnSparsePages: { type: 'boolean' },
-    minVerticalOccupancy: { type: 'number', minimum: 0, maximum: 1 },
-    requireChapterPageBreak: { type: 'boolean' },
-    requireHeadingKeepWithNext: { type: 'boolean' },
-    headingPattern: { type: 'string', minLength: 1, maxLength: 256 },
-    expectedBodyFont: { type: 'string', minLength: 1, maxLength: 128 },
-    expectedBodyFontSizePt: { type: 'number', minimum: 0.1, maximum: 1000 },
-    failOnStyleVariance: { type: 'boolean' },
-    failOnSmallText: { type: 'boolean' },
-    minFontSizePt: { type: 'number', minimum: 0.1, maximum: 1000 },
-    minRelativeVerticalOccupancy: { type: 'number', minimum: 0, maximum: 1 },
-    allowedSparsePages: {
-      type: 'array', maxItems: 120, uniqueItems: true,
-      items: { type: 'integer', minimum: 1 },
-    },
-    requireCenteredImages: { type: 'boolean' },
-    maxImageCenterOffsetRatio: { type: 'number', minimum: 0, maximum: 1 },
-    minCenteredImageWidthRatio: { type: 'number', minimum: 0, maximum: 1 },
-    minDominantBodyFontRatio: { type: 'number', minimum: 0, maximum: 1 },
-  },
-};
 const HWPX_EXPECTATIONS = {
   type: ['object', 'null'],
   additionalProperties: false,
@@ -103,23 +70,6 @@ const HWPX_EXPECTATIONS = {
         },
       },
     },
-  },
-};
-const HWPX_REFERENCE_COMPARISON = {
-  type: ['object', 'null'],
-  additionalProperties: false,
-  required: ['referenceTemplateDocumentId', 'referenceFinalDocumentId', 'targetTemplateDocumentId'],
-  description: 'Optional four-document transformation comparison. The current document is the candidate; the three referenced sessions must remain open through verified save.',
-  properties: {
-    referenceTemplateDocumentId: HWPX_DOCUMENT_ID,
-    referenceFinalDocumentId: HWPX_DOCUMENT_ID,
-    targetTemplateDocumentId: HWPX_DOCUMENT_ID,
-    minPageGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
-    minTextGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
-    minParagraphGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
-    minTableGrowthFactor: { type: 'number', minimum: 0, maximum: 10 },
-    minPictureCountFactor: { type: 'number', minimum: 0, maximum: 10 },
-    maxMedianOccupancyGap: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
 const HWPX_SECURITY_POLICY = {
@@ -166,8 +116,6 @@ const HWPX_MCP_TOOLS = Object.freeze([
       tableId: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
       page: { type: ['integer', 'null'], minimum: 1 },
       includeSvg: { type: 'boolean', default: false },
-      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' },
-      visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
       category: { type: ['string', 'null'], enum: [...hwpxAdapter.commandCategories, null] },
@@ -215,21 +163,14 @@ const HWPX_MCP_TOOLS = Object.freeze([
           },
         },
       },
-      templatePolicy: {
+      preservationPolicy: {
         type: ['object', 'null'],
         additionalProperties: false,
+        description: 'Optional exact caller-selected preservation guard. Unlisted content remains editable and no semantic role is inferred.',
         properties: {
           protectedLocations: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
-          requiredTableIds: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-          removableTableIds: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-          requiredImageNames: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-          replaceableImageNames: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-          requiredLocations: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
-          instructionLocations: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
-          freeformLocations: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
-          allowedUnresolvedLocations: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
-          repeatableTableIds: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
-          conditionalTableIds: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
+          preserveTableIds: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
+          preserveImageNames: { type: 'array', maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1 } },
         },
       },
     }, ['documentId', 'baseRevision', 'commands']),
@@ -237,41 +178,35 @@ const HWPX_MCP_TOOLS = Object.freeze([
   },
   {
     name: HWPX_MCP_TOOL_NAMES.review,
-    description: 'Run current-revision structural, rendered clipping with exact target provenance, pagination, semantic, and visual review. Use profile=submission for submission-readiness gates; omit pages for all pages.',
+    description: 'Run current-revision structural and full rendered-layout verification. Returns objective page, font, color, image, occupancy, and clipping evidence without judging document meaning or submission readiness.',
     inputSchema: objectSchema({
       documentId: HWPX_DOCUMENT_ID,
       baseRevision: HWPX_REVISION,
       pages: { type: ['array', 'null'], minItems: 1, maxItems: 120, uniqueItems: true, items: { type: 'integer', minimum: 1 } },
       includeBaseline: { type: 'boolean', default: false },
       includeSvg: { type: 'boolean', default: false, description: 'Inline SVG is opt-in; the default returns bounded render metrics and SVG hashes.' },
-      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural', description: 'submission adds semantic readiness gates; public-proposal additionally enforces proposal typography, pagination, images, instructions, unavailable data, and real execution objects.' },
-      visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
-      referenceComparison: HWPX_REFERENCE_COMPARISON,
     }, ['documentId', 'baseRevision']),
     annotations: HWPX_READ_ONLY,
   },
   {
     name: HWPX_MCP_TOOL_NAMES.save,
-    description: 'Save the exact current revision. verified mode requires a clean current-revision review with the same profile and performs hash, reopen, quality, and full-render verification; checkpoint mode is recovery-only.',
+    description: 'Save the exact current revision. verified mode requires a clean current-revision structural review with the same deterministic expectations/security policy and performs hash, reopen, quality, and full-render verification; checkpoint mode is recovery-only.',
     inputSchema: objectSchema({
       documentId: HWPX_DOCUMENT_ID,
       baseRevision: HWPX_REVISION,
       filename: { type: 'string', minLength: 1, maxLength: 255 },
       mode: { type: 'string', enum: [...HWPX_MCP_SAVE_MODES], default: 'verified' },
-      profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' },
-      visualPolicy: HWPX_VISUAL_POLICY,
       expectations: HWPX_EXPECTATIONS,
       securityPolicy: HWPX_SECURITY_POLICY,
-      referenceComparison: HWPX_REFERENCE_COMPARISON,
     }, ['documentId', 'baseRevision', 'filename']),
     annotations: HWPX_STATE_CREATING,
   },
   {
     name: HWPX_MCP_TOOL_NAMES.exportPdf,
     description: 'Export the current cleanly reviewed HWP/HWPX revision to a verified PDF artifact without closing the edit session.',
-    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, profile: { type: 'string', enum: [...HWPX_REVIEW_PROFILES], default: 'structural' }, visualPolicy: HWPX_VISUAL_POLICY, expectations: HWPX_EXPECTATIONS, securityPolicy: HWPX_SECURITY_POLICY, referenceComparison: HWPX_REFERENCE_COMPARISON }, ['documentId', 'baseRevision']),
+    inputSchema: objectSchema({ documentId: HWPX_DOCUMENT_ID, baseRevision: HWPX_REVISION, filename: { type: ['string', 'null'], minLength: 1 }, expectations: HWPX_EXPECTATIONS, securityPolicy: HWPX_SECURITY_POLICY }, ['documentId', 'baseRevision']),
     annotations: HWPX_STATE_CREATING,
   },
   {

@@ -90,15 +90,13 @@ name is shared; query the format's command schema first.
    required by the command catalog.
 4. Apply one revision-bound atomic batch with `edit` and `baseRevision`.
 5. Inspect `history` to verify the revision and semantic digest transition,
-   then run `review` for the new revision with full-page coverage. Use
-   `profile="public-proposal"` for completed public applications and proposals;
-   it also rejects unavailable-data wording, text-only execution fields, small
-   text, sparse pages, chapter-flow failures, off-center content images, and
-   weak body-style convergence. Use `profile="submission"` for less opinionated
-   form completeness checks.
+   then run `review` for the new revision with full-page coverage. Review returns
+   structural failures and objective page, font, color, image, occupancy, flow,
+   and clipping evidence. The caller decides semantic completeness, reference
+   similarity, editorial quality, and submission readiness.
 6. Inspect every affected rendered page and its neighbors.
-7. Save in verified mode with the exact same review inputs (use
-   `profile="public-proposal"` for completed proposals), or recovery-only
+7. Save in verified mode with the exact same deterministic `expectations` and
+   `securityPolicy`, or recovery-only
    checkpoint mode; read the opaque artifact, verify hashes and reopen it, then
    delete the artifact. After verified save the mutable session is closed, but
    the returned `browserPresentation.url` (`readonly=1&finalized=1`) serves an
@@ -108,8 +106,7 @@ name is shared; query the format's command schema first.
 
 A stale cursor or revision is rejected. Failed command batches do not advance
 the revision. Save and PDF export require a clean quality check for that exact
-revision and must repeat the profile, visual policy, semantic expectations, and
-security policy accepted by review.
+revision and must repeat the expectations and security policy accepted by review.
 
 ## Important limits
 
@@ -123,9 +120,10 @@ security policy accepted by review.
   closed when that runtime is unavailable.
 - The editor accepts both binary HWP and HWPX document input. It preserves the
   source format; package-only commands are marked unavailable for HWP.
-- `template` inspection returns advisory region suggestions, while explicit
-  `templatePolicy` remains authoritative. `page` inspection scans the complete
-  target stream before returning bounded page targets and occupancy metrics.
+- `template` inspection reports exact tables, images, and explicit
+  `preservationPolicy` state without inferring semantic roles. `page` inspection
+  scans the complete target stream before returning bounded page targets and
+  occupancy metrics.
 - Newly inserted paragraph images must persist `treatAsChar=true` when re-read;
   native HWP may retain dormant floating-layout fields while inline mode is active.
   Floating placement requires a subsequent explicit `object.format`.

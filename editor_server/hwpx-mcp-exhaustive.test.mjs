@@ -509,41 +509,6 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       await discard(assetSource);
     }
 
-    const referenceTemplate = await open('blank', 'reference-template.hwpx');
-    const referenceFinal = await open('briefing', 'reference-final.hwpx');
-    const targetTemplate = await open('blank', 'target-template.hwpx');
-    const candidate = await open('blank', 'candidate.hwpx');
-    try {
-      await expectError('editor_hwpx_review', {
-        documentId: candidate.documentId,
-        baseRevision: candidate.revision,
-        referenceComparison: {
-          referenceTemplateDocumentId: referenceTemplate.documentId,
-          referenceFinalDocumentId: referenceTemplate.documentId,
-          targetTemplateDocumentId: targetTemplate.documentId,
-        },
-      }, 'reference_comparison_document_invalid');
-      const comparison = await call('editor_hwpx_review', {
-        documentId: candidate.documentId,
-        baseRevision: candidate.revision,
-        referenceComparison: {
-          referenceTemplateDocumentId: referenceTemplate.documentId,
-          referenceFinalDocumentId: referenceFinal.documentId,
-          targetTemplateDocumentId: targetTemplate.documentId,
-        },
-      });
-      assert.equal(comparison.ok, false);
-      assert.equal(comparison.quality.referenceComparison.ok, false);
-      assert.ok(comparison.quality.referenceComparison.failed.length > 0);
-      assert.equal(comparison.quality.referenceComparison.metrics.referenceFinal.pageCount, 11);
-      assert.equal(comparison.quality.referenceComparison.metrics.candidate.pageCount, 1);
-    } finally {
-      await discard(candidate);
-      await discard(targetTemplate);
-      await discard(referenceFinal);
-      await discard(referenceTemplate);
-    }
-
     const styleSource = await open('briefing', 'style-source.hwpx');
     const styleTarget = await open('blank', 'style-target.hwpx');
     try {
@@ -688,7 +653,7 @@ test('actual MCP exhaustively executes every HWPX tool, inspect view, and comman
       await expectError('editor_hwpx_edit', {
         documentId: state.documentId,
         baseRevision: state.revision,
-        templatePolicy: { protectedLocations: [paragraph.location] },
+        preservationPolicy: { protectedLocations: [paragraph.location] },
         commands: [{ commandId: 'protected-region', op: 'text.replaceParagraph', location: paragraph.location, text: '거절' }],
       }, 'template_protected_region');
       await expectError('editor_hwpx_edit', {

@@ -1531,7 +1531,7 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
     };
   });
   return {
-    version: '3.2.0',
+    version: '3.3.0',
     sourceFormat: normalizedSourceFormat,
     categories: HWPX_COMMAND_CATEGORIES,
     commandCount: sourceAwareCommands.length,

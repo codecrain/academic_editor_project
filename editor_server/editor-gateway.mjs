@@ -20,10 +20,7 @@ import {
 } from './docx-activity.mjs';
 import { EditorSessionWorkerPool, defaultWorkerCount } from './editor-session-runtime.mjs';
 import { analyzeSvgCellClipping, analyzeSvgPageMetrics, svgHasVisibleContent } from './svg-render-evidence.mjs';
-import { analyzeHwpxSemanticEvidence, suggestHwpxTemplateRegions } from './hwpx-semantic-evidence.mjs';
 import { analyzeHwpxVisualEvidence } from './hwpx-visual-evidence.mjs';
-import { analyzeHwpxReferenceTransformation } from './hwpx-reference-comparison.mjs';
-import { normalizeHwpxReviewProfile } from './hwpx-review-profile.mjs';
 import {
   docxAdapter,
   formatAdapters,
@@ -1181,12 +1178,9 @@ function recordPreconditions(record) {
     inventoryRevision: null,
     fieldRevision: null,
     qualityRevision: null,
-    qualityProfile: null,
-    qualityVisualPolicy: null,
-    qualityAgentPolicy: null,
+    qualityVerificationPolicy: null,
   };
-  record.preconditions.qualityVisualPolicy ??= null;
-  record.preconditions.qualityAgentPolicy ??= null;
+  record.preconditions.qualityVerificationPolicy ??= null;
   return record.preconditions;
 }
 
@@ -1203,15 +1197,10 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function visualPolicyKey(policy) {
-  return stableJson(policy ?? null);
-}
-
-function agentReviewPolicyKey(body = {}) {
+function verificationPolicyKey(body = {}) {
   return stableJson({
     expectations: body.expectations ?? null,
     securityPolicy: body.securityPolicy ?? null,
-    referenceComparison: body.referenceComparison ?? null,
   });
 }
 
@@ -1222,9 +1211,7 @@ function clearRecordPreconditions(record) {
   preconditions.inventoryRevision = null;
   preconditions.fieldRevision = null;
   preconditions.qualityRevision = null;
-  preconditions.qualityProfile = null;
-  preconditions.qualityVisualPolicy = null;
-  preconditions.qualityAgentPolicy = null;
+  preconditions.qualityVerificationPolicy = null;
 }
 
 function requireBaseRevision(record, body) {
@@ -1304,31 +1291,10 @@ function assertMutationPreconditions(record, action, body, commands = []) {
     );
   }
   if ((action === 'save-source' || action === 'export-pdf') && record.fmt === 'hwpx') {
-    const requiredProfile = normalizeHwpxReviewProfile(body?.profile);
-    if (preconditions.qualityProfile !== requiredProfile) {
+    const requestedPolicy = verificationPolicyKey(body);
+    if (preconditions.qualityVerificationPolicy !== requestedPolicy) {
       throw new EditorContractError(
-        'quality_profile_required',
-        `run a clean ${requiredProfile} review at the current revision before finalizing the document.`,
-        409,
-        { requiredProfile, reviewedProfile: preconditions.qualityProfile },
-      );
-    }
-    const requestedVisualPolicy = visualPolicyKey(body?.visualPolicy);
-    if (preconditions.qualityVisualPolicy !== requestedVisualPolicy) {
-      throw new EditorContractError(
-        'quality_visual_policy_required',
-        'finalization must use the exact visualPolicy that passed the current-revision review.',
-        409,
-        {
-          reviewedVisualPolicy: preconditions.qualityVisualPolicy,
-          requestedVisualPolicy,
-        },
-      );
-    }
-    const requestedAgentPolicy = agentReviewPolicyKey(body);
-    if (preconditions.qualityAgentPolicy !== requestedAgentPolicy) {
-      throw new EditorContractError(
-        'quality_agent_policy_required',
+        'quality_verification_policy_required',
         'repeat the exact expectations and securityPolicy that passed the current-revision review.',
         409,
       );
@@ -2001,94 +1967,13 @@ function integrateHwpxReviewEvidence(quality, json, options = {}) {
   for (const failed of expectations.failed) {
     issues.push({ severity: 'error', code: 'document-expectation-failed', message: `Document expectation failed: ${failed.name}.`, expectation: failed });
   }
-  const referenceComparison = options.referenceComparisonEvidence ?? null;
-  if (referenceComparison) issues.push(...referenceComparison.issues);
   return {
     ...quality,
     ok: quality.ok === true && issues.every(issue => issue.severity !== 'error'),
     issues,
     security,
     expectations,
-    referenceComparison,
     semanticDigest: hwpxSemanticDigest(json),
-  };
-}
-
-async function resolveHwpxReferenceComparison(state, candidateDocumentId, request, candidateJson, candidateRenderedLayout) {
-  if (!request) return null;
-  const ids = {
-    referenceTemplate: String(request.referenceTemplateDocumentId || ''),
-    referenceFinal: String(request.referenceFinalDocumentId || ''),
-    targetTemplate: String(request.targetTemplateDocumentId || ''),
-  };
-  if (Object.values(ids).some((id) => !id || id === candidateDocumentId)) {
-    throw new EditorContractError(
-      'reference_comparison_document_invalid',
-      'referenceComparison requires three distinct, open reference sessions different from the candidate.',
-      422,
-    );
-  }
-  const uniqueIds = new Set(Object.values(ids));
-  if (uniqueIds.size !== 3) {
-    throw new EditorContractError('reference_comparison_document_invalid', 'Reference comparison document IDs must be distinct.', 422);
-  }
-  const records = Object.fromEntries(Object.entries(ids).map(([role, id]) => [role, findApiRecord(state, 'hwpx', id)]));
-  const missing = Object.entries(records).filter(([, record]) => !record).map(([role]) => role);
-  if (missing.length) {
-    throw new EditorContractError(
-      'reference_comparison_session_missing',
-      `Reference comparison sessions are unavailable: ${missing.join(', ')}.`,
-      404,
-      { missing },
-    );
-  }
-  const [referenceTemplate, referenceFinal, targetTemplate] = await Promise.all([
-    readHwpxSemanticSnapshot(records.referenceTemplate.session),
-    readHwpxSemanticSnapshot(records.referenceFinal.session),
-    readHwpxSemanticSnapshot(records.targetTemplate.session),
-  ]);
-  state.hwpxReferenceRenderCache ??= new Map();
-  const referenceCacheKey = `${ids.referenceFinal}:${records.referenceFinal.session.revision}`;
-  let referenceFinalRenderedLayout = state.hwpxReferenceRenderCache.get(referenceCacheKey);
-  if (!referenceFinalRenderedLayout) {
-    const referenceFinalPageCount = Math.max(
-      1,
-      Number(referenceFinal.pageCount || await pageCountFromSession(records.referenceFinal.session) || 1),
-    );
-    const referenceFinalRenderedPages = await renderHwpxSvgPages(
-      records.referenceFinal.session,
-      Array.from({ length: referenceFinalPageCount }, (_value, index) => index + 1),
-    );
-    referenceFinalRenderedLayout = {
-      pageCount: referenceFinalPageCount,
-      renderedPageCount: referenceFinalRenderedPages.length,
-      pages: referenceFinalRenderedPages.map((page) => ({
-        page: page.page,
-        ...page.layout?.pageMetrics,
-      })),
-    };
-    state.hwpxReferenceRenderCache.set(referenceCacheKey, referenceFinalRenderedLayout);
-    while (state.hwpxReferenceRenderCache.size > 16) {
-      state.hwpxReferenceRenderCache.delete(state.hwpxReferenceRenderCache.keys().next().value);
-    }
-  }
-  const {
-    referenceTemplateDocumentId: _referenceTemplateDocumentId,
-    referenceFinalDocumentId: _referenceFinalDocumentId,
-    targetTemplateDocumentId: _targetTemplateDocumentId,
-    ...policy
-  } = request;
-  return {
-    documentIds: ids,
-    ...analyzeHwpxReferenceTransformation({
-      referenceTemplate,
-      referenceFinal,
-      targetTemplate,
-      candidate: candidateJson,
-      referenceFinalRenderedLayout,
-      candidateRenderedLayout,
-      policy,
-    }),
   };
 }
 
@@ -2381,84 +2266,37 @@ function normalizeCommands(body = {}) {
   return body.commands || body.ops || body.commandBatch || [];
 }
 
-function normalizeTemplatePolicy(policy = {}) {
+function normalizePreservationPolicy(policy = {}) {
   const uniqueStrings = (value) => [...new Set((Array.isArray(value) ? value : [])
     .map((item) => String(item || '').trim()).filter(Boolean))];
-  const normalized = {
+  return {
     protectedLocations: Array.isArray(policy.protectedLocations) ? policy.protectedLocations : [],
-    requiredTableIds: uniqueStrings(policy.requiredTableIds),
-    removableTableIds: uniqueStrings(policy.removableTableIds),
-    requiredImageNames: uniqueStrings(policy.requiredImageNames),
-    replaceableImageNames: uniqueStrings(policy.replaceableImageNames),
-    requiredLocations: Array.isArray(policy.requiredLocations) ? policy.requiredLocations : [],
-    instructionLocations: Array.isArray(policy.instructionLocations) ? policy.instructionLocations : [],
-    freeformLocations: Array.isArray(policy.freeformLocations) ? policy.freeformLocations : [],
-    allowedUnresolvedLocations: Array.isArray(policy.allowedUnresolvedLocations) ? policy.allowedUnresolvedLocations : [],
-    repeatableTableIds: uniqueStrings(policy.repeatableTableIds),
-    conditionalTableIds: uniqueStrings(policy.conditionalTableIds),
+    preserveTableIds: uniqueStrings(policy.preserveTableIds),
+    preserveImageNames: uniqueStrings(policy.preserveImageNames),
   };
-  const overlappingTables = normalized.requiredTableIds
-    .filter(value => normalized.removableTableIds.includes(value));
-  const overlappingImages = normalized.requiredImageNames
-    .filter(value => normalized.replaceableImageNames.includes(value));
-  const tableRoles = [
-    ['required', normalized.requiredTableIds],
-    ['removable', normalized.removableTableIds],
-    ['repeatable', normalized.repeatableTableIds],
-    ['conditional', normalized.conditionalTableIds],
-  ];
-  const conflictingTableRoles = [];
-  for (let left = 0; left < tableRoles.length; left += 1) {
-    for (let right = left + 1; right < tableRoles.length; right += 1) {
-      const overlap = tableRoles[left][1].filter(value => tableRoles[right][1].includes(value));
-      if (overlap.length) conflictingTableRoles.push({ roles: [tableRoles[left][0], tableRoles[right][0]], tableIds: overlap });
-    }
-  }
-  const locationRoles = [
-    ['protected', normalized.protectedLocations],
-    ['required', normalized.requiredLocations],
-    ['instruction', normalized.instructionLocations],
-    ['freeform', normalized.freeformLocations],
-  ].map(([role, locations]) => [role, locations.map(location => hwpxAdapter.stableTargetKey(location)).filter(Boolean)]);
-  const conflictingLocationRoles = [];
-  for (let left = 0; left < locationRoles.length; left += 1) {
-    for (let right = left + 1; right < locationRoles.length; right += 1) {
-      const overlap = locationRoles[left][1].filter(value => locationRoles[right][1].includes(value));
-      if (overlap.length) conflictingLocationRoles.push({ roles: [locationRoles[left][0], locationRoles[right][0]], locationKeys: overlap });
-    }
-  }
-  if (overlappingTables.length || overlappingImages.length || conflictingTableRoles.length || conflictingLocationRoles.length) {
-    throw new EditorContractError(
-      'template_policy_conflict',
-      'Template items cannot be both required and removable or replaceable.',
-      422,
-      { overlappingTables, overlappingImages, conflictingTableRoles, conflictingLocationRoles },
-    );
-  }
-  return normalized;
 }
 
-function enforceTemplatePolicy(record, commands) {
-  const policy = normalizeTemplatePolicy(record.templatePolicy);
-  const requiredTables = new Set(policy.requiredTableIds);
-  const requiredImages = new Set(policy.requiredImageNames);
+function enforcePreservationPolicy(record, commands) {
+  const policy = normalizePreservationPolicy(record.preservationPolicy);
+  const preservedTables = new Set(policy.preserveTableIds);
+  const preservedImages = new Set(policy.preserveImageNames);
   for (const [commandIndex, command] of commands.entries()) {
     const op = String(command?.op ?? '');
     const location = command?.target ?? command?.location;
     if (op === 'table.structure' && command.action === 'deleteTable'
-      && requiredTables.has(String(location?.tableId ?? ''))) {
+      && preservedTables.has(String(location?.tableId ?? ''))) {
       throw new EditorContractError(
-        'template_required_table',
-        'A table marked required by the active template policy cannot be deleted.',
+        'preserved_table_mutation_blocked',
+        'A table explicitly selected for preservation cannot be deleted.',
         422,
         { commandIndex, tableId: location.tableId },
       );
     }
     if (['image.replace', 'image.generateAndReplace'].includes(op)
-      && requiredImages.has(String(command.imageName ?? ''))) {
+      && preservedImages.has(String(command.imageName ?? ''))) {
       throw new EditorContractError(
-        'template_required_image',
-        'An image marked required by the active template policy cannot be replaced.',
+        'preserved_image_mutation_blocked',
+        'An image explicitly selected for preservation cannot be replaced.',
         422,
         { commandIndex, imageName: command.imageName },
       );
@@ -2472,7 +2310,7 @@ function enforceTemplatePolicy(record, commands) {
   if (attempted.length) {
     throw new EditorContractError(
       'template_protected_region',
-      'The command batch targets a location explicitly protected by the active template policy.',
+      'The command batch targets a location explicitly protected by the active preservation policy.',
       422,
       { attempted: attempted.map((entry) => ({ commandIndex: entry.commandIndex, role: entry.role, key: entry.key })) },
     );
@@ -2665,10 +2503,6 @@ function resolveRenderedCellTarget(json, provenance) {
 async function qualityWithRenderedLayout(session, options = {}) {
   const quality = await session.qualityCheck(options);
   const json = await session.readJson();
-  const semantic = analyzeHwpxSemanticEvidence(json, {
-    profile: options.profile,
-    templatePolicy: options.templatePolicy,
-  });
   const estimateCodes = new Set([
     'cell-overflow-risk',
     'cell-line-overflow-risk',
@@ -2696,64 +2530,15 @@ async function qualityWithRenderedLayout(session, options = {}) {
       message: 'A rendered page contains no visible document content; review it because intentional blank pages are permitted.',
       page: page.page,
     }));
-  const readabilityIssues = rendered.flatMap((page) => {
-    const metrics = page.layout?.pageMetrics || {};
-    const pageIssues = [];
-    if (Number.isFinite(metrics.minFontSize) && metrics.minFontSize < 6) {
-      pageIssues.push({
-        severity: 'warning',
-        code: 'render-font-size-suspiciously-small',
-        message: 'Rendered text contains a font size below the readability threshold.',
-        page: page.page,
-        minFontSize: metrics.minFontSize,
-      });
-    }
-    if (Number(metrics.lineCount || 0) > 100) {
-      pageIssues.push({
-        severity: 'warning',
-        code: 'render-page-density-high',
-        message: 'Rendered page contains an unusually high number of text baselines.',
-        page: page.page,
-        lineCount: metrics.lineCount,
-      });
-    }
-    if (metrics.sparseContent === true) {
-      pageIssues.push({
-        severity: 'warning',
-        code: 'render-page-sparse-content',
-        message: 'A rendered page contains very little text and no image; inspect pagination and conditional template remnants.',
-        page: page.page,
-        textCount: metrics.textCount,
-        textCharacters: metrics.textCharacters,
-        verticalOccupancy: metrics.verticalOccupancy,
-      });
-    } else if (Number.isFinite(metrics.verticalOccupancy) && metrics.verticalOccupancy < 0.12
-      && Number(metrics.textCharacters || 0) < 180) {
-      pageIssues.push({
-        severity: 'warning',
-        code: 'render-page-low-occupancy',
-        message: 'Visible content occupies an unusually small vertical span on this page.',
-        page: page.page,
-        textCharacters: metrics.textCharacters,
-        verticalOccupancy: metrics.verticalOccupancy,
-      });
-    }
-    return pageIssues;
-  });
   const visual = analyzeHwpxVisualEvidence({
     json,
     targetMap,
     renderedPages: rendered,
-    profile: options.profile,
-    visualPolicy: options.visualPolicy,
   });
   const issues = [
     ...structuralIssues,
     ...layoutIssues,
     ...blankPageIssues,
-    ...readabilityIssues,
-    ...semantic.issues,
-    ...visual.issues,
   ];
   const result = {
     ...quality,
@@ -2773,12 +2558,9 @@ async function qualityWithRenderedLayout(session, options = {}) {
       renderedPageCount: rendered.length,
       clippedCellCount: layoutIssues.length,
       blankPageCount: blankPageIssues.length,
-      suspiciousReadabilityCount: readabilityIssues.length,
       pages: rendered.map((page) => ({ page: page.page, ...page.layout?.pageMetrics })),
     },
-    semantic,
     visual,
-    reviewProfile: semantic.profile,
   };
   if (options.includeRenderedPages === true) result._renderedPages = rendered;
   return result;
@@ -2942,7 +2724,7 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     sourceBytes: Buffer.from(bytes),
     sourceFormat: String(json.sourceFormat || fmt),
     baselineJson: json,
-    templatePolicy: normalizeTemplatePolicy(),
+    preservationPolicy: normalizePreservationPolicy(),
     deletedBaselineTableIds: new Set(),
     reviewChanges: [],
     baselineDigest: hwpxSemanticDigest(baselineSemanticJson),
@@ -3206,14 +2988,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     }
     if (view === 'template') {
       const json = await session.readJson();
-      const policy = normalizeTemplatePolicy(record.templatePolicy);
-      const requiredTables = new Set(policy.requiredTableIds);
-      const removableTables = new Set(policy.removableTableIds);
-      const requiredImages = new Set(policy.requiredImageNames);
-      const replaceableImages = new Set(policy.replaceableImageNames);
-      const repeatableTables = new Set(policy.repeatableTableIds);
-      const conditionalTables = new Set(policy.conditionalTableIds);
-      const suggestedRegions = suggestHwpxTemplateRegions(json, policy);
+      const policy = normalizePreservationPolicy(record.preservationPolicy);
+      const preservedTables = new Set(policy.preserveTableIds);
+      const preservedImages = new Set(policy.preserveImageNames);
       sendJson(res, 200, {
         revision: session.revision,
         policy,
@@ -3225,24 +3002,16 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
           id: table.id,
           dims: table.dims,
           location: table.location ?? table.native,
-          classification: requiredTables.has(table.id) ? 'required'
-            : removableTables.has(table.id) ? 'removable'
-              : repeatableTables.has(table.id) ? 'repeatable'
-                : conditionalTables.has(table.id) ? 'conditional'
-              : 'unclassified',
+          preservation: preservedTables.has(table.id) ? 'preserved' : 'editable',
         })),
         images: (json.objectGraph?.images || []).map((image) => ({
           name: image.name,
           mimeType: image.mimeType,
           byteLength: image.byteLength,
           sha256: image.sha256,
-          classification: requiredImages.has(image.name) ? 'required'
-            : replaceableImages.has(image.name) ? 'replaceable'
-              : 'unclassified',
+          preservation: preservedImages.has(image.name) ? 'preserved' : 'editable',
         })),
-        suggestedRegions,
-        suggestionPolicy: 'advisory-only; explicit templatePolicy remains authoritative',
-        warning: 'Unclassified regions are never silently protected or removed. Review suggestedRegions and submit an explicit templatePolicy.',
+        policyRule: 'Only exact caller-selected locations, tables, and images are protected. No semantic role is inferred.',
       });
       return true;
     }
@@ -3290,10 +3059,8 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     if (view === 'quality') {
       const rawQuality = await qualityWithRenderedLayout(session, {
         baselineJson: record.baselineJson,
-        templatePolicy: record.templatePolicy,
+        preservationPolicy: record.preservationPolicy,
         deletedTableIds: [...record.deletedBaselineTableIds],
-        profile: body.profile,
-        visualPolicy: body.visualPolicy,
       });
       const quality = integrateHwpxReviewEvidence(rawQuality, await readHwpxSemanticSnapshot(session), body);
       emitHwpxLifecycleTrace('inspect.completed', { documentId: id, revision: session.revision, view, ok: quality.ok, issueCount: quality.issues?.length || 0 });
@@ -3316,33 +3083,17 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     });
     const qualityResult = await qualityWithRenderedLayout(session, {
       baselineJson: record.baselineJson,
-      templatePolicy: record.templatePolicy,
+      preservationPolicy: record.preservationPolicy,
       deletedTableIds: [...record.deletedBaselineTableIds],
       includeRenderedPages: true,
-      profile: body.profile,
-      visualPolicy: body.visualPolicy,
     });
     const { _renderedPages: allRenderedPages = [], ...rawQuality } = qualityResult;
     const semanticSnapshot = await readHwpxSemanticSnapshot(session);
-    const referenceComparisonEvidence = await resolveHwpxReferenceComparison(
-      state,
-      id,
-      body.referenceComparison,
-      semanticSnapshot,
-      rawQuality.renderedLayout,
-    );
-    const quality = integrateHwpxReviewEvidence(rawQuality, semanticSnapshot, {
-      ...body,
-      referenceComparisonEvidence,
-    });
+    const quality = integrateHwpxReviewEvidence(rawQuality, semanticSnapshot, body);
     const reviewPassed = qualityAllowsFinalization(quality, 'hwpx');
     recordPreconditions(record).qualityRevision = reviewPassed ? baseRevision : null;
-    recordPreconditions(record).qualityProfile = reviewPassed ? quality.reviewProfile : null;
-    recordPreconditions(record).qualityVisualPolicy = reviewPassed
-      ? visualPolicyKey(body.visualPolicy)
-      : null;
-    recordPreconditions(record).qualityAgentPolicy = reviewPassed
-      ? agentReviewPolicyKey(body)
+    recordPreconditions(record).qualityVerificationPolicy = reviewPassed
+      ? verificationPolicyKey(body)
       : null;
     const pageCount = Math.max(1, Number(quality.pageCount || 1));
     const requestedPages = Array.isArray(body.pages) && body.pages.length
@@ -3367,7 +3118,6 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       documentId: id,
       revision: baseRevision,
       ok: reviewPassed,
-      profile: quality.reviewProfile,
       pageCount,
       reviewedPageCount: pages.length,
       errorCount: quality.issues?.filter((issue) => issue.severity === 'error').length || 0,
@@ -3494,13 +3244,13 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     }
     assertMutationPreconditions(record, 'apply', body, commands);
     const previousRevision = session.revision;
-    const previousTemplatePolicy = normalizeTemplatePolicy(record.templatePolicy);
-    let proposedTemplatePolicy = previousTemplatePolicy;
+    const previousPreservationPolicy = normalizePreservationPolicy(record.preservationPolicy);
+    let proposedPreservationPolicy = previousPreservationPolicy;
     if (fmt === 'hwpx') {
-      proposedTemplatePolicy = body.templatePolicy !== undefined
-        ? normalizeTemplatePolicy(body.templatePolicy)
-        : previousTemplatePolicy;
-      enforceTemplatePolicy({ ...record, templatePolicy: proposedTemplatePolicy }, commands);
+      proposedPreservationPolicy = body.preservationPolicy !== undefined
+        ? normalizePreservationPolicy(body.preservationPolicy)
+        : previousPreservationPolicy;
+      enforcePreservationPolicy({ ...record, preservationPolicy: proposedPreservationPolicy }, commands);
     }
     if (fmt === 'hwpx') emitHwpxLifecycleTrace('edit.started', {
       documentId: id,
@@ -3537,7 +3287,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       }
       throw error;
     }
-    if (fmt === 'hwpx') record.templatePolicy = proposedTemplatePolicy;
+    if (fmt === 'hwpx') record.preservationPolicy = proposedPreservationPolicy;
     if (fmt === 'hwpx') {
       const afterJournalJson = await readHwpxSemanticSnapshot(session);
       const digestBefore = hwpxSemanticDigest(beforeJournalJson);
@@ -3576,7 +3326,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     }
     if (session.revision !== previousRevision) {
       clearRecordPreconditions(record);
-    } else if (JSON.stringify(previousTemplatePolicy) !== JSON.stringify(proposedTemplatePolicy)) {
+    } else if (JSON.stringify(previousPreservationPolicy) !== JSON.stringify(proposedPreservationPolicy)) {
       recordPreconditions(record).qualityRevision = null;
     }
     if (fmt === 'hwpx') emitHwpxLifecycleTrace('edit.completed', {
@@ -3599,23 +3349,11 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       const verifier = await hwpxAdapter.createSession(saved.bytes);
       const rawVerification = await qualityWithRenderedLayout(verifier, {
         baselineJson: record.baselineJson,
-        templatePolicy: record.templatePolicy,
+        preservationPolicy: record.preservationPolicy,
         deletedTableIds: [...record.deletedBaselineTableIds],
-        profile: body.profile,
-        visualPolicy: body.visualPolicy,
       });
       const reopenedSnapshot = await readHwpxSemanticSnapshot(verifier);
-      const referenceComparisonEvidence = await resolveHwpxReferenceComparison(
-        state,
-        id,
-        body.referenceComparison,
-        reopenedSnapshot,
-        rawVerification.renderedLayout,
-      );
-      const verification = integrateHwpxReviewEvidence(rawVerification, reopenedSnapshot, {
-        ...body,
-        referenceComparisonEvidence,
-      });
+      const verification = integrateHwpxReviewEvidence(rawVerification, reopenedSnapshot, body);
       if (!qualityAllowsFinalization(verification, 'hwpx')) {
         throw new EditorContractError(
           'saved_document_verification_failed',
@@ -3663,7 +3401,6 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
       ...(fmt === 'docx' ? { visibleTextHash: sha256(Buffer.from(docxAdapter.visibleText(saved.bytes), 'utf8')) } : {}),
       validation: saved.validation,
       ...(reopen ? { reopen } : {}),
-      reviewProfile: checkpoint ? null : recordPreconditions(record).qualityProfile,
       checkpoint,
       verified: !checkpoint,
     });
@@ -3740,22 +3477,17 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
     const { baseRevision } = assertMutationPreconditions(record, 'quality-check', body);
     const quality = fmt === 'hwpx' ? await qualityWithRenderedLayout(session, {
       baselineJson: record.baselineJson,
-      templatePolicy: record.templatePolicy,
+      preservationPolicy: record.preservationPolicy,
       deletedTableIds: [...record.deletedBaselineTableIds],
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
-      profile: body.profile,
-      visualPolicy: body.visualPolicy,
     }) : await session.qualityCheck({
       baselineJson: record.baselineJson,
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
     });
     const qualityPassed = qualityAllowsFinalization(quality, fmt);
     recordPreconditions(record).qualityRevision = qualityPassed ? baseRevision : null;
-    recordPreconditions(record).qualityProfile = qualityPassed && fmt === 'hwpx'
-      ? quality.reviewProfile
-      : null;
-    recordPreconditions(record).qualityVisualPolicy = qualityPassed && fmt === 'hwpx'
-      ? visualPolicyKey(body.visualPolicy)
+    recordPreconditions(record).qualityVerificationPolicy = qualityPassed && fmt === 'hwpx'
+      ? verificationPolicyKey(body)
       : null;
     sendJson(res, 200, {
       ok: quality.ok,
@@ -3808,7 +3540,7 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
   if (actionPath === 'quality/render-compare') {
     const quality = fmt === 'hwpx' ? await qualityWithRenderedLayout(session, {
       baselineJson: record.baselineJson,
-      templatePolicy: record.templatePolicy,
+      preservationPolicy: record.preservationPolicy,
       deletedTableIds: [...record.deletedBaselineTableIds],
       allowedSectionLayoutChanges: [...record.intentionalSectionLayoutChanges],
     }) : await session.qualityCheck({
@@ -5152,7 +4884,7 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       return postLocalEditorApi(req, config, `${prefix}/edit`, {
         baseRevision,
         commands: args.commands,
-        ...(args.templatePolicy !== undefined ? { templatePolicy: args.templatePolicy } : {}),
+        ...(args.preservationPolicy !== undefined ? { preservationPolicy: args.preservationPolicy } : {}),
       });
     }
     if (fmt !== 'hwpx' && name === `${toolPrefix}_apply`) {
@@ -5178,8 +4910,6 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
     if (fmt !== 'hwpx' && name === `${toolPrefix}_quality_check`) {
       return postLocalEditorApi(req, config, `${prefix}/quality/check`, {
         baseRevision,
-        profile: args.profile,
-        visualPolicy: args.visualPolicy,
       });
     }
     if (name === `${toolPrefix}_export_pdf`) {
@@ -5190,11 +4920,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
         const exported = await postLocalEditorApi(req, config, `${prefix}/${fmt === 'hwpx' ? 'export-pdf' : 'documents/export-pdf'}`, {
           baseRevision,
           filename: args.filename,
-          profile: args.profile,
-          visualPolicy: args.visualPolicy,
           expectations: args.expectations,
           securityPolicy: args.securityPolicy,
-          referenceComparison: args.referenceComparison,
           outputPath,
         });
         const { bytesRef: _serverLocalPath, bytesBase64: _inlineBytes, ...publicResult } = exported;
@@ -5263,11 +4990,8 @@ async function executeEditorMcpTool(req, config, state, name, args = {}) {
       const saved = await postLocalEditorApi(req, config, `${prefix}/save`, {
         baseRevision,
         filename: args.filename,
-        profile: args.profile,
-        visualPolicy: args.visualPolicy,
         expectations: args.expectations,
         securityPolicy: args.securityPolicy,
-        referenceComparison: args.referenceComparison,
         mode: 'verified',
         outputPath: artifactPath,
       });

@@ -176,14 +176,14 @@ test('HWPX quality enforces baseline tables and embedded assets', async () => {
         pictures: [...(json.objectGraph.pictures || []), { id: 'missing-picture' }],
       },
     },
-    templatePolicy: {
-      requiredTableIds: ['missing-baseline-table'],
-      requiredImageNames: ['BinData/missing-baseline.png'],
+    preservationPolicy: {
+      preserveTableIds: ['missing-baseline-table'],
+      preserveImageNames: ['BinData/missing-baseline.png'],
     },
   });
   assert.equal(quality.ok, false);
-  assert.ok(quality.issues.some((issue) => issue.code === 'required-table-missing'));
-  assert.ok(quality.issues.some((issue) => issue.code === 'required-image-missing'));
+  assert.ok(quality.issues.some((issue) => issue.code === 'preserved-table-missing'));
+  assert.ok(quality.issues.some((issue) => issue.code === 'preserved-image-missing'));
   assert.ok(quality.issues.some((issue) => issue.code === 'baseline-picture-count-decreased'));
 });
 
@@ -221,19 +221,21 @@ test('HWPX semantic control scans are isolated from ordinary cached reads', asyn
   assert.equal(session.readJson(), ordinary);
 });
 
-test('HWP structural paragraph insertion stays HWP and survives qualification', async () => {
+test('HWP paragraph insertion uses native export and preserves newline-delimited content', async () => {
   await initHwpxRuntime();
   const input = readFileSync('editor_hwpx/samples/re-align-left-hancom.hwp');
   const session = new HwpxApiSession(input);
   const result = session.commandsBatch([{
-    op: 'appendParagraph',
-    target: { paragraph: { section: 0, number: 0 } },
-    text: 'Native HWP paragraph',
+    op: 'text.insertAfterParagraph',
+    location: { paragraph: { section: 0, number: 0 } },
+    styleSource: { paragraph: { section: 0, number: 0 } },
+    text: 'Native HWP paragraph\nNative HWP second paragraph',
   }]);
   assert.equal(result.qualification.ok, true);
   const reopened = new HwpxApiSession(session.save().bytes);
   assert.equal(reopened.readJson().sourceFormat, 'hwp');
   assert.equal(reopened.inspectTarget({ paragraph: { section: 0, number: 1 } }).currentText, 'Native HWP paragraph');
+  assert.equal(reopened.inspectTarget({ paragraph: { section: 0, number: 2 } }).currentText, 'Native HWP second paragraph');
 });
 
 test('HWP native image insertion stays HWP and is inventoried after reopen', async () => {
@@ -698,7 +700,7 @@ test('HWPX API table.autoFit rejects an atomic batch that exceeds its pagination
   assert.equal(session.readJson().pageCount, before.pageCount);
 });
 
-test('HWPX API deleteTable permits only the explicitly targeted table subtree and enforces template intent', async () => {
+test('HWPX API deleteTable permits only the explicitly targeted table subtree and enforces explicit preservation', async () => {
   await initHwpxRuntime();
   const input = readFileSync(ESG_FIXTURE_PATH);
   const session = new HwpxApiSession(input);
@@ -716,23 +718,21 @@ test('HWPX API deleteTable permits only the explicitly targeted table subtree an
   assert.ok(result.qualification.stages.some(stage =>
     stage.intentionalObjectReferenceLosses?.some(item => item.kind === 'tbl' && item.lost === 1)));
 
-  const required = session.qualityCheck({
+  const preserved = session.qualityCheck({
     baselineJson: baseline,
-    templatePolicy: { requiredTableIds: [table.id] },
+    preservationPolicy: { preserveTableIds: [table.id] },
     deletedTableIds: [table.id],
   });
-  assert.equal(required.ok, false);
-  assert.ok(required.issues.some(issue =>
-    issue.code === 'required-table-missing' && issue.tableId === table.id));
+  assert.equal(preserved.ok, false);
+  assert.ok(preserved.issues.some(issue =>
+    issue.code === 'preserved-table-missing' && issue.tableId === table.id));
 
-  const removable = session.qualityCheck({
+  const editable = session.qualityCheck({
     baselineJson: baseline,
-    templatePolicy: { removableTableIds: [table.id] },
     deletedTableIds: [table.id],
   });
-  assert.equal(removable.issues.some(issue =>
-    ['required-table-missing', 'unclassified-table-missing'].includes(issue.code)
-      && issue.tableId === table.id), false);
+  assert.equal(editable.issues.some(issue =>
+    issue.code === 'preserved-table-missing' && issue.tableId === table.id), false);
 
   const reopened = new HwpxApiSession(session.save().bytes);
   assert.equal(reopened.readJson().tables.length, baseline.tables.length - 1);
