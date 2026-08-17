@@ -582,6 +582,152 @@ function discoverTables(doc) {
   return tables;
 }
 
+// The native engine exposes nested-table coordinates through cellPath even for
+// binary HWP.  The package parser below covers HWPX, but binary HWP has no XML
+// package to inspect, so excluding this traversal made visible nested tables
+// impossible to inspect or edit through the API.
+const MAX_TABLE_CONTROL_SCAN = 32;
+
+function isNativeNestedTable(table) {
+  return Array.isArray(table?.native?.cellPath) && table.native.cellPath.length > 0;
+}
+
+function cloneCellPath(path) {
+  return path.map((entry) => ({
+    controlIndex: Number(entry.controlIndex),
+    cellIndex: Number(entry.cellIndex),
+    cellParaIndex: Number(entry.cellParaIndex ?? 0),
+  }));
+}
+
+function nativeTableCellPath(table, cellIndex, cellParaIndex = 0) {
+  const path = isNativeNestedTable(table)
+    ? cloneCellPath(table.native.cellPath)
+    : [{ controlIndex: Number(table.control), cellIndex: 0, cellParaIndex: 0 }];
+  const last = path.at(-1);
+  last.cellIndex = Number(cellIndex);
+  last.cellParaIndex = Number(cellParaIndex);
+  return path;
+}
+
+function readNestedCellText(doc, table, cellIndex) {
+  const basePath = nativeTableCellPath(table, cellIndex, 0);
+  const paraCount = Number(tryJson(() => doc.getCellParagraphCountByPath(
+    table.section, table.para, JSON.stringify(basePath),
+  )) ?? 0);
+  const paragraphs = [];
+  for (let cellPara = 0; cellPara < paraCount; cellPara += 1) {
+    const path = nativeTableCellPath(table, cellIndex, cellPara);
+    const pathJson = JSON.stringify(path);
+    const length = Number(tryJson(() => doc.getCellParagraphLengthByPath(
+      table.section, table.para, pathJson,
+    )) ?? 0);
+    const characterFormat = length > 0
+      ? tryJson(() => doc.getCellCharPropertiesAtByPath(table.section, table.para, pathJson, 0))
+      : null;
+    const text = tryJson(() => doc.getTextInCellByPath(
+      table.section, table.para, pathJson, 0, length,
+    )) ?? '';
+    const measuredStyle = { text: characterFormat };
+    paragraphs.push({
+      index: cellPara,
+      length,
+      text,
+      paragraphFormat: null,
+      characterFormat,
+      hierarchy: null,
+      styleFingerprint: styleFingerprint(measuredStyle),
+    });
+  }
+  return paragraphs;
+}
+
+function readNestedNativeTable(doc, parentTable, path, tableIndex, cellGlobalStart) {
+  const section = parentTable.section;
+  const para = parentTable.para;
+  const pathJson = JSON.stringify(path);
+  const dims = tryJson(() => doc.getTableDimensionsByPath(section, para, pathJson));
+  if (!dims || !Number.isInteger(Number(dims.cellCount)) || Number(dims.cellCount) < 0) return null;
+  const rawBboxes = tryJson(() => doc.getTableCellBboxesByPath(section, para, pathJson));
+  const cellBboxes = Array.isArray(rawBboxes) ? rawBboxes : rawBboxes?.cells ?? [];
+  const layout = { properties: null, bbox: null, cellBboxes };
+  const id = `ntbl_${tableIndex}`;
+  const table = {
+    id,
+    tableIndex,
+    cellGlobalStart,
+    section,
+    para,
+    control: null,
+    tableOrderInParagraph: null,
+    nested: true,
+    dims: {
+      rowCount: Number(dims.rowCount ?? 0),
+      colCount: Number(dims.colCount ?? 0),
+      cellCount: Number(dims.cellCount),
+    },
+    layout,
+    native: { section, paragraph: para, cellPath: cloneCellPath(path) },
+    cells: [],
+  };
+  for (let cellIndex = 0; cellIndex < table.dims.cellCount; cellIndex += 1) {
+    const cellPath = nativeTableCellPath(table, cellIndex, 0);
+    const info = tryJson(() => doc.getCellInfoByPath(section, para, JSON.stringify(cellPath))) ?? {};
+    const paragraphs = readNestedCellText(doc, table, cellIndex);
+    const style = {
+      cell: null,
+      namedStyle: null,
+      paragraph: null,
+      text: paragraphs[0]?.characterFormat ?? null,
+    };
+    const bbox = findCellBBox(layout, cellIndex);
+    table.cells.push({
+      id: `${id}_cell_${cellIndex}`,
+      cellIndex,
+      row: Number(info.row ?? 0),
+      col: Number(info.col ?? 0),
+      rowSpan: Number(info.rowSpan ?? 1),
+      colSpan: Number(info.colSpan ?? 1),
+      text: paragraphs.map((item) => item.text).join('\n'),
+      paragraphs,
+      location: { tableId: id, cell: { number: cellIndex, row: Number(info.row ?? 0), column: Number(info.col ?? 0) } },
+      style,
+      styleFingerprint: styleFingerprint(style),
+      layout: { bbox, capacity: estimateTextCapacity(style, bbox) },
+      allowedActions: ['table.writeCell'],
+      native: { section, paragraph: para, cellPath },
+    });
+  }
+  return table;
+}
+
+function discoverNestedNativeTables(doc, nativeTables) {
+  const nestedTables = [];
+  const queue = [...nativeTables];
+  const seen = new Set();
+  let cellGlobalStart = nativeTables.reduce((sum, table) => sum + Number(table.dims?.cellCount || 0), 0);
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const parentTable = queue[cursor];
+    for (const parentCell of parentTable.cells || []) {
+      for (const parentParagraph of parentCell.paragraphs || []) {
+        const parentPath = nativeTableCellPath(parentTable, parentCell.cellIndex, parentParagraph.index);
+        for (let controlIndex = 0; controlIndex < MAX_TABLE_CONTROL_SCAN; controlIndex += 1) {
+          const path = [...parentPath, { controlIndex, cellIndex: 0, cellParaIndex: 0 }];
+          const key = `${parentTable.section}:${parentTable.para}:${JSON.stringify(path)}`;
+          if (seen.has(key)) continue;
+          const table = readNestedNativeTable(doc, parentTable, path, nestedTables.length, cellGlobalStart);
+          if (!table) continue;
+          seen.add(key);
+          nestedTables.push(table);
+          queue.push(table);
+          cellGlobalStart += table.dims.cellCount;
+        }
+      }
+    }
+  }
+  return nestedTables;
+}
+
 function decodeXmlText(value) {
   return String(value ?? '')
     .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
@@ -2767,6 +2913,47 @@ function setCellTextWithApi(doc, table, cellIndex, text, options = {}) {
   });
 }
 
+function clearNestedCellWithApi(doc, table, cellIndex) {
+  const basePath = nativeTableCellPath(table, cellIndex, 0);
+  const paraCount = Number(doc.getCellParagraphCountByPath(
+    table.section, table.para, JSON.stringify(basePath),
+  ));
+  for (let para = paraCount - 1; para >= 0; para -= 1) {
+    const path = nativeTableCellPath(table, cellIndex, para);
+    const pathJson = JSON.stringify(path);
+    const length = Number(doc.getCellParagraphLengthByPath(table.section, table.para, pathJson));
+    if (length > 0) {
+      parseResult(doc.deleteTextInCellByPath(table.section, table.para, pathJson, 0, length), 'deleteTextInCellByPath');
+    }
+    if (para > 0) {
+      parseResult(doc.mergeParagraphInCellByPath(table.section, table.para, pathJson), 'mergeParagraphInCellByPath');
+    }
+  }
+}
+
+function setNestedCellTextWithApi(doc, table, cellIndex, text) {
+  clearNestedCellWithApi(doc, table, cellIndex);
+  const lines = String(text ?? '').split('\n');
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      const previousPath = nativeTableCellPath(table, cellIndex, index - 1);
+      const previousPathJson = JSON.stringify(previousPath);
+      const previousLength = Number(doc.getCellParagraphLengthByPath(
+        table.section, table.para, previousPathJson,
+      ));
+      parseResult(doc.splitParagraphInCellByPath(
+        table.section, table.para, previousPathJson, previousLength,
+      ), 'splitParagraphInCellByPath');
+    }
+    if (line) {
+      const pathJson = JSON.stringify(nativeTableCellPath(table, cellIndex, index));
+      parseResult(doc.insertTextInCellByPath(
+        table.section, table.para, pathJson, 0, line,
+      ), 'insertTextInCellByPath');
+    }
+  });
+}
+
 function assertSupportedHwpxPackage(inputBytes) {
   const bytes = Buffer.from(inputBytes);
   if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
@@ -3768,7 +3955,9 @@ export class HwpxApiSession {
     }
 
     const nativeTables = discoverTables(this.doc);
-    const nestedTables = discoverNestedPackageTables(this.inputBytes);
+    const nestedTables = isZipPackage(this.inputBytes)
+      ? discoverNestedPackageTables(this.inputBytes)
+      : discoverNestedNativeTables(this.doc, nativeTables);
     const tables = annotateTablePictureSlots(this.inputBytes, [...nativeTables, ...nestedTables]);
     const styleGraph = readStyleGraph(this.doc);
     const objectGraph = isZipPackage(this.inputBytes)
@@ -3938,7 +4127,7 @@ export class HwpxApiSession {
       });
       return { ...packageObjects, pictures, shapes, textBoxes };
     })();
-    const nestedTables = discoverNestedPackageTables(this.inputBytes);
+    const nestedTables = this.exportJson().tables.filter((table) => table.nested || table.packageOnly);
     return {
       ...objects,
       nestedTables: nestedTables.map((table) => ({
@@ -4908,7 +5097,9 @@ export class HwpxApiSession {
         const paragraphStyleIds = op.paragraphStyleIds?.map((item) => (
           item === null ? null : mergeStyleIds(styleIds, item)
         ));
-        if (!table.packageOnly) {
+        if (isNativeNestedTable(table)) {
+          setNestedCellTextWithApi(this.doc, table, cell.cellIndex, text);
+        } else if (!table.packageOnly) {
           setCellTextWithApi(this.doc, table, cell.cellIndex, text, {
             paragraphTemplateIndices: op.paragraphTemplateIndices,
           });
@@ -5260,7 +5451,8 @@ export class HwpxApiSession {
         if (target.kind === 'cell') {
           const table = this.tableFromLocation(op.target);
           const cell = this.cellFromLocation(table, op.target);
-          if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, nextText);
+          if (isNativeNestedTable(table)) setNestedCellTextWithApi(this.doc, table, cell.cellIndex, nextText);
+          else if (!table.packageOnly) setCellTextWithApi(this.doc, table, cell.cellIndex, nextText);
           this.cellPatches.push({
             section: table.section,
             para: table.para,
