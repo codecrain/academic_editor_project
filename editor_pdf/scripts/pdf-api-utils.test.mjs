@@ -129,10 +129,19 @@ test('PDF session supports global text replacement, comments, markup, page label
   ]);
 
   assert.match(session.objectInventory().textObjects.map((object) => object.text).join(' '), /Revised content/);
+  assert.deepEqual(
+    session.objectInventory().annotations.filter((annotation) => annotation.type === 'comment').map((annotation) => ({ type: annotation.type, text: annotation.text, author: annotation.author })),
+    [{ type: 'comment', text: 'Review this paragraph.', author: 'Reviewer' }],
+  );
   const saved = await session.save();
   const reopened = await PDFDocument.load(saved.bytes);
   assert.equal(Math.round(reopened.getPage(0).getWidth()), 500);
   assert.equal(Math.round(reopened.getPage(0).getHeight()), 700);
+  const reopenedSession = await PdfApiSession.create(saved.bytes);
+  assert.deepEqual(
+    reopenedSession.objectInventory().annotations.filter((annotation) => annotation.type === 'comment').map((annotation) => annotation.text),
+    ['Review this paragraph.'],
+  );
   const annotations = reopened.getPage(0).node.Annots();
   assert.equal(annotations?.size(), 2);
   assert.deepEqual(
@@ -238,7 +247,9 @@ test('PDF session adds searchable Korean text as an embedded text object, not a 
 });
 
 test('PDF session applies additive edits and survives save, independent reopen, and render', async () => {
-  const session = await PdfApiSession.create(await samplePdf());
+  const source = await samplePdf();
+  const before = await renderPdfPages(source, { pages: [1], scale: 1 });
+  const session = await PdfApiSession.create(source);
   assert.equal(session.readJson().pageCount, 1);
   assert.match(session.readJson().blocks[0].text, /Original content remains intact/);
 
@@ -257,12 +268,15 @@ test('PDF session applies additive edits and survives save, independent reopen, 
   assert.equal(saved.bytes.subarray(0, 5).toString(), '%PDF-');
   const reopened = await PdfApiSession.create(saved.bytes);
   assert.equal(reopened.readJson().pageCount, 1);
+  assert.ok(reopened.objectInventory().textObjects.some((object) => object.text === '검토 완료'));
+  assert.ok(reopened.objectInventory().imageObjects.length >= 1);
 
   const rendered = await renderPdfPages(saved.bytes, { pages: [1], scale: 1 });
   assert.equal(rendered.pageCount, 1);
   assert.equal(rendered.pages.length, 1);
   assert.equal(rendered.pages[0].mimeType, 'image/png');
   assert.ok(rendered.pages[0].byteLength > 1000);
+  assert.notEqual(rendered.pages[0].sha256, before.pages[0].sha256);
 });
 
 test('PDF session blocks coordinate edits on rotated pages', async () => {

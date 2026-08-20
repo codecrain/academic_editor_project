@@ -1315,6 +1315,10 @@ function applyInsertImageInCell(doc, command, context) {
     null,
     null,
   ), 'insertPicture', ['controlIdx']);
+  // Legacy HWP's cellPath insertion creates a top-level sibling overlay and
+  // does not retain the nested path in the saved object graph.  Therefore the
+  // placement below is intentionally paper-relative and must be the final
+  // reflowing mutation; the receipt names this format boundary explicitly.
   const unitsPerCssPixel = 75;
   const cellX = Number(cellBounds.x);
   const cellY = Number(cellBounds.y);
@@ -1325,7 +1329,7 @@ function applyInsertImageInCell(doc, command, context) {
     throw structuralError(
       'HWPX_IMAGE_BOUNDS_UNAVAILABLE',
       'The inspected table cell does not expose rendered bounds required for centered native HWP placement.',
-      { tableId, cellNumber, cellBounds },
+      { tableId, cellNumber, cellStyle, cellBounds },
     );
   }
   const placement = normalizeFormatProperties('image', {

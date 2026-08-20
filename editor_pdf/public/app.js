@@ -33,6 +33,9 @@ const state = {
   selected: null,
   objectType: 'text',
   editedBuffer: null,
+  // The host can display a saved working copy while retaining the immutable
+  // original as the comparison baseline.
+  baselineBuffer: null,
   reopening: false,
   editMode: 'text',
   inlineEditing: false,
@@ -53,6 +56,9 @@ const state = {
   modeActivation: 0,
   objectDrag: null,
   clipboard: null,
+  operationTail: Promise.resolve(),
+  inlineFinalize: null,
+  inlineSavePromise: null,
 };
 
 let markEditorBridgeReady;
@@ -173,6 +179,17 @@ async function api(path, body) {
   return result;
 }
 
+function enqueueDocumentOperation(operation) {
+  const result = state.operationTail.then(operation, operation);
+  state.operationTail = result.catch(() => {});
+  return result;
+}
+
+async function flushInlineTextEdit() {
+  if (state.inlineFinalize) await state.inlineFinalize(true);
+  if (state.inlineSavePromise) await state.inlineSavePromise;
+}
+
 async function currentBuffer() {
   if (state.editedBuffer) return state.editedBuffer.slice(0);
   if (!state.exporter) throw new Error(t('status.noOpenPdf'));
@@ -188,10 +205,14 @@ async function beginObjectSession() {
     const active = state.documentManager?.getActiveDocument();
     if (!active) throw new Error(t('status.openPdfFirst'));
     const buffer = await currentBuffer();
-    const opened = await api('/pdf/api/documents/open', {
+    const openPayload = {
       filename: active.name || 'document.pdf',
       source: { bytesBase64: bytesToBase64(buffer) },
-    });
+      ...(state.baselineBuffer
+        ? { baselineSource: { bytesBase64: bytesToBase64(state.baselineBuffer) } }
+        : {}),
+    };
+    const opened = await api('/pdf/api/documents/open', openPayload);
     if (generation !== state.documentGeneration) {
       api(`/pdf/api/documents/${opened.documentId}/documents/discard`, { baseRevision: opened.revision }).catch(() => {});
       return;
@@ -251,20 +272,29 @@ async function loadDocumentFromHost(params = {}) {
         ? new Uint8Array(rawBytes).buffer
         : null;
   if (!buffer) throw new Error('A PDF ArrayBuffer is required.');
+  const rawBaseline = params.baselineData;
+  const baselineBuffer = rawBaseline instanceof ArrayBuffer
+    ? rawBaseline
+    : ArrayBuffer.isView(rawBaseline)
+      ? rawBaseline.buffer.slice(rawBaseline.byteOffset, rawBaseline.byteOffset + rawBaseline.byteLength)
+      : Array.isArray(rawBaseline)
+        ? new Uint8Array(rawBaseline).buffer
+        : null;
   if (!state.documentManager) throw new Error('PDF editor is not ready.');
   const activeId = state.documentManager.getActiveDocumentId();
-  state.reopening = true;
-  try {
-    if (activeId) await taskPromise(state.documentManager.closeDocument(activeId));
-    const opened = await taskPromise(state.documentManager.openDocumentBuffer({
-      buffer,
-      name: String(params.fileName || 'document.pdf'),
-      autoActivate: true,
-    }));
-    if (opened?.task) await taskPromise(opened.task);
-  } finally {
-    state.reopening = false;
-  }
+  // This is a different host file, not an internal redraw. Let the regular
+  // close/open callbacks discard the prior object-editing session so a later
+  // export can never serialize the previous file's PDF bytes.
+  if (activeId) await taskPromise(state.documentManager.closeDocument(activeId));
+  // onDocumentClosed clears the prior baseline. Set this after that callback
+  // and before onDocumentOpened starts the next object-session analysis.
+  state.baselineBuffer = baselineBuffer?.byteLength ? baselineBuffer.slice(0) : null;
+  const opened = await taskPromise(state.documentManager.openDocumentBuffer({
+    buffer,
+    name: String(params.fileName || 'document.pdf'),
+    autoActivate: true,
+  }));
+  if (opened?.task) await taskPromise(opened.task);
 }
 
 function reflectEditMode(mode) {
@@ -506,27 +536,40 @@ function renderedPages() {
   const root = host?.shadowRoot;
   if (!root) return [];
   const viewerRect = elements.pdfViewer.getBoundingClientRect();
-  const candidates = [...root.querySelectorAll('#document-content img')]
-    .filter((image) => {
-      const rect = image.getBoundingClientRect();
+  const candidates = [...root.querySelectorAll('#document-content img, #document-content canvas')]
+    .filter((surface) => {
+      const rect = surface.getBoundingClientRect();
       return rect.width > 120 && rect.height > 120;
     })
     .sort((left, right) => left.getBoundingClientRect().top - right.getBoundingClientRect().top);
-  return candidates.map((image, index) => {
-    const rect = image.getBoundingClientRect();
-    const pageNode = image.closest('[data-page-index], [data-page-number]');
+  const pages = [];
+  for (const [index, surface] of candidates.entries()) {
+    const rect = surface.getBoundingClientRect();
+    const pageNode = surface.closest('[data-page-index], [data-page-number]');
     const page = Number(pageNode?.dataset.pageNumber)
       || Number(pageNode?.dataset.pageIndex) + 1
       || index + 1;
-    return {
+    const existingIndex = pages.findIndex((candidate) => candidate.page === page);
+    const candidate = {
       page,
-      image,
+      image: surface,
       left: rect.left - viewerRect.left,
       top: rect.top - viewerRect.top,
       width: rect.width,
       height: rect.height,
     };
-  });
+    if (existingIndex === -1 || (surface instanceof HTMLImageElement && !(pages[existingIndex].image instanceof HTMLImageElement))) {
+      if (existingIndex === -1) pages.push(candidate);
+      else pages[existingIndex] = candidate;
+    }
+  }
+  return pages;
+}
+
+function renderedSurfaceDimensions(surface) {
+  return surface instanceof HTMLImageElement
+    ? { width: surface.naturalWidth, height: surface.naturalHeight }
+    : { width: surface.width, height: surface.height };
 }
 
 function objectScreenRect(object) {
@@ -886,6 +929,33 @@ function renderCanvasObjects() {
   if (!state.inventory) return;
   if (['comment', 'redaction'].includes(state.editMode)) return;
   if (state.editMode === 'image' && state.pendingImage) return;
+  if (state.editMode === 'select') {
+    for (const annotation of state.inventory.annotations || []) {
+      if (annotation.type !== 'comment') continue;
+      const rect = objectScreenRect(annotation);
+      if (!rect) continue;
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = 'comment-marker';
+      marker.dataset.annotationId = annotation.id;
+      marker.setAttribute('aria-label', t('directComment.markerAria', {
+        author: annotation.author || t('directComment.defaultAuthor'),
+        text: annotation.text || t('directComment.empty'),
+      }));
+      marker.title = `${annotation.author || t('directComment.defaultAuthor')}: ${annotation.text || t('directComment.empty')}`;
+      marker.textContent = '✦';
+      Object.assign(marker.style, {
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        '--comment-color': annotation.color || '#f59e0b',
+      });
+      marker.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setPanelStatus(`${annotation.author || t('directComment.defaultAuthor')}: ${annotation.text || t('directComment.empty')}`, 'success');
+      });
+      elements.canvasOverlay.append(marker);
+    }
+  }
   for (const object of state.inventory.pageObjects || []) {
     if (!['text', 'image'].includes(object.type)) continue;
     if (state.editMode === 'text' && object.type !== 'text') continue;
@@ -956,9 +1026,11 @@ function sampleObjectBackground(object) {
   const bounds = object.editorBounds;
   if (!rendered?.image || !source || !bounds) return '#ffffff';
   try {
+    const dimensions = renderedSurfaceDimensions(rendered.image);
+    if (!dimensions.width || !dimensions.height) return '#ffffff';
     const canvas = document.createElement('canvas');
-    canvas.width = rendered.image.naturalWidth;
-    canvas.height = rendered.image.naturalHeight;
+    canvas.width = dimensions.width;
+    canvas.height = dimensions.height;
     const context = canvas.getContext('2d', { willReadFrequently: true });
     context.drawImage(rendered.image, 0, 0);
     const scaleX = canvas.width / source.width;
@@ -1117,75 +1189,90 @@ function beginInlineTextEdit(object, pointerEvent) {
   };
   editor.addEventListener('input', resizeEditor);
   let completed = false;
-  const finish = async (save) => {
+  const finish = (save) => {
     if (completed) return;
     completed = true;
-    const rawText = editor.value;
-    const text = wrapTextForWidth(rawText, editor, Math.max(40, editor.clientWidth - 10));
-    const sourcePage = state.inventory?.pages?.find((page) => page.page === object.page);
-    const sourceWidth = sourcePage && renderedPage ? ((screenWidth - 10) / renderedPage.width) * sourcePage.width : object.editorBounds?.width;
-    const lineHeightRatio = 1.2;
-    const screenHeight = Math.max(rect.height, text.split('\n').length * screenFontSize * lineHeightRatio);
-    shell.remove();
-    state.inlineEditing = false;
-    if (!save || rawText === editingText) {
-      renderCanvasObjects();
-      return;
-    }
-    try {
-      setPanelStatus(t('status.inlineSaving'));
-      state.textPreviews.set(previewKey, {
-        text,
-        background,
-        color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
-        fontFamily: object.fontFamily || 'Noto Sans KR',
-        screenFontSize,
-        screenWidth,
-        screenHeight,
-        lineHeightRatio,
-      });
-      const continuationObjects = (existingGroup?.objectIndices || []).slice(1)
-        .map((objectIndex) => state.inventory.pageObjects.find((candidate) => (
-          candidate.page === object.page && candidate.objectIndex === objectIndex
-        )))
-        .filter(Boolean)
-        .sort((left, right) => right.objectIndex - left.objectIndex);
-      const commands = [{
-        op: 'text.replaceObject',
-        page: object.page,
-        objectIndex: object.objectIndex,
-        objectId: object.id,
-        expectedText: object.text,
-        text,
-        fontFamily: elements.quickFontFamily.value || elements.fontFamily.value,
-        fontSize: Number(elements.quickFontSize.value || object.fontSize || 12),
-        color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
-        opacity: (object.fillColor?.a ?? 255) / 255,
-        maxWidth: sourceWidth,
-        lineHeight: Number(elements.quickFontSize.value || object.fontSize || 12) * lineHeightRatio,
-        removeFollowingObjects: continuationObjects.map((continuation) => ({
-          objectIndex: continuation.objectIndex,
-          objectId: continuation.id,
-        })),
-      }];
-      await applyCommands(commands, { inspectTargets: [object, ...continuationObjects], syncViewer: false });
-      const lineCount = text.split('\n').length;
-      if (lineCount > 1) {
-        state.textGroups.set(previewKey, {
-          page: object.page,
-          text,
-          objectIndices: Array.from({ length: lineCount }, (_value, index) => object.objectIndex + index),
-        });
-      } else {
-        state.textGroups.delete(previewKey);
+    const completion = (async () => {
+      const rawText = editor.value;
+      const text = wrapTextForWidth(rawText, editor, Math.max(40, editor.clientWidth - 10));
+      const sourcePage = state.inventory?.pages?.find((page) => page.page === object.page);
+      const sourceWidth = sourcePage && renderedPage ? ((screenWidth - 10) / renderedPage.width) * sourcePage.width : object.editorBounds?.width;
+      const lineHeightRatio = 1.2;
+      const screenHeight = Math.max(rect.height, text.split('\n').length * screenFontSize * lineHeightRatio);
+      shell.remove();
+      state.inlineEditing = false;
+      if (!save || rawText === editingText) {
+        renderCanvasObjects();
+        return;
       }
-      setPanelStatus(t('status.inlineSaved'), 'success');
-    } catch (error) {
-      state.textPreviews.delete(previewKey);
-      setPanelStatus(error.message, 'error');
-      renderCanvasObjects();
-    }
+      try {
+        setPanelStatus(t('status.inlineSaving'));
+        state.textPreviews.set(previewKey, {
+          text,
+          background,
+          color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
+          fontFamily: object.fontFamily || 'Noto Sans KR',
+          screenFontSize,
+          screenWidth,
+          screenHeight,
+          lineHeightRatio,
+        });
+        const continuationObjects = (existingGroup?.objectIndices || []).slice(1)
+          .map((objectIndex) => state.inventory.pageObjects.find((candidate) => (
+            candidate.page === object.page && candidate.objectIndex === objectIndex
+          )))
+          .filter(Boolean)
+          .sort((left, right) => right.objectIndex - left.objectIndex);
+        const commands = [{
+          op: 'text.replaceObject',
+          page: object.page,
+          objectIndex: object.objectIndex,
+          objectId: object.id,
+          expectedText: object.text,
+          text,
+          fontFamily: elements.quickFontFamily.value || elements.fontFamily.value,
+          fontSize: Number(elements.quickFontSize.value || object.fontSize || 12),
+          color: elements.quickFontColor.value || object.fillColor?.hex || '#172033',
+          opacity: (object.fillColor?.a ?? 255) / 255,
+          maxWidth: sourceWidth,
+          lineHeight: Number(elements.quickFontSize.value || object.fontSize || 12) * lineHeightRatio,
+          removeFollowingObjects: continuationObjects.map((continuation) => ({
+            objectIndex: continuation.objectIndex,
+            objectId: continuation.id,
+          })),
+        }];
+        await applyCommands(commands, { inspectTargets: [object, ...continuationObjects], syncViewer: false });
+        const lineCount = text.split('\n').length;
+        if (lineCount > 1) {
+          state.textGroups.set(previewKey, {
+            page: object.page,
+            text,
+            objectIndices: Array.from({ length: lineCount }, (_value, index) => object.objectIndex + index),
+          });
+        } else {
+          state.textGroups.delete(previewKey);
+        }
+        setPanelStatus(t('status.inlineSaved'), 'success');
+      } catch (error) {
+        state.textPreviews.delete(previewKey);
+        setPanelStatus(error.message, 'error');
+        renderCanvasObjects();
+      }
+    })();
+    state.inlineSavePromise = completion;
+    completion.then(
+      () => {
+        if (state.inlineSavePromise === completion) state.inlineSavePromise = null;
+        if (state.inlineFinalize === finish) state.inlineFinalize = null;
+      },
+      () => {
+        if (state.inlineSavePromise === completion) state.inlineSavePromise = null;
+        if (state.inlineFinalize === finish) state.inlineFinalize = null;
+      },
+    );
+    return completion;
   };
+  state.inlineFinalize = finish;
   editor.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -1225,46 +1312,51 @@ async function inspectObjects(objects) {
   return inspected.targets;
 }
 
-async function applyCommands(commands, { inspectObject = false, inspectTargets = [], syncViewer = true } = {}) {
-  if (!state.sessionId) await beginObjectSession();
-  if (inspectTargets.length) {
-    await inspectObjects(inspectTargets);
-  } else if (inspectObject) {
-    await inspectSelected();
-  }
-  const result = await api(`/pdf/api/documents/${state.sessionId}/commands/apply`, {
-    baseRevision: state.revision,
-    commands,
+function applyCommands(commands, { inspectObject = false, inspectTargets = [], syncViewer = true } = {}) {
+  return enqueueDocumentOperation(async () => {
+    if (!state.sessionId) await beginObjectSession();
+    if (inspectTargets.length) {
+      await inspectObjects(inspectTargets);
+    } else if (inspectObject) {
+      await inspectSelected();
+    }
+    const result = await api(`/pdf/api/documents/${state.sessionId}/commands/apply`, {
+      baseRevision: state.revision,
+      commands,
+    });
+    state.revision = result.revision;
+    if (syncViewer) {
+      await syncEditedPdf();
+    } else {
+      state.editedBuffer = null;
+      markPendingSave(true);
+    }
+    await refreshInventory();
   });
-  state.revision = result.revision;
-  if (syncViewer) {
-    await syncEditedPdf();
-  } else {
-    state.editedBuffer = null;
-    markPendingSave(true);
-  }
-  await refreshInventory();
 }
 
 async function saveEditedPdf({ download = true } = {}) {
-  if (!state.sessionId) await beginObjectSession();
-  const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
-  if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || t('status.qualityFailed'));
-  const saved = await api(`/pdf/api/documents/${state.sessionId}/documents/save-buffer`, {
-    baseRevision: state.revision,
-    filename: 'academic-edited.pdf',
+  await flushInlineTextEdit();
+  return enqueueDocumentOperation(async () => {
+    if (!state.sessionId) await beginObjectSession();
+    const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
+    if (!quality.ok) throw new Error(quality.issues?.map((issue) => issue.message).join(' · ') || t('status.qualityFailed'));
+    const saved = await api(`/pdf/api/documents/${state.sessionId}/documents/save-buffer`, {
+      baseRevision: state.revision,
+      filename: 'academic-edited.pdf',
+    });
+    state.editedBuffer = base64ToBuffer(saved.bytesBase64);
+    markPendingSave(false);
+    if (download) {
+      const url = URL.createObjectURL(new Blob([state.editedBuffer], { type: 'application/pdf' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = saved.filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    return saved;
   });
-  state.editedBuffer = base64ToBuffer(saved.bytesBase64);
-  markPendingSave(false);
-  if (download) {
-    const url = URL.createObjectURL(new Blob([state.editedBuffer], { type: 'application/pdf' }));
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = saved.filename;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  return saved;
 }
 
 async function syncEditedPdf() {
@@ -1548,8 +1640,10 @@ async function imageClipboardPayload(object) {
   const source = state.inventory?.pages?.find((page) => page.page === object.page);
   const bounds = object.editorBounds;
   if (!rendered?.image || !source || !bounds) throw new Error(t('error.copyImageUnavailable'));
-  const scaleX = rendered.image.naturalWidth / source.width;
-  const scaleY = rendered.image.naturalHeight / source.height;
+  const dimensions = renderedSurfaceDimensions(rendered.image);
+  if (!dimensions.width || !dimensions.height) throw new Error(t('error.copyImageUnavailable'));
+  const scaleX = dimensions.width / source.width;
+  const scaleY = dimensions.height / source.height;
   const width = Math.max(1, Math.round(bounds.width * scaleX));
   const height = Math.max(1, Math.round(bounds.height * scaleY));
   const canvas = document.createElement('canvas');
@@ -1727,6 +1821,8 @@ elements.savePdfButton.addEventListener('click', async () => {
 elements.qualityAuditButton.addEventListener('click', async () => {
   setSettingsOpen(false);
   try {
+    await flushInlineTextEdit();
+    await state.operationTail;
     if (!state.sessionId) await beginObjectSession();
     const quality = await api(`/pdf/api/documents/${state.sessionId}/quality/check`, { baseRevision: state.revision });
     showReport(
@@ -1738,29 +1834,61 @@ elements.qualityAuditButton.addEventListener('click', async () => {
     setPanelStatus(error.message, 'error');
   }
 });
+
+async function renderComparisonPage(page, grid, status) {
+  status.textContent = t('report.comparing');
+  grid.replaceChildren();
+  const comparison = await api(`/pdf/api/documents/${state.sessionId}/quality/render-compare`, {
+    baseRevision: state.revision,
+    pages: [page],
+  });
+  for (const [labelKey, rendered] of [['report.original', comparison.baseline], ['report.current', comparison.current]]) {
+    const renderedPage = rendered.pages.find((candidate) => candidate.page === page);
+    if (!renderedPage) throw new Error(t('status.invalidApiResponse', { status: 200 }));
+    const label = t(labelKey);
+    const figure = document.createElement('figure');
+    const caption = document.createElement('figcaption');
+    caption.textContent = t('report.page', { label, page });
+    const image = document.createElement('img');
+    image.alt = t('report.pageAlt', { label, page });
+    image.src = `data:${renderedPage.mimeType};base64,${renderedPage.bytesBase64}`;
+    figure.append(caption, image);
+    grid.append(figure);
+  }
+  status.textContent = '';
+}
+
 elements.compareButton.addEventListener('click', async () => {
   setSettingsOpen(false);
   try {
+    await flushInlineTextEdit();
+    await state.operationTail;
     if (!state.sessionId) await beginObjectSession();
-    const comparison = await api(`/pdf/api/documents/${state.sessionId}/quality/render-compare`, {
-      baseRevision: state.revision,
-      pages: [1],
-    });
+    const pages = state.inventory?.pages || [];
+    if (!pages.length) throw new Error(t('status.openPdfFirst'));
+    const body = document.createElement('div');
+    const controls = document.createElement('label');
+    controls.className = 'compare-controls';
+    controls.textContent = t('report.pageSelect');
+    const select = document.createElement('select');
+    for (const sourcePage of pages) {
+      const option = document.createElement('option');
+      option.value = String(sourcePage.page);
+      option.textContent = String(sourcePage.page);
+      option.selected = sourcePage.page === (state.selected?.page || pages[0].page);
+      select.append(option);
+    }
+    controls.append(select);
+    const status = document.createElement('p');
+    status.className = 'compare-status';
     const grid = document.createElement('div');
     grid.className = 'compare-grid';
-    for (const [labelKey, rendered] of [['report.original', comparison.baseline], ['report.current', comparison.current]]) {
-      const label = t(labelKey);
-      const figure = document.createElement('figure');
-      const caption = document.createElement('figcaption');
-      caption.textContent = t('report.page', { label });
-      const image = document.createElement('img');
-      const page = rendered.pages[0];
-      image.alt = t('report.pageAlt', { label });
-      image.src = `data:${page.mimeType};base64,${page.bytesBase64}`;
-      figure.append(caption, image);
-      grid.append(figure);
-    }
-    showReport(t('report.compare'), t('report.compareSummary'), grid);
+    const renderSelectedPage = () => renderComparisonPage(Number(select.value), grid, status)
+      .catch((error) => { status.textContent = error.message; });
+    select.addEventListener('change', renderSelectedPage);
+    body.append(controls, status, grid);
+    showReport(t('report.compare'), t('report.compareSummary'), body);
+    await renderSelectedPage();
   } catch (error) {
     setPanelStatus(error.message, 'error');
   }
@@ -2115,6 +2243,27 @@ try {
     // through the generic postMessage bridge, so EmbedPDF's local "Open document"
     // tab is intentionally not exposed.
     tabBar: 'never',
+    // Tlooto owns the editing interaction.  The stock EmbedPDF snippet UI
+    // exposes a second, independent set of selection/pan/annotation tools;
+    // its state can capture a click that the Tlooto rail has already assigned
+    // to text, image, comment, or redaction placement.  Keep the rendering
+    // engine only and render no stock toolbars, sidebars, menus, or overlays.
+    ui: {
+      schema: {
+        id: 'tlooto-pdf-host-ui',
+        version: '1',
+        toolbars: {},
+        menus: {},
+        sidebars: {},
+        modals: {},
+        overlays: {},
+        selectionMenus: {},
+      },
+    },
+    // There is no separate viewer pan mode in the host UI.  Pointer behavior
+    // is controlled exclusively by the left tool rail so a selected editing
+    // mode cannot be silently replaced by the snippet's pan state.
+    pan: { defaultMode: 'never' },
     annotations: { annotationAuthor: 'tlooto PDF', selectAfterCreate: true },
     export: { defaultFileName: 'academic-edited.pdf' },
     permissions: { enforceDocumentPermissions: true },
@@ -2193,6 +2342,7 @@ try {
         state.catalog = null;
         state.selected = null;
         state.editedBuffer = null;
+        state.baselineBuffer = null;
         state.pendingComment = null;
         state.pendingImage = null;
         state.imageFilePurpose = null;

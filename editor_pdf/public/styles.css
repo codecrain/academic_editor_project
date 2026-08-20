@@ -158,6 +158,12 @@ i.ti { font-size: 19px; }
 .canvas-overlay[data-mode="comment"] { cursor: crosshair; }
 .canvas-overlay[data-mode="redaction"] { cursor: crosshair; }
 .canvas-overlay[data-mode="image"][data-image-placement="true"] { pointer-events: auto; cursor: crosshair; }
+/* Placement tools must receive the page click even where the text/image
+   inspection hitboxes overlap the rendered page.  Leaving those hitboxes
+   active made a comment or image click look like it had done nothing. */
+.canvas-overlay[data-mode="comment"] .object-hitbox,
+.canvas-overlay[data-mode="redaction"] .object-hitbox,
+.canvas-overlay[data-mode="image"][data-image-placement="true"] .object-hitbox { pointer-events: none; }
 .edit-hint {
   position: absolute;
   z-index: 13;
@@ -209,6 +215,26 @@ i.ti { font-size: 19px; }
 .object-hitbox.is-selected::before, .object-hitbox.is-selected::after { position: absolute; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 1px; background: #2563eb; content: ""; }
 .object-hitbox.is-selected::before { top: -5px; left: -5px; }
 .object-hitbox.is-selected::after { right: -5px; bottom: -5px; }
+.comment-marker {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  place-items: center;
+  background: var(--comment-color, #f59e0b);
+  box-shadow: 0 1px 5px rgb(15 23 42 / 35%);
+  color: #fff;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+.comment-marker:hover, .comment-marker:focus-visible { transform: scale(1.12); outline: 2px solid #1d4ed8; outline-offset: 2px; }
 .text-object-preview {
   position: absolute;
   z-index: 1;
@@ -467,6 +493,9 @@ input[type="color"] { height: 34px; padding: 3px; }
 .report-issues li[data-severity="error"] strong { color: #b91c1c; }
 .report-issues li[data-severity="success"] { color: #047857; }
 .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.compare-controls { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: 13px; font-weight: 700; }
+.compare-controls select { min-width: 88px; border: 1px solid #cbd5e1; border-radius: 7px; padding: 6px 8px; background: #fff; color: var(--ink); font: inherit; }
+.compare-status { min-height: 20px; margin: 0 0 10px; color: var(--muted); font-size: 13px; }
 .compare-grid figure { margin: 0; }
 .compare-grid figcaption { margin-bottom: 8px; font-weight: 700; }
 .compare-grid img { display: block; width: 100%; border: 1px solid #d1d5db; background: #f3f4f6; }

@@ -127,9 +127,15 @@ revision and must repeat the expectations and security policy accepted by review
 - Newly inserted paragraph images must persist `treatAsChar=true` when re-read;
   native HWP may retain dormant floating-layout fields while inline mode is active.
   Floating placement requires a subsequent explicit `object.format`.
-- `image.insertInCell` stores an inline picture in HWPX. Binary HWP stores a
-  centered, cell-contained overlay and exposes that format-specific placement
-  in the command receipt; save/reopen verification checks the spatial result.
+- `image.insertInCell` stores an inline picture in HWPX. Legacy binary HWP has no
+  persistent nested-picture path in the native insertion API: it stores a
+  centered, paper-relative overlay at the inspected cell's current bbox and
+  returns `placementMode="cell-anchored-overlay"`. The editor verifies the
+  saved/reopened spatial result, but a later reflowing mutation can move the
+  cell without moving that overlay. Callers must therefore perform all
+  paragraph/table/image insertions first and use `image.insertInCell` as the
+  final layout mutation, then review every page again. This is an explicit
+  format boundary, not a silent claim of a durable cell anchor.
 
 ## Verification
 

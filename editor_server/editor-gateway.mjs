@@ -2697,8 +2697,16 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
   }
   const body = await readJsonBody(req);
   let bytes;
+  let baselineBytes;
   try {
     bytes = await readApiSourceBytes(fmt, body.source || {}, config);
+    baselineBytes = bytes;
+    if (body.baselineSource !== undefined && body.baselineSource !== null) {
+      if (fmt !== 'pdf') {
+        throw new Error('baselineSource is supported only for PDF documents.');
+      }
+      baselineBytes = await readApiSourceBytes(fmt, body.baselineSource, config);
+    }
   } catch (error) {
     sendJson(res, 400, { ok: false, message: error instanceof Error ? error.message : String(error) });
     return true;
@@ -2721,7 +2729,10 @@ async function handleEditorApiOpen(req, res, config, state, fmt) {
     id,
     fmt,
     filename: body.filename || `document.${fmt}`,
-    sourceBytes: Buffer.from(bytes),
+    // PDF editing can start from a saved working copy while comparison must
+    // remain anchored to the immutable original. Other formats retain their
+    // existing source semantics until they gain the same host contract.
+    sourceBytes: Buffer.from(baselineBytes),
     sourceFormat: String(json.sourceFormat || fmt),
     baselineJson: json,
     preservationPolicy: normalizePreservationPolicy(),

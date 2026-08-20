@@ -3,9 +3,10 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
-  const [html, source] = await Promise.all([
+  const [html, source, css] = await Promise.all([
     readFile(new URL('../public/index.html', import.meta.url), 'utf8'),
     readFile(new URL('../public/app.js', import.meta.url), 'utf8'),
+    readFile(new URL('../public/styles.css', import.meta.url), 'utf8'),
   ]);
   for (const expected of [
     'id="pdfViewer"', 'tlooto PDF', 'id="runtimeStatus"', 'id="objectEditorButton"', 'id="settingsButton"', 'id="settingsMenu"',
@@ -25,6 +26,12 @@ test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   assert.match(source, /fontFallback: null/);
   assert.match(source, /stamp: \{ manifests: \[\] \}/);
   assert.match(source, /annotations:/);
+  assert.match(source, /id: 'tlooto-pdf-host-ui'/);
+  assert.match(source, /toolbars: \{\}/);
+  assert.match(source, /pan: \{ defaultMode: 'never' \}/);
+  assert.match(css, /data-mode="comment"\] \.object-hitbox/);
+  assert.match(source, /className = 'comment-marker'/);
+  assert.match(css, /\.comment-marker/);
   assert.match(source, /enforceDocumentPermissions: true/);
   assert.match(source, /window\.academicPdfEditor/);
   assert.match(source, /text\.replaceObject/);
@@ -37,6 +44,9 @@ test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   assert.match(source, /stageTextPreview/);
   assert.match(source, /syncViewer: false/);
   assert.match(source, /saveEditedPdf/);
+  assert.match(source, /flushInlineTextEdit/);
+  assert.match(source, /enqueueDocumentOperation/);
+  assert.match(source, /state\.inlineFinalize/);
   assert.doesNotMatch(source, /editor\.select\(\)/);
   assert.match(source, /activateEditMode\('text'\)/);
   assert.match(source, /queueMicrotask/);
@@ -59,6 +69,7 @@ test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   assert.match(source, /image\.replaceObject/);
   assert.match(source, /image\.add/);
   assert.match(source, /placePendingImage/);
+  assert.match(source, /#document-content img, #document-content canvas/);
   assert.match(source, /redaction\.apply/);
   assert.match(source, /showAdvancedConfirmation/);
   assert.doesNotMatch(source, /window\.confirm/);
@@ -68,7 +79,12 @@ test('/pdf UI boots tlooto PDF with advanced editing categories', async () => {
   assert.match(source, /form\.addTextField/);
   assert.match(source, /document\.sanitize/);
   assert.match(source, /documents\/save-buffer/);
+  assert.match(source, /baselineData/);
+  assert.match(source, /baselineSource/);
   assert.match(source, /quality\/render-compare/);
+  assert.match(source, /report\.pageSelect/);
+  assert.match(source, /pages: \[page\]/);
+  assert.doesNotMatch(source, /pages: \[1\]/);
   assert.match(source, /quality\/check/);
   assert.doesNotMatch(source, /https?:\/\//);
 });

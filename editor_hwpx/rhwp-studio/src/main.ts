@@ -59,10 +59,15 @@ import {
 import { calculateFitPageZoom, calculateFitWidthZoom } from '@/view/zoom-fit';
 import { installEmbedRuntime } from '@/embed/runtime';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
+import { isEmbeddedWindow } from '@/command/host-file-lifecycle';
 
 const wasm = new WasmBridge();
 const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
+const hostControlsFileLifecycle = isEmbeddedWindow(window);
+if (hostControlsFileLifecycle) {
+  document.documentElement.dataset.hostControlledFileLifecycle = 'true';
+}
 documentState.installBeforeUnload(window);
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
@@ -149,6 +154,7 @@ function getContext(): EditorContext {
     showControlCodes: wasm.getShowControlCodes(),
     showParagraphMarks: wasm.getShowParagraphMarks(),
     isDirty: documentState.isDirty(),
+    hostControlsFileLifecycle,
     sourceFormat: hasDoc ? (wasm.getSourceFormat() as 'hwp' | 'hwpx' | 'hml') : undefined,
   };
 }

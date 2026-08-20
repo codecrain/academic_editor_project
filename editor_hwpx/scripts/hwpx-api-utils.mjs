@@ -3307,10 +3307,11 @@ export function verifyStructuralTarget(session, target, result = null) {
       );
     }
     if (result?.expectedImageSha256) {
+      const cellPathJson = Array.isArray(target.cellPath) ? JSON.stringify(target.cellPath) : '';
       const bytes = tryJson(() => session.doc.getControlImageData(
         target.sectionIndex,
         target.paragraphIndex,
-        '',
+        cellPathJson,
         target.controlIndex,
       ));
       const imageBytes = bytes?.length ? Buffer.from(bytes) : null;
@@ -3318,7 +3319,7 @@ export function verifyStructuralTarget(session, target, result = null) {
       const mimeType = tryJson(() => session.doc.getControlImageMime(
         target.sectionIndex,
         target.paragraphIndex,
-        '',
+        cellPathJson,
         target.controlIndex,
       ));
       if (!imageBytes || imageBytes.length !== result.expectedImageByteLength
@@ -3601,12 +3602,27 @@ export function verifyStructuralTarget(session, target, result = null) {
     const actualObjectCount = Array.isArray(objects)
       ? objects.filter(item => item.kind === target.objectKind).length
       : null;
-    if (!Number.isInteger(result?.expectedObjectCount)
-      || actualObjectCount !== result.expectedObjectCount) {
+    const targetStillPresent = Array.isArray(objects) && objects.some(item =>
+      item.kind === target.objectKind
+      && Number(item.para) === Number(target.paragraphIndex)
+      && Number(item.ctrlIdx ?? item.control ?? item.controlIndex) === Number(target.controlIndex));
+    // The binary-HWP native bridge can collapse adjacent picture controls in the
+    // same paragraph when one is deleted.  In that format the bridge reports a
+    // negative expected count sentinel; only that explicit sentinel permits a
+    // count exception.  A nonnegative expected count remains an exact gate.
+    const binaryHwpDeletion = !isZipPackage(session.inputBytes)
+      && Number.isInteger(result?.expectedObjectCount)
+      && Number.isInteger(actualObjectCount)
+      && result.expectedObjectCount < 0
+      && !targetStillPresent;
+    if ((!Number.isInteger(result?.expectedObjectCount)
+      || actualObjectCount !== result.expectedObjectCount)
+      && !binaryHwpDeletion) {
       throw structuralBatchError('HWPX_CREATED_TARGET_MISMATCH', 'Deleted object count did not survive reopening exactly.', {
         target,
         expectedObjectCount: result?.expectedObjectCount,
         actualObjectCount,
+        targetStillPresent,
       });
     }
     return;

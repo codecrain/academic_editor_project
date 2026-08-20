@@ -162,6 +162,59 @@ function addTextMarkup(pdfDoc, page, command) {
   page.node.addAnnot(pdfDoc.context.register(annotation));
 }
 
+function pdfValueText(value) {
+  if (!value) return '';
+  if (typeof value.decodeText === 'function') return value.decodeText();
+  if (typeof value.asString === 'function') return value.asString().replace(/^\//u, '');
+  return String(value);
+}
+
+function annotationColor(value) {
+  if (!value || typeof value.asArray !== 'function') return '#ffd166';
+  const channels = value.asArray().map((channel) => Number(channel?.asNumber?.() ?? 0));
+  if (channels.length < 3) return '#ffd166';
+  return `#${channels.slice(0, 3).map((channel) => (
+    Math.max(0, Math.min(255, Math.round(channel * 255))).toString(16).padStart(2, '0')
+  )).join('')}`;
+}
+
+function inspectPdfAnnotations(pdfDoc) {
+  return pdfDoc.getPages().flatMap((page, pageIndex) => {
+    const annotations = page.node.Annots();
+    if (!annotations) return [];
+    return annotations.asArray().flatMap((reference, annotationIndex) => {
+      const annotation = pdfDoc.context.lookup(reference, PDFDict);
+      if (!(annotation instanceof PDFDict)) return [];
+      const subtype = pdfValueText(annotation.get(PDFName.of('Subtype')));
+      const rect = annotation.get(PDFName.of('Rect'));
+      const values = rect?.asArray?.().map((value) => Number(value?.asNumber?.() ?? NaN));
+      if (!values || values.length !== 4 || values.some((value) => !Number.isFinite(value))) return [];
+      const [x1, y1, x2, y2] = values;
+      const left = Math.min(x1, x2);
+      const right = Math.max(x1, x2);
+      const bottom = Math.min(y1, y2);
+      const top = Math.max(y1, y2);
+      const pageHeight = page.getHeight();
+      return [{
+        id: `pdf-annotation-${pageIndex + 1}-${annotationIndex}`,
+        type: subtype === 'Text' ? 'comment' : 'annotation',
+        subtype,
+        page: pageIndex + 1,
+        editorBounds: {
+          x: left,
+          y: pageHeight - top,
+          width: Math.max(8, right - left),
+          height: Math.max(8, top - bottom),
+        },
+        text: pdfValueText(annotation.get(PDFName.of('Contents'))),
+        author: pdfValueText(annotation.get(PDFName.of('T'))),
+        icon: pdfValueText(annotation.get(PDFName.of('Name'))) || 'Comment',
+        color: annotationColor(annotation.get(PDFName.of('C'))),
+      }];
+    });
+  });
+}
+
 function setPageLabels(pdfDoc, command) {
   const styles = {
     decimal: 'D',
@@ -357,7 +410,7 @@ class PdfApiSession {
             kind: change.op === 'signature.addAppearance' ? 'signatureAppearance' : 'image',
           })),
         ],
-        annotations: this.changes.filter((change) => ['highlight.add', 'ink.add'].includes(change.op)),
+        annotations: inspectPdfAnnotations(this.pdfDoc),
         textObjects: this.objectInspection.textObjects,
         pageObjects: this.objectInspection.objects,
       },

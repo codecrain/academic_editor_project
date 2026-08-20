@@ -1,6 +1,7 @@
 import type { EventBus } from '@/core/event-bus';
 import type { CommandRegistry } from './registry';
 import type { CommandServices, EditorContext } from './types';
+import { isHostControlledFileCommand } from './host-file-lifecycle';
 
 const FORM_MODE_BLOCKED_IDS = new Set([
   'edit:cut',
@@ -54,6 +55,10 @@ function isBlockedInFormMode(commandId: string, ctx: EditorContext): boolean {
   return FORM_MODE_BLOCKED_PREFIXES.some(prefix => commandId.startsWith(prefix));
 }
 
+function isBlockedInHostControlledFileLifecycle(commandId: string, ctx: EditorContext): boolean {
+  return Boolean(ctx.hostControlsFileLifecycle) && isHostControlledFileCommand(commandId);
+}
+
 /** 통합 커맨드 디스패처: 메뉴/툴바/키보드 모든 입력의 단일 실행 경로 */
 export class CommandDispatcher {
   constructor(
@@ -78,6 +83,9 @@ export class CommandDispatcher {
       return false;
     }
     if (isBlockedInFormMode(commandId, ctx)) {
+      return false;
+    }
+    if (isBlockedInHostControlledFileLifecycle(commandId, ctx)) {
       return false;
     }
     if (def.canExecute && !def.canExecute(ctx)) {
@@ -106,6 +114,7 @@ export class CommandDispatcher {
     const ctx = this.services.getContext();
     if (isBlockedInReadOnlyPreview(commandId, ctx)) return false;
     if (isBlockedInFormMode(commandId, ctx)) return false;
+    if (isBlockedInHostControlledFileLifecycle(commandId, ctx)) return false;
     if (!def.canExecute) return true;
     return def.canExecute(ctx);
   }

@@ -48,6 +48,8 @@ export interface EditorContext {
   showParagraphMarks: boolean;
   /** 저장되지 않은 문서 변경사항이 있는가? */
   isDirty: boolean;
+  /** 임베드 호스트가 파일 수명주기(열기/저장 등)를 관리하는가? */
+  hostControlsFileLifecycle?: boolean;
   /** 원본 파일 형식 — 저장 시 출처 포맷 유지(HWPX→HWPX, HWP→HWP). 다른 포맷 저장은 별도 메뉴(#1613). */
   sourceFormat?: 'hwp' | 'hwpx' | 'hml';
 }

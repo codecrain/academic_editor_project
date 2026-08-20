@@ -93,11 +93,11 @@ test('gateway serves the PDF editor and only its pinned vendor entrypoints on /p
   }
 });
 
-async function samplePdf() {
+async function samplePdf(text = 'Gateway PDF API acceptance') {
   const document = await PDFDocument.create();
   const page = document.addPage([420, 594]);
   const font = await document.embedFont(StandardFonts.Helvetica);
-  page.drawText('Gateway PDF API acceptance', { x: 48, y: 520, size: 16, font });
+  page.drawText(text, { x: 48, y: 520, size: 16, font });
   return Buffer.from(await document.save());
 }
 
@@ -179,5 +179,54 @@ test('gateway exposes revision-bound PDF open, apply, quality, render, and save'
   } finally {
     await close(server);
     await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('gateway keeps a PDF comparison baseline separate from the working source', async () => {
+  const server = createGatewayServer({
+    host: '127.0.0.1',
+    port: 0,
+    publicOrigin: 'http://127.0.0.1',
+    docxServiceRoot: '/docx',
+    hwpxBasePath: '/hwpx/',
+    docxRuntimeOrigin: 'http://127.0.0.1:9980',
+    hwpxRuntimeOrigin: '',
+    hwpxStaticRoot: '',
+    wopiBaseUrl: 'http://127.0.0.1',
+    enableSampleDocx: false,
+  });
+  const address = await listen(server);
+  const origin = `http://127.0.0.1:${address.port}`;
+  const post = async (pathname, body) => {
+    const response = await fetch(`${origin}${pathname}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    assert.equal(response.ok, true, JSON.stringify(payload));
+    return payload;
+  };
+  try {
+    const original = await samplePdf('Immutable original source');
+    const working = await samplePdf('Saved working copy');
+    const opened = await post('/v1/pdf/documents/open', {
+      filename: 'working-copy.pdf',
+      source: { bytesBase64: working.toString('base64') },
+      baselineSource: { bytesBase64: original.toString('base64') },
+    });
+    const comparison = await post(`/v1/pdf/documents/${opened.documentId}/quality/render-compare`, {
+      baseRevision: opened.revision,
+      pages: [1],
+    });
+    assert.equal(comparison.baseline.pages[0].page, 1);
+    assert.equal(comparison.current.pages[0].page, 1);
+    assert.notEqual(
+      comparison.baseline.pages[0].sha256,
+      comparison.current.pages[0].sha256,
+      'comparison must render the original baseline and current working PDF separately',
+    );
+  } finally {
+    await close(server);
   }
 });

@@ -30,6 +30,38 @@ runTest('Issue #2186 @rhwp/editor MessageChannel v1 iframe transport', async ({ 
     const initialLength = sampleBuffer.byteLength;
     const loaded = await editor.loadFile(sampleBuffer, 'footnote-01.hwp');
     const publicDiagnostics = await editor.getRendererDiagnostics(0);
+    const embeddedFileLifecycle = (() => {
+      const iframe = editor.element;
+      const doc = iframe.contentDocument;
+      const hiddenCommands = [
+        'file:new-doc',
+        'file:open',
+        'file:save',
+        'file:save-as-hwp',
+        'file:save-as-hwpx',
+      ];
+      const entries = hiddenCommands.map((commandId) => {
+        const element = doc?.querySelector(`[data-cmd="${commandId}"]`);
+        return {
+          commandId,
+          present: Boolean(element),
+          display: element && iframe.contentWindow
+            ? iframe.contentWindow.getComputedStyle(element).display
+            : null,
+        };
+      });
+      const recent = doc?.querySelector('[data-recent]');
+      const saveAs = doc?.querySelector('[data-cmd="file:save-as"]');
+      return {
+        entries,
+        recentDisplay: recent && iframe.contentWindow
+          ? iframe.contentWindow.getComputedStyle(recent).display
+          : null,
+        saveAsDisplay: saveAs && iframe.contentWindow
+          ? iframe.contentWindow.getComputedStyle(saveAs).display
+          : null,
+      };
+    })();
     const callerBytesPreserved = sampleBuffer.byteLength === initialLength
       && sampleBefore.every((byte, index) => new Uint8Array(sampleBuffer)[index] === byte);
     const hwp = await editor.exportHwp();
@@ -44,6 +76,7 @@ runTest('Issue #2186 @rhwp/editor MessageChannel v1 iframe transport', async ({ 
     const legacy = await legacyReadyResult();
     return {
       pageCount: loaded.pageCount,
+      embeddedFileLifecycle,
       publicDiagnosticsSchema: publicDiagnostics.schemaVersion,
       publicDiagnosticsPage: publicDiagnostics.page?.index,
       publicDiagnosticsRequestBackend: publicDiagnostics.request?.backend?.backend,
@@ -142,6 +175,12 @@ runTest('Issue #2186 @rhwp/editor MessageChannel v1 iframe transport', async ({ 
 
   console.log(`  result: ${JSON.stringify(result)}`);
   assert(result.pageCount >= 1, 'public loadFile이 transferable HWP buffer를 Studio에 로드한다');
+  assert(result.embeddedFileLifecycle.entries.every((entry) => entry.present && entry.display === 'none'),
+    'iframe Studio는 호스트가 소유한 새로 만들기·열기·저장·HWP/HWPX 저장 메뉴를 숨긴다');
+  assert(result.embeddedFileLifecycle.recentDisplay === 'none',
+    'iframe Studio는 호스트가 소유한 최근 문서 메뉴를 숨긴다');
+  assert(result.embeddedFileLifecycle.saveAsDisplay !== 'none',
+    'iframe Studio의 별도 내보내기 메뉴는 유지한다');
   assert(result.publicDiagnosticsSchema === 1 && result.publicDiagnosticsPage === 0,
     'public getRendererDiagnostics가 versioned page snapshot을 반환한다');
   assert(result.publicDiagnosticsRequestBackend === 'canvas2d',

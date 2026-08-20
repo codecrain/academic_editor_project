@@ -27,7 +27,7 @@ editor_hwpx_artifact_delete
 
 Call `tools/list` for the exact JSON Schema. The command catalog remains the single source of truth and is available as `editor_hwpx_inspect(view="catalog")`. Version 3.3.0 contains 48 canonical operations. Do not hard-code that number or copy property allowlists into an agent prompt; inspect the current-revision catalog because source-format availability and fields are generated from the same executable contract used by validation.
 
-`image.insertInCell` fills an exact inspected cell from either `bytesBase64` or a cross-document `assetRef`. HWPX persists the image inline in the exact cell paragraph. Legacy binary HWP persists a bounded overlay whose center lies inside the inspected cell and returns `placementMode="cell-anchored-overlay"`. The editor verifies object persistence and geometry after save/reopen; the caller decides what the image means.
+`image.insertInCell` fills an exact inspected cell from either `bytesBase64` or a cross-document `assetRef`. HWPX persists the image inline in the exact cell paragraph. Legacy binary HWP persists a bounded, paper-relative overlay whose geometry is computed from the inspected cell at insertion time and returns `placementMode="cell-anchored-overlay"`. Save/reopen verifies the overlay's spatial containment, but the legacy format does not retain a nested cell anchor; any later reflowing mutation may invalidate the paper coordinate. Complete reflowing edits before this operation, make it the final layout mutation, and run the full-page review again.
 
 ## Integrated capability model
 
