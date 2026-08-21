@@ -1986,6 +1986,29 @@ function projectEditableTarget(target, kind) {
   };
 }
 
+function projectHwpxPageTarget(target) {
+  const capacity = target.layout?.capacity;
+  return {
+    kind: target.kind,
+    pageHint: target.pageHint,
+    text: target.text,
+    allowedActions: target.allowedActions,
+    layout: target.layout ? {
+      bbox: target.layout.bbox,
+      ...(capacity ? {
+        capacity: {
+          maxCharsPerLine: capacity.maxCharsPerLine,
+          maxLines: capacity.maxLines,
+          recommendedChars: capacity.recommendedChars,
+        },
+      } : {}),
+    } : null,
+    location: target.location,
+    ...(target.cellParagraphCount !== undefined ? { cellParagraphCount: target.cellParagraphCount } : {}),
+    ...(target.pictureCount !== undefined ? { pictureCount: target.pictureCount } : {}),
+  };
+}
+
 function paginateMcpItems({ items, offset, limit, envelope, nextCursor }) {
   if (offset > items.length) {
     throw new Error(`invalid_cursor: pagination offset ${offset} exceeds stream total ${items.length}.`);
@@ -2482,20 +2505,24 @@ async function renderHwpxBaselinePages(config, documentId, sourceBytes, pages) {
   };
 }
 
-function resolveRenderedCellTarget(json, provenance) {
-  const native = provenance?.native;
-  const cellNumber = Number(provenance?.cell?.number);
-  if (!native || !Number.isInteger(cellNumber) || cellNumber < 0) return null;
-  const table = (json.tables || []).find((candidate) => (
-    Number(candidate.section) === Number(native.section)
-    && Number(candidate.para) === Number(native.paragraph)
-    && Number(candidate.control) === Number(native.control)
-  ));
-  const cell = table?.cells?.find((candidate) => Number(candidate.cellIndex) === cellNumber);
-  if (!table || !cell) return null;
+function resolveRenderedCellTarget(targetMap, page, clip) {
+  const clipBox = [clip?.x, clip?.y, clip?.width, clip?.height].map(Number);
+  if (clipBox.some((value) => !Number.isFinite(value))) return null;
+  const sameCoordinate = (left, right) => Math.abs(Number(left) - Number(right)) <= 0.2;
+  const matches = (targetMap?.cells || []).filter((candidate) => {
+    const bbox = candidate?.layout?.bbox;
+    return Number(candidate?.pageHint) === Number(page)
+      && bbox
+      && sameCoordinate(bbox.x, clipBox[0])
+      && sameCoordinate(bbox.y, clipBox[1])
+      && sameCoordinate(bbox.w, clipBox[2])
+      && sameCoordinate(bbox.h, clipBox[3]);
+  });
+  if (matches.length !== 1) return null;
+  const cell = matches[0];
   return {
     targetId: cell.id,
-    tableId: table.id,
+    tableId: cell.location?.tableId,
     location: cell.location,
   };
 }
@@ -2520,7 +2547,7 @@ async function qualityWithRenderedLayout(session, options = {}) {
     message: 'Rendered table-cell content extends outside its clip rectangle.',
     page: page.page,
     ...issue,
-    ...(resolveRenderedCellTarget(json, issue.provenance) || {}),
+    ...(resolveRenderedCellTarget(targetMap, page.page, issue.clip) || {}),
   })));
   const blankPageIssues = rendered
     .filter((page) => page.nonBlank !== true)
@@ -2981,7 +3008,9 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         contractVersion: HWPX_MCP_CONTRACT.version,
         lifecycleTools: HWPX_MCP_CONTRACT.tools,
         inspectViews: HWPX_MCP_CONTRACT.inspectViews,
-        commandCatalog: catalog,
+        commandCount: catalog.commandCount,
+        availableCommandCount: catalog.availableCommandCount,
+        commandCategories: catalog.categories,
         integratedCapabilityFamilies: {
           documentUnderstanding: ['summary', 'outline', 'styles', 'search', 'fields', 'objects', 'page'],
           mutation: ['atomic command batch', 'field values', 'text', 'tables', 'styles', 'layout', 'images', 'objects'],
@@ -3042,12 +3071,19 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
         offset += (outlinePage.items || []).length;
         if (!(outlinePage.items || []).length) break;
       } while (offset < total);
+      const preconditions = recordPreconditions(record);
+      if (preconditions.inspectionRevision !== session.revision) preconditions.inspectedTargetKeys = new Set();
+      preconditions.inspectionRevision = session.revision;
+      pageTargets
+        .map((target) => hwpxAdapter.stableTargetKey(target.location))
+        .filter(Boolean)
+        .forEach((key) => preconditions.inspectedTargetKeys.add(key));
       sendJson(res, 200, {
         revision: session.revision,
         page,
         pageCount,
         render: rendered[0] || null,
-        targets: pageTargets.slice(0, returnLimit),
+        targets: pageTargets.slice(0, returnLimit).map(projectHwpxPageTarget),
         targetCoverage: {
           scannedDocumentTargets: total,
           matchedPageTargets: pageTargets.length,
@@ -3244,6 +3280,21 @@ async function handleEditorApiAction(req, res, config, state, fmt, id, actionPat
           `editor_hwpx_edit commandId values must be unique within an atomic batch: ${duplicateCommandIds.join(', ')}.`,
           422,
           { duplicateCommandIds },
+        );
+      }
+      const destinationKeys = commands.map((command) => {
+        const targetKey = hwpxAdapter.stableTargetKey(command?.location);
+        return targetKey ? `${String(command?.op || '')}:${targetKey}` : '';
+      });
+      const duplicateDestinations = [...new Set(destinationKeys.filter((destinationKey, index) => (
+        destinationKey && destinationKeys.indexOf(destinationKey) !== index
+      )))];
+      if (duplicateDestinations.length) {
+        throw new EditorContractError(
+          'duplicate_edit_destination',
+          `editor_hwpx_edit cannot write the same destination more than once with the same operation in one atomic batch: ${duplicateDestinations.join(', ')}. Combine each destination into one final command.`,
+          422,
+          { duplicateDestinations },
         );
       }
     }
@@ -5547,6 +5598,7 @@ export {
   normalizeBasePath,
   normalizeServiceRoot,
   resolveDocxUiLanguage,
+  resolveRenderedCellTarget,
   main,
   renderDocxPage,
   resolveDocxActionPath,

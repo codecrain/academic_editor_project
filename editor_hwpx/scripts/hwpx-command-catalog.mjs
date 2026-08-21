@@ -1517,7 +1517,7 @@ function getHwpxCommandCatalog({ category, op, sourceFormat = 'hwpx' } = {}) {
       fields: Object.freeze(publishedFields),
       example: Object.freeze({ commandId: `example-${entry.op.replace(/[^a-z0-9]+/gi, '-')}`, ...entry.example }),
       precondition: entry.precondition === 'target_inspect'
-        ? 'editor_hwpx_inspect(view="target")'
+        ? 'editor_hwpx_inspect(view="page"|"target")'
         : entry.precondition === 'object_inventory'
           ? 'editor_hwpx_inspect(view="objects")'
           : entry.precondition === 'field_inventory'

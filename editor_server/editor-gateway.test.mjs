@@ -22,6 +22,7 @@ import {
   normalizeBasePath,
   normalizeServiceRoot,
   resolveDocxUiLanguage,
+  resolveRenderedCellTarget,
   renderDocxPage,
   resolveDocxActionPath,
   resolveStaticPath,
@@ -37,6 +38,35 @@ import { HwpxApiSession, initHwpxRuntime } from '../editor_hwpx/scripts/hwpx-api
 
 const FAKE_PDF_BYTES = Buffer.from('%PDF-1.4\n%%EOF\n');
 const FAKE_WEBP_BYTES = Buffer.from('RIFF\x04\x00\x00\x00WEBP', 'binary');
+
+test('rendered cell clipping resolves to one exact editable location', () => {
+  const location = { tableId: 'tbl_1', cell: { number: 27, row: 5, column: 2 } };
+  const targetMap = {
+    cells: [{
+      id: 'tbl_1_cell_27',
+      pageHint: 2,
+      location,
+      layout: { bbox: { x: 340.2, y: 370.7, w: 113.4, h: 49.6 } },
+    }],
+  };
+
+  assert.deepEqual(resolveRenderedCellTarget(targetMap, 2, {
+    x: 340.16,
+    y: 370.69289617486345,
+    width: 113.38666666666671,
+    height: 49.573770491803316,
+  }), {
+    targetId: 'tbl_1_cell_27',
+    tableId: 'tbl_1',
+    location,
+  });
+  assert.equal(resolveRenderedCellTarget(targetMap, 1, {
+    x: 340.16,
+    y: 370.69289617486345,
+    width: 113.38666666666671,
+    height: 49.573770491803316,
+  }), null);
+});
 
 test('mixed HWPX text and structural batch rolls back bytes and revision on failure', async () => {
   await initHwpxRuntime();
@@ -2142,7 +2172,7 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     const capabilities = capabilitiesCall.result.structuredContent;
     assert.equal(capabilities.contractVersion, '3.3.0');
     assert.equal(capabilities.lifecycleTools.length, 9);
-    assert.equal(capabilities.commandCatalog.commandCount, 48);
+    assert.equal(capabilities.commandCount, 48);
     assert.ok(capabilities.inspectViews.includes('fields'));
     assert.ok(capabilities.integratedCapabilityFamilies.assurance.includes('security'));
 
@@ -2237,6 +2267,24 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
     const pageWithSvg = pageWithSvgCall.result.structuredContent.render;
     assert.equal(Buffer.byteLength(pageWithSvg.svg, 'utf8'), pageWithSvg.svgByteLength);
     assert.equal(createHash('sha256').update(pageWithSvg.svg).digest('hex'), pageWithSvg.svgSha256);
+
+    const duplicateDestinationCall = await mcp('editor_hwpx_edit', {
+      documentId: opened.documentId,
+      baseRevision: opened.revision,
+      commands: [{
+        commandId: 'duplicate-destination-a',
+        op: 'text.replaceParagraph',
+        location: paragraph.location,
+        text: 'first value',
+      }, {
+        commandId: 'duplicate-destination-b',
+        op: 'text.replaceParagraph',
+        location: paragraph.location,
+        text: 'second value',
+      }],
+    });
+    assert.equal(duplicateDestinationCall.result.isError, true);
+    assert.equal(duplicateDestinationCall.result.structuredContent.code, 'duplicate_edit_destination');
 
     const templateCall = await mcp('editor_hwpx_inspect', {
       documentId: opened.documentId,
@@ -2470,15 +2518,25 @@ test('gateway exposes the canonical HWPX inspect, edit, review, save lifecycle',
       bytesBase64: hwpSourceBytes.toString('base64'),
     });
     const hwpOpened = hwpOpenedCall.result.structuredContent;
-    const hwpCatalogCall = await mcp('editor_hwpx_inspect', {
+    const hwpCapabilitiesCall = await mcp('editor_hwpx_inspect', {
+      documentId: hwpOpened.documentId,
+      view: 'capabilities',
+    });
+    const hwpCapabilities = hwpCapabilitiesCall.result.structuredContent;
+    assert.ok(hwpCapabilities.availableCommandCount < hwpCapabilities.commandCount);
+    const hwpReplaceCatalogCall = await mcp('editor_hwpx_inspect', {
       documentId: hwpOpened.documentId,
       view: 'catalog',
+      op: 'image.replace',
     });
-    const hwpCatalog = hwpCatalogCall.result.structuredContent;
-    assert.equal(hwpCatalog.sourceFormat, 'hwp');
-    assert.ok(hwpCatalog.availableCommandCount < hwpCatalog.commandCount);
-    assert.equal(hwpCatalog.commands.find(entry => entry.op === 'image.replace').readiness, 'unavailable-for-source-format');
-    assert.equal(hwpCatalog.commands.find(entry => entry.op === 'image.insertAfterParagraph').readiness, 'available');
+    assert.equal(hwpReplaceCatalogCall.result.structuredContent.sourceFormat, 'hwp');
+    assert.equal(hwpReplaceCatalogCall.result.structuredContent.commands[0].readiness, 'unavailable-for-source-format');
+    const hwpInsertCatalogCall = await mcp('editor_hwpx_inspect', {
+      documentId: hwpOpened.documentId,
+      view: 'catalog',
+      op: 'image.insertAfterParagraph',
+    });
+    assert.equal(hwpInsertCatalogCall.result.structuredContent.commands[0].readiness, 'available');
     const hwpOutlineCall = await mcp('editor_hwpx_inspect', {
       documentId: hwpOpened.documentId,
       view: 'outline',

@@ -196,14 +196,15 @@ test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', a
     [...tools.keys()].filter((name) => name.startsWith('editor_hwpx_')),
     HWPX_MCP_CONTRACT.tools,
   );
-  const opEnum = tools.get('editor_hwpx_edit').inputSchema.properties.commands.items.properties.op.enum;
+  const commandSchemas = tools.get('editor_hwpx_edit').inputSchema.properties.commands.items.oneOf;
+  const opEnum = commandSchemas.map((schema) => schema.properties.op.enum[0]);
   assert.ok(opEnum.includes('text.replaceParagraph'));
   assert.ok(opEnum.includes('object.replaceTextBoxText'));
   assert.ok(opEnum.includes('setDocumentMetadata'));
   assert.ok(opEnum.includes('table.autoFit'));
   assert.ok(opEnum.includes('field.setValues'));
   assert.deepEqual(
-    tools.get('editor_hwpx_inspect').inputSchema.properties.view.enum,
+    tools.get('editor_hwpx_inspect').inputSchema.oneOf.map((schema) => schema.properties.view.enum[0]),
     ['summary', 'outline', 'styles', 'target', 'objects', 'template', 'page', 'quality', 'catalog', 'search', 'fields', 'security', 'history', 'capabilities'],
   );
   assert.equal(tools.has('editor_hwpx_semantic_context'), false);
@@ -212,6 +213,121 @@ test('MCP advertises one canonical HWPX lifecycle with the HWPX command enum', a
   assert.deepEqual(tools.get('editor_hwpx_save').inputSchema.properties.mode.enum, HWPX_MCP_CONTRACT.saveModes);
   assert.equal(tools.get('editor_hwpx_open').annotations.readOnlyHint, false);
   assert.equal(tools.get('editor_hwpx_export_pdf').annotations.readOnlyHint, false);
+});
+
+test('HWPX MCP rejects fields from a different command operation before execution', async () => {
+  let executed = false;
+  const response = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'editor_hwpx_edit',
+      arguments: {
+        documentId: 'doc_1',
+        baseRevision: 1,
+        commands: [{
+          commandId: 'write-cell-1',
+          op: 'table.writeCell',
+          target: { tableId: 'tbl_0', cell: { number: 3 } },
+          styleRef: { documentId: 'doc_1', location: {} },
+        }],
+      },
+    },
+  }, {
+    executeTool: async () => {
+      executed = true;
+      return { ok: true };
+    },
+  });
+
+  assert.equal(response.result.isError, true);
+  assert.equal(response.result.structuredContent.code, 'invalid_tool_arguments');
+  assert.equal(executed, false);
+
+  const writeCell = HWPX_MCP_TOOLS
+    .find((tool) => tool.name === 'editor_hwpx_edit')
+    .inputSchema.properties.commands.items.oneOf
+    .find((schema) => schema.properties.op.enum[0] === 'table.writeCell');
+  assert.deepEqual(writeCell.required, ['op', 'location', 'text', 'commandId']);
+  assert.deepEqual(writeCell.examples, [{
+    op: 'table.writeCell',
+    location: { tableId: 'tbl_0', cell: { number: 1 } },
+    text: '18,420',
+    commandId: 'example-table-writeCell',
+  }]);
+  assert.equal(writeCell.additionalProperties, false);
+  assert.equal(writeCell.properties.location.type, 'object');
+  assert.equal(writeCell.properties.location.oneOf[1].required[0], 'tableId');
+  assert.equal(writeCell.properties.text.type, 'string');
+  assert.equal(writeCell.properties.target, undefined);
+  assert.equal(writeCell.properties.styleRef, undefined);
+});
+
+test('HWPX inspect schema publishes page and filtered-catalog arguments used by clients', () => {
+  const inspect = HWPX_MCP_TOOLS.find((tool) => tool.name === 'editor_hwpx_inspect');
+  const branch = (view) => inspect.inputSchema.oneOf
+    .find((schema) => schema.properties.view.enum[0] === view);
+  assert.equal(branch('page').properties.limit.maximum, 120);
+  assert.equal(branch('page').properties.textPreviewChars.maximum, 512);
+  assert.deepEqual(
+    branch('capabilities').properties.category.enum,
+    [...HWPX_MCP_CONTRACT.commandCategories],
+  );
+  assert.deepEqual(
+    branch('catalog').properties.op.enum,
+    [...HWPX_MCP_CONTRACT.commandOps],
+  );
+  assert.deepEqual(branch('target').examples[0].locations, [
+    { tableId: 'tbl_0', cell: { number: 1 } },
+  ]);
+  assert.deepEqual(branch('page').required, ['documentId', 'view', 'page']);
+  assert.deepEqual(branch('catalog').required, ['documentId', 'view', 'op']);
+});
+
+test('HWPX inspect rejects a target view without a query or exact locations', async () => {
+  let executed = false;
+  const response = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'editor_hwpx_inspect',
+      arguments: { documentId: 'doc_1', view: 'target' },
+    },
+  }, {
+    executeTool: async () => {
+      executed = true;
+      return { ok: true };
+    },
+  });
+  assert.equal(response.result.isError, true);
+  assert.equal(response.result.structuredContent.code, 'invalid_tool_arguments');
+  assert.ok(response.result.structuredContent.issues.some((issue) => issue.includes('locations')));
+  assert.ok(response.result.structuredContent.issues.some((issue) => issue.includes('query')));
+  assert.equal(executed, false);
+});
+
+test('HWPX inspect rejects an unfiltered full command catalog request', async () => {
+  let executed = false;
+  const response = await handleEditorMcpJsonRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'editor_hwpx_inspect',
+      arguments: { documentId: 'doc_1', view: 'catalog' },
+    },
+  }, {
+    executeTool: async () => {
+      executed = true;
+      return { ok: true };
+    },
+  });
+  assert.equal(response.result.isError, true);
+  assert.equal(response.result.structuredContent.code, 'invalid_tool_arguments');
+  assert.ok(response.result.structuredContent.issues.some((issue) => issue.includes('op')));
+  assert.equal(executed, false);
 });
 
 test('MCP initialize publishes the complete current HWPX lifecycle', async () => {

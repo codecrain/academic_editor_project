@@ -5,7 +5,6 @@ import { pdfAdapter } from './format-adapters/pdf-adapter.mjs';
 import {
   ACADEMIC_EDITOR_MCP_INSTRUCTIONS,
   HWPX_MCP_CONTRACT_VERSION,
-  HWPX_MCP_INSPECT_VIEWS,
   HWPX_MCP_SAVE_MODES,
   HWPX_MCP_TOOL_NAMES,
 } from './hwpx-mcp-contract.mjs';
@@ -85,6 +84,189 @@ const HWPX_SECURITY_POLICY = {
   },
 };
 
+const HWPX_ASSET_REF = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['documentId', 'imageName'],
+  properties: {
+    documentId: HWPX_DOCUMENT_ID,
+    imageName: { type: 'string', minLength: 1, maxLength: 512 },
+  },
+};
+const HWPX_STYLE_REF = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['documentId', 'location', 'scope'],
+  properties: {
+    documentId: HWPX_DOCUMENT_ID,
+    location: { type: 'object', additionalProperties: true },
+    scope: { type: 'string', enum: ['character', 'paragraph', 'cell', 'table'] },
+  },
+};
+const HWPX_STABLE_LOCATION = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    paragraph: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['section', 'number'],
+      properties: {
+        section: { type: 'integer', minimum: 0 },
+        number: { type: 'integer', minimum: 0 },
+      },
+    },
+    tableId: { type: 'string', minLength: 1, maxLength: 128 },
+    cell: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['number'],
+      properties: {
+        number: { type: 'integer', minimum: 0 },
+        row: { type: 'integer', minimum: 0 },
+        column: { type: 'integer', minimum: 0 },
+      },
+    },
+  },
+  oneOf: [
+    { required: ['paragraph'] },
+    { required: ['tableId', 'cell'] },
+  ],
+};
+
+function hwpxCommandPropertySchema(entry, field) {
+  if (field === 'op') return { type: 'string', enum: [entry.op] };
+  if (field === 'commandId') {
+    return {
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
+      description: 'Unique stable ID within this atomic batch.',
+    };
+  }
+  if (field === 'assetRef') return HWPX_ASSET_REF;
+  if (field === 'styleRef') return HWPX_STYLE_REF;
+  if (field === 'location' || field === 'styleSource') return HWPX_STABLE_LOCATION;
+  if (field === 'locations') {
+    return { type: 'array', minItems: 1, items: HWPX_STABLE_LOCATION };
+  }
+  const example = entry.example?.[field];
+  const exampleType = (() => {
+    if (Array.isArray(example)) return { type: 'array' };
+    if (example && typeof example === 'object') return { type: 'object', additionalProperties: true };
+    if (typeof example === 'string') return { type: 'string' };
+    if (typeof example === 'boolean') return { type: 'boolean' };
+    if (typeof example === 'number') return { type: Number.isInteger(example) ? 'integer' : 'number' };
+    return {};
+  })();
+  return {
+    ...exampleType,
+    ...(example !== undefined ? { examples: [example] } : {}),
+  };
+}
+
+const HWPX_EDIT_COMMAND_SCHEMAS = Object.freeze(
+  hwpxAdapter.commandCatalog({ sourceFormat: 'hwpx' }).commands.map((entry) => {
+    const fields = [...new Set([
+      ...Object.keys(entry.fields || {}),
+      ...(entry.required || []),
+      ...(entry.optional || []),
+      ...(entry.anyOf || []).flat(),
+    ])];
+    return {
+      type: 'object',
+      description: `${entry.description} Required fields: ${entry.required.join(', ')}. Allowed fields: ${fields.join(', ')}. Precondition: ${entry.precondition}.`,
+      examples: [{ ...entry.example, commandId: `example-${entry.op.replaceAll('.', '-')}` }],
+      additionalProperties: false,
+      required: [...entry.required],
+      properties: Object.fromEntries(
+        fields.map((field) => [field, hwpxCommandPropertySchema(entry, field)]),
+      ),
+      ...((entry.anyOf?.[0]?.length || 0) > 0
+        ? { anyOf: entry.anyOf[0].map((field) => ({ required: [field] })) }
+        : {}),
+    };
+  }),
+);
+
+function hwpxInspectSchema(view, properties = {}, required = [], example = {}) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['documentId', 'view', ...required],
+    properties: {
+      documentId: HWPX_DOCUMENT_ID,
+      view: { type: 'string', enum: [view] },
+      baseRevision: HWPX_REVISION,
+      ...properties,
+    },
+    examples: [{ documentId: 'doc_from_editor_hwpx_open', view, baseRevision: 1, ...example }],
+  };
+}
+
+const HWPX_INSPECT_SCHEMAS = Object.freeze([
+  hwpxInspectSchema('summary', {
+    cursor: { type: 'string', minLength: 1, maxLength: 2048 },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+    textPreviewChars: { type: 'integer', minimum: 32, maximum: 512, default: 200 },
+    cellPreviewLimit: { type: 'integer', minimum: 0, maximum: 12, default: 3 },
+  }),
+  hwpxInspectSchema('outline', {
+    kind: { type: 'string', enum: ['paragraph', 'cell'] },
+    cursor: { type: 'string', minLength: 1, maxLength: 2048 },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+    textPreviewChars: { type: 'integer', minimum: 32, maximum: 512, default: 200 },
+  }),
+  hwpxInspectSchema('styles', {
+    cursor: { type: 'string', minLength: 1, maxLength: 2048 },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+  }),
+  hwpxInspectSchema('target', {
+    query: { type: 'string', minLength: 1, maxLength: 2000 },
+    match: { type: 'object', additionalProperties: true },
+    locations: { type: 'array', minItems: 1, maxItems: 120, items: HWPX_STABLE_LOCATION },
+  }, [], { locations: [{ tableId: 'tbl_0', cell: { number: 1 } }] }),
+  hwpxInspectSchema('objects'),
+  hwpxInspectSchema('template'),
+  hwpxInspectSchema('page', {
+    page: { type: 'integer', minimum: 1 },
+    kind: { type: 'string', enum: ['paragraph', 'cell'] },
+    includeSvg: { type: 'boolean', default: false },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+    textPreviewChars: { type: 'integer', minimum: 32, maximum: 512, default: 200 },
+  }, ['page'], { page: 1 }),
+  hwpxInspectSchema('quality', {
+    expectations: HWPX_EXPECTATIONS,
+    securityPolicy: HWPX_SECURITY_POLICY,
+  }),
+  hwpxInspectSchema('catalog', {
+    op: { type: 'string', enum: [...hwpxAdapter.commandOps] },
+  }, ['op'], { op: 'table.writeCell' }),
+  hwpxInspectSchema('search', {
+    query: { type: 'string', minLength: 1, maxLength: 2000 },
+    match: { type: 'object', additionalProperties: true },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+  }, ['query'], { query: 'search text' }),
+  hwpxInspectSchema('fields', {
+    query: { type: 'string', minLength: 1, maxLength: 2000 },
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+  }),
+  hwpxInspectSchema('security', { securityPolicy: HWPX_SECURITY_POLICY }),
+  hwpxInspectSchema('history', {
+    limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
+  }),
+  hwpxInspectSchema('capabilities', {
+    category: { type: 'string', enum: [...hwpxAdapter.commandCategories] },
+    op: { type: 'string', enum: [...hwpxAdapter.commandOps] },
+  }),
+].map((schema) => {
+  if (schema.properties.view.enum[0] !== 'target') return schema;
+  return {
+    ...schema,
+    anyOf: [{ required: ['locations'] }, { required: ['query'] }],
+  };
+}));
+
 // HWPX has one canonical lifecycle surface.  The low-level HTTP routes and
 // command catalog remain engine implementation details; MCP callers do not
 // need separate read/map/find/inspect tools for the same state.
@@ -104,64 +286,24 @@ const HWPX_MCP_TOOLS = Object.freeze([
   },
   {
     name: HWPX_MCP_TOOL_NAMES.inspect,
-    description: 'Read one coherent, bounded view of the current HWPX. The same tool covers structure, exact targets, search, fields, objects, security, mutation history, quality, and live capabilities.',
-    inputSchema: objectSchema({
-      documentId: HWPX_DOCUMENT_ID,
-      view: { type: 'string', enum: [...HWPX_MCP_INSPECT_VIEWS] },
-      baseRevision: HWPX_REVISION,
-      kind: { type: ['string', 'null'], enum: ['paragraph', 'cell', null] },
-      query: { type: ['string', 'null'], minLength: 1, maxLength: 2000 },
-      match: { type: ['object', 'null'], additionalProperties: true },
-      locations: { type: ['array', 'null'], minItems: 1, maxItems: 120, items: { type: 'object', additionalProperties: true } },
-      tableId: { type: ['string', 'null'], minLength: 1, maxLength: 128 },
-      page: { type: ['integer', 'null'], minimum: 1 },
-      includeSvg: { type: 'boolean', default: false },
-      expectations: HWPX_EXPECTATIONS,
-      securityPolicy: HWPX_SECURITY_POLICY,
-      category: { type: ['string', 'null'], enum: [...hwpxAdapter.commandCategories, null] },
-      op: { type: ['string', 'null'] },
-      limit: { type: 'integer', minimum: 1, maximum: 120, default: 60 },
-      cursor: { type: ['string', 'null'], minLength: 1, maxLength: 2048 },
-      textPreviewChars: { type: 'integer', minimum: 32, maximum: 512, default: 200 },
-      cellPreviewLimit: { type: 'integer', minimum: 0, maximum: 12, default: 3 },
-    }, ['documentId', 'view']),
+    description: 'Read one coherent, bounded view of the current HWPX. Choose one complete input alternative from the schema; page requires page, target requires locations or query, search requires query, and catalog requires an exact op.',
+    inputSchema: {
+      oneOf: HWPX_INSPECT_SCHEMAS,
+    },
     annotations: HWPX_READ_ONLY,
   },
   {
     name: HWPX_MCP_TOOL_NAMES.edit,
-    description: 'Apply one atomic batch of current-catalog commands to exact inspected targets at the current revision. Multi-paragraph cell formatting requires cellParagraphIndex; table.autoFit uses reopened pagination budgets. Returns receipts and the new revision; run editor_hwpx_review before saving.',
+    description: 'Apply one atomic batch of current-catalog commands to exact targets inspected at the same current revision. Always include the current documentId and baseRevision. Location fields are JSON objects, never quoted object text. Multi-paragraph cell formatting requires cellParagraphIndex; table.autoFit uses reopened pagination budgets. Returns receipts and the new revision; run editor_hwpx_review before saving.',
     inputSchema: objectSchema({
       documentId: HWPX_DOCUMENT_ID,
       baseRevision: HWPX_REVISION,
       commands: {
-        type: 'array', minItems: 1, maxItems: 100,
-        items: {
-          type: 'object', additionalProperties: true,
-          required: ['op', 'commandId'],
-          properties: {
-            op: { type: 'string', enum: [...hwpxAdapter.commandOps] },
-            commandId: { type: 'string', minLength: 1, maxLength: 128 },
-            assetRef: {
-              type: 'object',
-              additionalProperties: false,
-              required: ['documentId', 'imageName'],
-              properties: {
-                documentId: HWPX_DOCUMENT_ID,
-                imageName: { type: 'string', minLength: 1, maxLength: 512 },
-              },
-            },
-            styleRef: {
-              type: 'object',
-              additionalProperties: false,
-              required: ['documentId', 'location'],
-              properties: {
-                documentId: HWPX_DOCUMENT_ID,
-                location: { type: 'object', additionalProperties: true },
-                scope: { type: ['string', 'null'], enum: ['character', 'paragraph', 'cell', 'table', null] },
-              },
-            },
-          },
-        },
+        type: 'array',
+        minItems: 1,
+        maxItems: 100,
+        description: 'Current-catalog commands. Every commandId must be unique, and the same operation cannot write the same exact destination twice within one atomic batch. Combine each destination into one final command.',
+        items: { oneOf: HWPX_EDIT_COMMAND_SCHEMAS },
       },
       preservationPolicy: {
         type: ['object', 'null'],
@@ -313,6 +455,14 @@ function schemaValuesEqual(left, right) {
   return left === right || JSON.stringify(left) === JSON.stringify(right);
 }
 
+function schemaDiscriminatorScore(value, schema) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return 0;
+  return Object.entries(schema.properties ?? {}).reduce((score, [key, property]) => {
+    if (!Object.hasOwn(value, key) || !Array.isArray(property.enum)) return score;
+    return score + (property.enum.some((candidate) => schemaValuesEqual(candidate, value[key])) ? 1 : 0);
+  }, 0);
+}
+
 function validateJsonSchema(value, schema = {}, path = '$') {
   const issues = [];
   const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
@@ -323,9 +473,29 @@ function validateJsonSchema(value, schema = {}, path = '$') {
     issues.push(`${path} must be one of the declared enum values`);
   }
   if (schema.oneOf) {
-    const matches = schema.oneOf.filter((candidate) => validateJsonSchema(value, candidate, path).length === 0).length;
+    const alternatives = schema.oneOf.map((candidate) => validateJsonSchema(value, candidate, path));
+    const matches = alternatives.filter((candidateIssues) => candidateIssues.length === 0).length;
     if (matches !== 1) {
       issues.push(`${path} must match exactly one of the declared alternatives`);
+      if (matches === 0 && alternatives.length) {
+        const ranked = alternatives.map((candidateIssues, index) => ({
+          candidateIssues,
+          discriminatorScore: schemaDiscriminatorScore(value, schema.oneOf[index]),
+        })).sort((left, right) => (
+          right.discriminatorScore - left.discriminatorScore
+          || left.candidateIssues.length - right.candidateIssues.length
+        ));
+        const closest = ranked[0].candidateIssues;
+        issues.push(...closest);
+      }
+    }
+  }
+  if (schema.anyOf) {
+    const alternatives = schema.anyOf.map((candidate) => validateJsonSchema(value, candidate, path));
+    const matches = alternatives.some((candidateIssues) => candidateIssues.length === 0);
+    if (!matches) {
+      issues.push(`${path} must match at least one of the declared alternatives`);
+      issues.push(...alternatives.flat());
     }
   }
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {

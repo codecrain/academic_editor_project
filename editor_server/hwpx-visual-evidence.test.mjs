@@ -40,6 +40,7 @@ test('visual evidence reports exact style distribution and target flow facts', (
   assert.equal(result.styles.dominantFont, 'A');
   assert.equal(result.styles.dominantFontRatio, 2 / 3);
   assert.equal(result.targetFlow.targetCount, 1);
-  assert.equal(result.targetFlow.examples[0].page, 2);
-  assert.equal(result.targetFlow.examples[0].hierarchy.outlineLevel, 0);
+  assert.deepEqual(result.targetFlow.pageCounts, { 2: 1 });
+  assert.deepEqual(result.targetFlow.hierarchyCounts, { 'unknown:unknown': 1 });
+  assert.equal(result.targetFlow.fullEvidenceView, 'editor_hwpx_inspect(view="outline")');
 });

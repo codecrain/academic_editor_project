@@ -110,20 +110,10 @@ function analyzeTargetFlow(targetMap) {
     const key = `${hierarchy.headType ?? 'unknown'}:${hierarchy.paraLevel ?? 'unknown'}`;
     hierarchyCounts.set(key, (hierarchyCounts.get(key) || 0) + 1);
   }
-  const project = (target) => ({
-    targetId: target.id || target.targetId,
-    kind: target.kind,
-    page: target.pageHint ?? null,
-    textPreview: String(target.text ?? target.currentText ?? '').trim().slice(0, 160),
-    hierarchy: target.hierarchy || null,
-    characterFormat: target.characterFormat || null,
-  });
   return {
     targetCount: targets.length,
     pageCounts: Object.fromEntries(pageCounts),
     hierarchyCounts: Object.fromEntries(hierarchyCounts),
-    examples: targets.slice(0, 20).map(project),
-    examplesTruncated: targets.length > 20,
     fullEvidenceView: 'editor_hwpx_inspect(view="outline")',
   };
 }
